@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fetchpdf"
+version = "0.1.0"
+description = "A comprehensive tool to download PDFs from DOIs using multiple sources"
+readme = "README.md"
+authors = [
+    {name = "Dan Elton", email = "delton17@gmail.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/The-Metascience-Observatory/fetchpdf"
+Repository = "https://github.com/The-Metascience-Observatory/fetchpdf"
+Issues = "https://github.com/The-Metascience-Observatory/fetchpdf/issues"
+
+[project.scripts]
+fetchpdf = "fetchpdf.fetch_pdf_from_doi:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fetchpdf*"]
+exclude = ["tests*"]
