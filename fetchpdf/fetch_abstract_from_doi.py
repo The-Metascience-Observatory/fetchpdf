@@ -41,14 +41,14 @@ _JUNK_ABSTRACT_KEYWORDS = [
 
 
 def _is_empty_abstract(text):
-    """Return True if text is a placeholder or junk content (cookie banners, login pages)."""
+    """Return True if text is a placeholder or scraped junk (cookie banners, login pages)."""
     if not text:
         return True
     t = text.strip()
     if _EMPTY_ABSTRACT_PATTERNS.match(t):
         return True
     tl = t.lower()
-    # Website junk: cookie banners, login walls, nav menus
+    # Scraped website junk: cookie banners, login walls, nav menus
     if sum(1 for kw in _JUNK_ABSTRACT_KEYWORDS if kw in tl) >= 3:
         return True
     return False

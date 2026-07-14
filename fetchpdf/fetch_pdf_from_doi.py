@@ -6,6 +6,7 @@ import html
 import shutil
 import tempfile
 import subprocess
+import threading
 import requests
 import urllib3
 from requests.exceptions import SSLError
@@ -37,6 +38,7 @@ _ENTREZ_API_KEY = os.getenv("ENTREZ_EUTILS_API_KEY")   # NCBI E-utils: 3→10 re
 # Session-level state for providers that should be disabled after a fatal auth error.
 # These are shared across all ThreadPoolExecutor workers in a single batch run.
 _CORE_SESSION_DISABLED = False
+_CORE_SESSION_DISABLE_REASON = ""
 
 # Suppress InsecureRequestWarning when we fall back to verify=False for sites with SSL issues
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -89,6 +91,56 @@ def _get_with_retries(url, timeout=15, retries=3, backoff=0.5, **kwargs):
             if attempt < retries - 1:
                 time.sleep(backoff * (2 ** attempt))
     raise last_exc
+
+
+# Session-level circuit breaker for the PubMed *website* (pubmed.ncbi.nlm.nih.gov).
+# The NCBI website — unlike the E-utilities API (eutils.ncbi.nlm.nih.gov) — throttles
+# aggressively under parallel load and returns slow 15s read-timeouts. Several deep
+# fallbacks scrape it per paper, so a throttled NCBI can burn 30-45s of dead time on
+# every remaining DOI. Once it has timed out a few times we stop scraping it for the
+# rest of the run. DOI/metadata resolution via E-utilities and Europe PMC is unaffected.
+_PUBMED_WEB_DISABLED = False
+_PUBMED_WEB_TIMEOUT_COUNT = 0
+_PUBMED_WEB_LOCK = threading.Lock()
+
+
+def _get_pubmed_web_html(pmid, verbose=False, timeout=10):
+    """Fetch a PubMed abstract page (the website) with retries + a session circuit breaker.
+
+    Returns the page HTML on success, else None. After repeated read-timeouts it disables
+    further PubMed-website scraping for the rest of the session so doomed scrapes fail fast.
+    """
+    global _PUBMED_WEB_DISABLED, _PUBMED_WEB_TIMEOUT_COUNT
+    from requests.exceptions import Timeout, ConnectionError as _ReqConnErr
+    if _PUBMED_WEB_DISABLED or not pmid:
+        return None
+    try:
+        r = _get_with_retries(
+            f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            headers=headers,
+            timeout=timeout,
+            retries=2,
+        )
+        if r.status_code == 200 and r.text:
+            return r.text
+        return None
+    except (Timeout, _ReqConnErr) as e:
+        with _PUBMED_WEB_LOCK:
+            _PUBMED_WEB_TIMEOUT_COUNT += 1
+            if _PUBMED_WEB_TIMEOUT_COUNT >= 3 and not _PUBMED_WEB_DISABLED:
+                _PUBMED_WEB_DISABLED = True
+                _print_yellow_warning(
+                    "⚠️  PubMed website (pubmed.ncbi.nlm.nih.gov) repeatedly timed out; "
+                    "disabling PubMed-web scraping for this session. "
+                    "DOI/metadata lookups via E-utilities & Europe PMC are unaffected."
+                )
+        if verbose:
+            print(f"  PubMed web fetch failed for {pmid}: {str(e)[:100]}")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  PubMed web fetch error for {pmid}: {str(e)[:100]}")
+        return None
 
 
 def _record_source(_source_out, source):
@@ -407,7 +459,7 @@ def pmid_to_doi(pmid: str, verbose=False):
     # 2) PubMed EFetch XML (ArticleId IdType=doi / ELocationID)
     try:
         xml_text = ""
-        r = requests.get(
+        r = _get_with_retries(
             _ncbi_url(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"),
             timeout=12,
         )
@@ -465,15 +517,11 @@ def pmid_to_doi(pmid: str, verbose=False):
 
     # 4) PubMed HTML meta tag fallback
     try:
-        r = requests.get(
-            f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            headers=headers,
-            timeout=12,
-        )
-        if r.status_code == 200 and r.text:
+        page_text = _get_pubmed_web_html(pmid, verbose=verbose)
+        if page_text:
             m = re.search(
                 r'<meta[^>]+name=["\']citation_doi["\'][^>]+content=["\']([^"\']+)["\']',
-                r.text,
+                page_text,
                 re.IGNORECASE,
             )
             if m:
@@ -481,7 +529,7 @@ def pmid_to_doi(pmid: str, verbose=False):
                 if doi:
                     return doi
 
-            fallback_doi = _first_doi_from_text(r.text)
+            fallback_doi = _first_doi_from_text(page_text)
             if fallback_doi:
                 return fallback_doi
     except Exception as e:
@@ -604,12 +652,15 @@ def try_download(url, save_path, verbose=False):
 
 
 def try_download_with_session(url: str, save_path: str, referer: str = None, verbose=False) -> bool:
-    """Download PDF from URL using a persistent session."""
+    """Download PDF from URL using a session (visits referer first if given). Needed for sites like eScholarship."""
     if not url:
         return False
     try:
         session = requests.Session()
         session.headers.update(headers)
+        if referer:
+            session.headers["Referer"] = referer
+            session.get(referer, timeout=15)  # visit page first to get cookies
         r = session.get(url, timeout=20, allow_redirects=True, stream=True)
         if _save_pdf_response(r, save_path, verbose):
             return True
@@ -786,7 +837,7 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
             if verbose:
                 print(f"✅ Landing-page extracted PDF success for {doi}")
             return True
-        if try_download_with_session(candidate, save_path, verbose=verbose):
+        if try_download_with_session(candidate, save_path, referer=final_landing, verbose=verbose):
             if verbose:
                 print(f"✅ Landing-page session PDF success for {doi}")
             return True
@@ -799,8 +850,12 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
     """
     Find eScholarship PDF via PubMed/Europe PMC LinkOut.
     UC and other universities deposit in eScholarship; PubMed abstract pages list these.
-    UC and other universities deposit PDFs in eScholarship.
+    eScholarship requires visiting the item page first (session/referer) to get the PDF.
     """
+    # This fallback depends entirely on scraping the PubMed website; if that's been
+    # disabled (repeated timeouts) there's nothing to do — skip the Europe PMC call too.
+    if _PUBMED_WEB_DISABLED:
+        return False
     try:
         # Get PMID from Europe PMC search by DOI
         r = _get_with_retries(
@@ -820,15 +875,14 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
 
         # Fetch PubMed abstract page for LinkOut full-text links (eScholarship etc.)
         # Europe PMC abstract often lacks LinkOut; PubMed has them
-        abstract_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-        r2 = requests.get(abstract_url, headers=headers, timeout=15)
-        if r2.status_code != 200:
+        page_text = _get_pubmed_web_html(pmid, verbose=verbose)
+        if not page_text:
             return False
 
         # Find eScholarship item links
         escholarship_items = re.findall(
             r'https?://(?:www\.)?escholarship\.org/uc/item/([a-zA-Z0-9]+)',
-            r2.text,
+            page_text,
             re.IGNORECASE,
         )
         if not escholarship_items:
@@ -838,7 +892,7 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
             item_url = f"https://escholarship.org/uc/item/{item_id}"
             # eScholarship PDF URL pattern: /content/qt{item_id}/{item_id}.pdf
             pdf_url = f"https://escholarship.org/content/qt{item_id}/qt{item_id}.pdf"
-            if try_download_with_session(pdf_url, save_path, verbose=verbose):
+            if try_download_with_session(pdf_url, save_path, referer=item_url, verbose=verbose):
                 if verbose:
                     print(f"✅ eScholarship (PubMed LinkOut) success for {doi}")
                 return True
@@ -916,13 +970,8 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False) -> bo
 
     # PubMed provider links / citation_pdf_url fallback.
     try:
-        r = requests.get(
-            f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            headers=headers,
-            timeout=15,
-        )
-        if r.status_code == 200 and r.text:
-            html_text = r.text
+        html_text = _get_pubmed_web_html(pmid, verbose=verbose)
+        if html_text:
             candidates = []
 
             # Direct PDF meta tag when available.
@@ -1059,7 +1108,7 @@ def _extract_pdf_links_from_doaj_record(record: dict):
 
 def try_core_fallback(doi: str, save_path: str, verbose=False):
     """Try CORE (core.ac.uk) API for open-access PDFs."""
-    global _CORE_SESSION_DISABLED
+    global _CORE_SESSION_DISABLED, _CORE_SESSION_DISABLE_REASON
 
     # Skip silently if CORE was disabled earlier in this session due to auth failure
     if _CORE_SESSION_DISABLED:
@@ -1090,6 +1139,7 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
             # Auth failure — disable CORE for the rest of the session (all workers)
             if not _CORE_SESSION_DISABLED:
                 _CORE_SESSION_DISABLED = True
+                _CORE_SESSION_DISABLE_REASON = f"HTTP {r.status_code}"
                 _print_yellow_warning(
                     f"⚠️  CORE disabled for session: HTTP {r.status_code}. "
                     f"Check COREAPIKEY in .env.local"
@@ -1560,6 +1610,14 @@ def fetch_pdf_from_doi(doi,
                     print(f"✅ Crossref landing-page extraction success for {doi}")
                 _record_source(_source_out, "crossref")
                 return save_path
+            # Taylor & Francis: try direct /doi/pdf/ URL (works for some OA)
+            if landing and "tandfonline.com" in landing:
+                tf_pdf = f"https://www.tandfonline.com/doi/pdf/{doi}"
+                if try_download(tf_pdf, save_path, verbose):
+                    if verbose:
+                        print(f"✅ Taylor & Francis /doi/pdf/ success for {doi}")
+                    _record_source(_source_out, "crossref")
+                    return save_path
     except Exception as e:
         if verbose: print(f"Error with Crossref: {e}")
 
@@ -1591,6 +1649,7 @@ def fetch_pdf_from_doi(doi,
             f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=openAccessPdf",
             timeout=10,
             headers=s2_headers,
+            verify=False,  # S2 cert has expired; we're only fetching a JSON URL
         )
         if r.status_code == 200:
             pdf_url = r.json().get("openAccessPdf", {}).get("url")
@@ -1763,7 +1822,7 @@ def fetch_pdf_from_doi(doi,
                                         if try_download(cand, save_path, verbose):
                                             got_supplement = True
                                             break
-                                        if try_download_with_session(cand, save_path, verbose=verbose):
+                                        if try_download_with_session(cand, save_path, referer=supp_url, verbose=verbose):
                                             got_supplement = True
                                             break
                                     if not got_supplement:
