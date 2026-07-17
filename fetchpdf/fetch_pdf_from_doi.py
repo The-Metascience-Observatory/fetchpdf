@@ -1370,7 +1370,7 @@ def fetch_pdf_from_doi(doi,
                       ):
     """
     Try to download a PDF for a DOI (or PMID resolved to DOI) using multiple fallbacks:
-      0. OSF, Figshare, PsychArchives (if DOI matches pattern)
+      0. OSF, Figshare, PsychArchives, Zenodo (if DOI matches pattern)
       1. PubMed Central (PMC)
       2. Unpaywall
       3. Crossref (direct PDF links or landing page)
@@ -1381,6 +1381,7 @@ def fetch_pdf_from_doi(doi,
       8. Direct DOI resolver (html parsing, Crossref chooser)
       9. DataCite related identifiers
      10. DOI→PMID fallback
+     11. arXiv fallback (DOI→arXiv id via Semantic Scholar / OpenAlex)
 
     Saves PDF to save_dir as: doi.replace('/', '--') + '.pdf'
     Returns the path if successful, else None.
@@ -1531,6 +1532,41 @@ def fetch_pdf_from_doi(doi,
             if verbose:
                 print(f"Error with PsychArchives: {e}")
 
+    # ---------------- Zenodo DOI handling ----------------
+    # 10.5281/zenodo.* - CERN repository, files listed by the InvenioRDM API.
+    # Handled here rather than left to the generic chain: the record page is the
+    # only other route to the file link, and the API also disambiguates versions
+    # (a concept DOI silently resolves to the latest version).
+    if "zenodo" in doi.lower() or doi.startswith("10.5281/"):
+        try:
+            m = re.search(r"zenodo\.(\d+)", doi.lower())
+            if m:
+                r = requests.get(
+                    f"https://zenodo.org/api/records/{m.group(1)}",
+                    headers=headers,
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    # Largest PDF first: multi-file records usually carry the paper
+                    # alongside smaller supplements. Restricted records list files
+                    # with no links.self, so those simply yield no candidates.
+                    pdfs = sorted(
+                        (f for f in (r.json().get("files") or [])
+                         if f.get("key", "").lower().endswith(".pdf")
+                         and (f.get("links") or {}).get("self")),
+                        key=lambda f: f.get("size") or 0,
+                        reverse=True,
+                    )
+                    for fobj in pdfs:
+                        if try_download(fobj["links"]["self"], save_path, verbose):
+                            if verbose:
+                                print(f"✅ Zenodo API success for {doi}")
+                            _record_source(_source_out, "zenodo")
+                            return save_path
+        except Exception as e:
+            if verbose:
+                print(f"Error with Zenodo: {e}")
+
     # ---------------- PubMed Central (PMC) via Europe PMC ----------------
     # Many OA papers are freely available via PMC. Europe PMC's pdf=render
     # endpoint reliably serves PDFs (NCBI PMC uses JS redirects).
@@ -1677,22 +1713,24 @@ def fetch_pdf_from_doi(doi,
         if verbose: print(f"Error with Semantic Scholar: {e}")
 
     # ----------------OpenAlex ----------------
-    # Note: OpenAlex has strict rate limits (1,000 downloads/day even with API key)
-    # Placed after Semantic Scholar to preserve quota for harder-to-find papers
+    # Note: OpenAlex meters this route against a daily budget that resets at
+    # midnight UTC; over budget it returns 429, not 404. Placed after Semantic
+    # Scholar to preserve quota for harder-to-find papers.
     try:
         openalex_headers = {}
         openalex_api_key = os.getenv("OPENALEXAPIKEY")
         if openalex_api_key:
             openalex_headers["Authorization"] = f"Bearer {openalex_api_key}"
         r = requests.get(
-            f"https://api.openalex.org/works/https://doi.org/{doi}",
+            f"https://api.openalex.org/works/doi:{doi}",
             headers=openalex_headers,
             timeout=10
         )
         if r.status_code == 200:
             data = r.json()
             best = data.get("best_oa_location") or {}
-            pdf_url = best.get("url_for_pdf") or best.get("url")
+            # OpenAlex location objects, unlike Unpaywall's, key on pdf_url/landing_page_url
+            pdf_url = best.get("pdf_url") or best.get("landing_page_url")
             if try_download(pdf_url, save_path, verbose):
                 if verbose: print(f"✅ OpenAlex success for {doi}")
                 _record_source(_source_out, "openalex")
@@ -1869,6 +1907,51 @@ def fetch_pdf_from_doi(doi,
             pmid_str = str(pmid).strip()
             if try_pmid_direct_pdf_fallback(pmid_str, save_path, verbose):
                 _record_source(_source_out, "pmid_direct")
+                return save_path
+
+    # ---------------- arXiv fallback (last resort) ----------------
+    # Some DOIs are author-supplied forward references to a not-yet-published
+    # venue (e.g. an ACM proceedings DOI reserved at acceptance) whose only live
+    # full text is the arXiv preprint. Every DOI-keyed source above then fails,
+    # yet the work still maps to an arXiv id via Semantic Scholar or OpenAlex.
+    if not os.path.exists(save_path):
+        arxiv_id = None
+        # Semantic Scholar first: unmetered, and externalIds.ArXiv is authoritative.
+        try:
+            r = requests.get(
+                f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=externalIds",
+                timeout=10,
+                verify=False,  # S2 cert has expired; we only read a JSON URL
+            )
+            if r.status_code == 200:
+                ax = (r.json().get("externalIds") or {}).get("ArXiv")
+                if ax:
+                    arxiv_id = str(ax).strip()
+        except Exception as e:
+            if verbose: print(f"Error resolving arXiv id via Semantic Scholar: {e}")
+        # OpenAlex fallback: ids.arxiv, or an arxiv.org URL on any location.
+        if not arxiv_id:
+            try:
+                r = requests.get(f"https://api.openalex.org/works/doi:{doi}", timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    cand = (data.get("ids") or {}).get("arxiv") or ""
+                    for loc in [data.get("primary_location")] + (data.get("locations") or []):
+                        url = ((loc or {}).get("pdf_url") or
+                               (loc or {}).get("landing_page_url") or "")
+                        m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", url, re.I)
+                        if m:
+                            cand = m.group(1)
+                            break
+                    m = re.search(r"(\d{4}\.\d{4,5})", cand)
+                    if m:
+                        arxiv_id = m.group(1)
+            except Exception as e:
+                if verbose: print(f"Error resolving arXiv id via OpenAlex: {e}")
+        if arxiv_id:
+            if try_download(f"https://arxiv.org/pdf/{arxiv_id}", save_path, verbose):
+                if verbose: print(f"✅ arXiv fallback success for {doi} (arXiv:{arxiv_id})")
+                _record_source(_source_out, "arxiv")
                 return save_path
 
 
