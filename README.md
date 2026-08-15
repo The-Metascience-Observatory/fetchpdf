@@ -7,6 +7,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+  - [Getting more than the PDF](#getting-more-than-the-pdf) — XML/HTML, supplementary material, linked datasets
 - [Usage Examples](#usage-examples)
 - [Batch Processing & Parallel Execution](#batch-processing--parallel-execution)
 - [Format-Prioritized Retrieval](#format-prioritized-retrieval)
@@ -96,6 +97,111 @@ fetchpdf "10.1038/nature12373" output.pdf  # custom filename
 fetchpdf 33262244                          # PMID auto-resolved to DOI
 ```
 
+### Getting more than the PDF
+
+By default a record yields one file: the best PDF the source chain finds. Three
+flags widen that, and they compose — use all three together to get the paper in
+both formats plus everything deposited with it.
+
+**1. Structured full text (XML / HTML) instead of, or alongside, the PDF**
+
+A PDF has no tables, only ink that looks like tables. For anything that parses
+the paper, ask for markup:
+
+```bash
+# Keep BOTH a structured copy (JATS/TEI XML, else publisher HTML) AND the PDF
+fetchpdf papers.csv -o ./out --get-xml-or-html
+
+# Prefer structured full text, but accept a PDF when there is none
+fetchpdf papers.csv -o ./out --prioritize-xml
+
+# Structured only — fail the record rather than write a PDF
+fetchpdf papers.csv -o ./out --xml-html-only    # XML or publisher HTML
+fetchpdf papers.csv -o ./out --xml-only         # XML, nothing else
+
+# Also render each XML/HTML artifact to {stem}.md for an LLM
+fetchpdf papers.csv -o ./out --get-xml-or-html --to-markdown
+```
+
+Artifacts land as suffixed siblings: `{stem}.xml`, `{stem}.fulltext.html`,
+`{stem}.pdf`, `{stem}.md`. `--get-xml-or-html` is also a backfill — pointed at a
+directory of PDFs you already have, it fetches only the missing structured half.
+Publisher HTML needs `pip install -e '.[html]'`; without it that tier is skipped
+with a logged reason. Full detail: [Format-Prioritized Retrieval](#format-prioritized-retrieval).
+
+**2. Supplementary material (SI/SM)**
+
+```bash
+# Every supplementary file the SI endpoints offer: PDFs, spreadsheets, docs, data
+fetchpdf papers.csv -o ./out --pull-supplementary
+
+# Raise or lower the per-file cap (default 300 MB)
+fetchpdf papers.csv -o ./out --pull-supplementary --max-supplementary-mb 500
+
+# Pick up files deposited since an earlier run
+fetchpdf papers.csv -o ./out --refresh-supplementary
+```
+
+Files arrive numbered — `{stem}_supplementary_info_1.xlsx`, `_2.docx`, … — with
+`{stem}_supplementary_info.json` recording what each number originally was, plus
+what was *skipped and why*. The numbering discards original filenames, so
+[read the manifest](#the-manifest-is-not-optional-reading). This runs for records
+whose PDF is already on disk, so it collects supplements for an old corpus
+without re-fetching a single paper, and a second run over the same directory
+costs zero requests.
+
+**3. Linked datasets and code**
+
+The supplementary pass also asks the link services (ScholeXplorer, Europe PMC
+datalinks, DataCite) what datasets and software each paper is connected to, and
+writes every answer to `{stem}_linked_artifacts.json`. Deposits affirmatively
+identified as *the paper's own* are downloaded and numbered alongside the
+supplements. `--download-data-artifacts` goes further:
+
+```bash
+# Supplements + the paper's own linked deposits (Zenodo, Dryad, OSF, figshare, Dataverse)
+fetchpdf papers.csv -o ./out --pull-supplementary
+
+# Also take citation-grade deposits whose own metadata names this article,
+# and repositories named in the paper's own full text
+fetchpdf papers.csv -o ./out --download-data-artifacts
+
+# Per-record dataset cap (default 500 MB), counted separately from supplements
+fetchpdf papers.csv -o ./out --download-data-artifacts --max-data-artifact-mb 2000
+
+# Expand replication-package zips (off by default — they have their own layout)
+fetchpdf papers.csv -o ./out --download-data-artifacts --unpack-data-artifacts
+```
+
+`--download-data-artifacts` implies `--pull-supplementary`. What is *not*
+downloaded still gets recorded: cited-but-not-owned datasets, tool citations,
+trial registrations. See [Linked datasets and code](#linked-datasets-and-code-stem_linked_artifactsjson).
+
+**All three at once**, which is the usual corpus-building invocation:
+
+```bash
+fetchpdf papers.csv -o ./out -w 4 \
+    --get-xml-or-html --to-markdown \
+    --download-data-artifacts \
+    --make-subfolder --provenance
+```
+
+```
+out/10.1371--journal.pone.0000308/
+  10.1371--journal.pone.0000308.pdf                     <- the paper
+  10.1371--journal.pone.0000308.xml                     <- structured full text
+  10.1371--journal.pone.0000308.md                      <- prose + HTML tables
+  10.1371--journal.pone.0000308_supplementary_info_1.xls
+  10.1371--journal.pone.0000308_supplementary_info_2.csv <- from a Dryad deposit
+  10.1371--journal.pone.0000308_supplementary_info.json  <- what each number is
+  10.1371--journal.pone.0000308_linked_artifacts.json    <- every dataset/code link
+  10.1371--journal.pone.0000308.provenance.json          <- source, tier, hashes
+```
+
+Supplements and datasets never change whether a record counts as a success: a
+paper with no SI is not a failure, and a repository timing out cannot turn a
+downloaded paper into a failed one.
+
 ### Python API
 
 ```python
@@ -111,8 +217,31 @@ result = fetch_pdf(
     verbose=True,
     delay=0.1  # Polite delay between API calls
 )
-
 ```
+
+The extra formats and the supplementary pass are keyword arguments on the batch
+entry point — `--pull-supplementary` is plumbed through `batch_fetch_pdfs` only,
+so use it even for a single DOI:
+
+```python
+from fetchpdf import batch_fetch_pdfs
+
+results = batch_fetch_pdfs(
+    dois=["10.1371/journal.pone.0000308"],
+    output_dir="./out",
+    get_xml_or_html=True,        # structured copy AND the PDF
+    to_markdown=True,            # plus {stem}.md
+    pull_supplementary=True,     # SI/SM as numbered siblings + manifest
+    download_data_artifacts=True,  # and the paper's linked deposits
+    max_supplementary_bytes=300 * 1024 * 1024,
+    want_provenance=True,
+    verbose=True,
+)
+# -> [(doi, success, save_path), ...]
+```
+
+To collect supplements for one record you already have on disk, call
+`pull_supplementary_for` directly — see [API Reference](#api-reference).
 
 
 
