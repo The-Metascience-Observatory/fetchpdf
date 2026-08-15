@@ -2,23 +2,19 @@ import os
 import re
 import time
 import requests
-from pathlib import Path
 from urllib.parse import quote_plus
-from dotenv import load_dotenv
 
-from .fetch_pdf_from_doi import _get_with_retries
+from .fetchpdf import _get_with_retries
 
-# Load environment variables from .env.local
-env_file = Path(__file__).parent.parent / '.env.local'
-if env_file.exists():
-    load_dotenv(env_file)
-
-_DEFAULT_EMAIL    = os.getenv("EMAIL")
-_S2_API_KEY       = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-_NCBI_API_KEY     = os.getenv("ENTREZ_EUTILS_API_KEY")
-_OPENALEX_API_KEY = os.getenv("OPENALEXAPIKEY")
-_CORE_API_KEY     = os.getenv("COREAPIKEY")
-_SCOPUS_API_KEY   = os.getenv("SCOPUS_API_KEY")
+# .env.local is loaded here, at import time -- see _env.py.
+from ._env import (
+    EMAIL as _DEFAULT_EMAIL,
+    S2_API_KEY as _S2_API_KEY,
+    ENTREZ_API_KEY as _NCBI_API_KEY,
+    OPENALEX_API_KEY as _OPENALEX_API_KEY,
+    CORE_API_KEY as _CORE_API_KEY,
+    SCOPUS_API_KEY as _SCOPUS_API_KEY,
+)
 
 _HEADERS = {"User-Agent": "MetascienceObservatory/1.0"}
 
@@ -117,10 +113,16 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
 
     doi = doi.strip()
 
-    # Normalize filename-format DOIs: -- is our filename separator for /
-    # e.g. "10.1093/eurheartj--ehaf339" → "10.1093/eurheartj/ehaf339"
-    if '--' in doi:
+    # Normalize filename-format DOIs (inverse of doi_to_safe_filename), e.g.
+    # "10.1093--eurheartj--ehaf339" → "10.1093/eurheartj/ehaf339". A string that
+    # already contains '/' is a real DOI whose '--' may be literal (ASEE
+    # 10.18260/1-2--47556) — leave it alone.
+    from .fetchpdf import _decode_fs_tokens
+    if '~' in doi:
+        doi = _decode_fs_tokens(doi)
+    if '--' in doi and '/' not in doi:
         doi = doi.replace('--', '/')
+    doi = doi.replace('\x00', '-')
 
     result = {
         "title":    None,
@@ -299,7 +301,7 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
         if _done(): return result
 
     # ------------------------------------------------------------------
-    # 6. DataCite  (good for preprints, datasets, grey literature)
+    # 6. DataCite  (good for preprints and datasets)
     # ------------------------------------------------------------------
     try:
         r = requests.get(
@@ -532,7 +534,7 @@ def save_abstract_markdown(doi, output_dir, email=None, verbose=False):
     Fetch abstract for a DOI and save as {safe_doi}_abstract.md in output_dir.
     Returns the path if saved, else None.
     """
-    from fetchpdf.fetch_pdf_from_doi import doi_to_safe_filename
+    from .fetchpdf import doi_to_safe_filename
     os.makedirs(output_dir, exist_ok=True)
     safe = doi_to_safe_filename(doi)
     path = os.path.join(output_dir, f"{safe}_abstract.md")

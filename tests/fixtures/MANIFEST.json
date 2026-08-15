@@ -1,0 +1,110 @@
+{
+  "efetch_denial_stub.xml": {
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pmc&id=3390974&retmode=xml",
+    "http_status": 200,
+    "bytes": 9687,
+    "why": "NCBI efetch for a non-OA PMC record: HTTP 200, well-formed <article>, body is one sentence saying the publisher forbids full text."
+  },
+  "epmc_search_preprint.json": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=DOI%3A%2210.1101%2F2020.01.30.927871%22&format=json&resultType=core",
+    "http_status": 200,
+    "bytes": 4774,
+    "why": "Europe PMC PPR record: inEPMC=Y, isOpenAccess=Y, populated fullTextIdList -- and /PPR110986/fullTextXML is a 404."
+  },
+  "epmc_fulltext_valid.xml": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC1817752/fullTextXML",
+    "http_status": 200,
+    "bytes": 75443,
+    "why": "A genuinely valid JATS full text with table-wrap elements and footnotes."
+  },
+  "biorxiv_wrong_server.json": {
+    "url": "https://api.biorxiv.org/details/biorxiv/10.1101/2020.09.09.20191205",
+    "http_status": 200,
+    "bytes": 67,
+    "why": "A medRxiv DOI queried against /details/biorxiv/: HTTP 200 with an empty collection. A miss that looks like a successful empty answer."
+  },
+  "crossref_elsevier_links.json": {
+    "url": "https://api.crossref.org/works/10.1016/j.jclinepi.2021.02.003?mailto=fetchpdf%40example.org",
+    "http_status": 200,
+    "bytes": 25312,
+    "why": "Crossref link[]: content-type text/xml (not application/xml), intended-application text-mining, PII inline in the URL."
+  },
+  "epmc_supplements_no_images.zip": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC1817752/supplementaryFiles?includeInlineImage=no",
+    "http_status": 200,
+    "bytes": 33961,
+    "why": "The supplementary bundle as the pass asks for it: 4 members, ~34 KB, exactly s001-s004. Paired with the fixture below to pin the difference."
+  },
+  "epmc_supplements_default.zip": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC1817752/supplementaryFiles",
+    "http_status": 200,
+    "bytes": 132079,
+    "why": "The same endpoint without includeInlineImage=no: 14 members, ~132 KB, the article's whole media blob set with every figure image in it. Without that parameter the pass would write every figure as a supplementary file."
+  },
+  "pmc_bin_not_a_file.html": {
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC1817752/bin/pone.0000308.s001.doc",
+    "http_status": 404,
+    "bytes": 48716,
+    "why": "The obvious base URL for a JATS xlink:href, and why it is not a fetch route: asked the way our client asks, it returns a 404 with 48 KB of \"Page not found\" HTML. Others have seen a 200 serving reCAPTCHA from the same path. Whichever it is on the day, it is never the file -- which is why the JATS manifest is a classifier and the bytes come from Europe PMC or S3."
+  },
+  "pmc_s3_metadata.json": {
+    "url": "https://pmc-oa-opendata.s3.amazonaws.com/metadata/PMC1817752.1.json",
+    "http_status": 200,
+    "bytes": 1589,
+    "why": "PMC AWS Open Data: media_urls[] with an ?md5= on every object, plus pdf_url/xml_url/text_url so the article's own renditions can be excluded. The replacement for oa.fcgi, whose FTP paths already 404 and whose files are removed entirely in August 2026."
+  },
+  "pmc_s3_listing.xml": {
+    "url": "https://pmc-oa-opendata.s3.amazonaws.com/?list-type=2&prefix=PMC1817752.1/",
+    "http_status": 200,
+    "bytes": 4335,
+    "why": "Anonymous ListBucket: <Key> plus <Size> per object, which is what lets the size cap refuse an oversized file before any of it is transferred."
+  },
+  "datacite_reverse_related.json": {
+    "url": "https://api.datacite.org/dois?query=relatedIdentifiers.relatedIdentifier%3A%2210.1186%2Fs40168-025-02261-0%22&page%5Bsize%5D=25",
+    "http_status": 200,
+    "bytes": 25543,
+    "why": "The reverse related-identifier query, and the reason the filter is on types.resourceTypeGeneral rather than relationType: these datasets were deposited as IsCitedBy/IsSourceOf, so a relation whitelist drops all of them."
+  },
+  "epmc_supplements_error_bean.xml": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC12138863/supplementaryFiles?includeInlineImage=no",
+    "http_status": 200,
+    "bytes": 165,
+    "why": "EPMC supplementaryFiles for a non-OA record: HTTP 200 wrapping an <errorBean> stub. The endpoint's second way of saying 'no bundle'; must classify as no-bundle, not not-an-archive."
+  },
+  "scholix_links_dataset.json": {
+    "url": "https://api.scholexplorer.openaire.eu/v3/Links?sourcePid=10.1186%2Fs40168-025-02261-0&targetType=dataset",
+    "http_status": 200,
+    "bytes": 5598,
+    "why": "ScholeXplorer v3 for the same DOI as datacite_reverse_related.json, so the two link pools can be compared side by side. Scholix JSON: result[] with RelationshipType/source/target, Identifier[] arrays on each end."
+  },
+  "scholix_links_software.json": {
+    "url": "https://api.scholexplorer.openaire.eu/v3/Links?sourcePid=10.1038%2Fs41586-020-2649-2&targetType=software",
+    "http_status": 200,
+    "bytes": 7471,
+    "why": "A software link as OpenAIRE mints them: the NumPy paper 'cites' a '... software on GitHub' record. This is the tool-citation shape the classifier must keep out of the download path."
+  },
+  "epmc_datalinks.json": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/MED/38375968/datalinks?format=json",
+    "http_status": 200,
+    "bytes": 4109,
+    "why": "Europe PMC datalinks with all three shapes at once: a text-mined ClinicalTrials.gov accession, DOI data citations (including arXiv DOIs wearing a dataset costume), and a BioStudies study URL that mirrors the supplementary bundle europepmc_supplements already fetches."
+  },
+  "dryad_dataset.json": {
+    "url": "https://datadryad.org/api/v2/datasets/doi%3A10.5061%2Fdryad.tx95x69xr",
+    "http_status": 200,
+    "bytes": 5352,
+    "why": "Dryad v2 dataset lookup (the hbm.26595 deposit): _links['stash:version'] is the hop to the file listing. Case-insensitive on the DOI."
+  },
+  "dryad_files.json": {
+    "url": "https://datadryad.org/api/v2/versions/126667/files",
+    "http_status": 200,
+    "bytes": 866,
+    "why": "Dryad version file listing: _embedded['stash:files'] with declared size, sha-256 digest, status, and a stash:download href per file."
+  },
+  "dataverse_dataset.json": {
+    "url": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/27221",
+    "http_status": 200,
+    "bytes": 4372,
+    "why": "Harvard Dataverse dataset lookup: data.latestVersion.files[] with dataFile{id, filename, contentType, filesize, md5}; download is /api/access/datafile/{id}."
+  }
+}

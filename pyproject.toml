@@ -26,10 +26,19 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "requests>=2.31.0",
+    "playwright>=1.40.0",
+    "pandas>=1.3.0",
     "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
+# T2 publisher-HTML support only. Real publisher markup is malformed often
+# enough that stdlib html.parser silently loses table rows, which is worse than
+# not parsing at all -- so the T2 source demotes rather than guessing when lxml
+# is absent. Every other tier needs nothing beyond the stdlib.
+html = [
+    "lxml>=4.9",
+]
 dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",
@@ -42,9 +51,20 @@ Repository = "https://github.com/The-Metascience-Observatory/fetchpdf"
 Issues = "https://github.com/The-Metascience-Observatory/fetchpdf/issues"
 
 [project.scripts]
-fetchpdf = "fetchpdf.fetch_pdf_from_doi:main"
+fetchpdf = "fetchpdf.fetchpdf:main"
+# Converts artifacts already on disk, so a corpus fetched before --to-markdown
+# existed does not need re-downloading.
+fetchpdf-md = "fetchpdf.retrieval.to_markdown:main"
+# Reads back the integrity metadata every manifest already carries. Offline:
+# answers "is what I have what I fetched", not "is there more to fetch".
+fetchpdf-verify = "fetchpdf.retrieval.verify:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["fetchpdf*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+# The tier ladder is config, not code: it has to ship with the wheel or a
+# non-editable install has no ladder to load.
+"fetchpdf.retrieval" = ["ladder.json"]

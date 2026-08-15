@@ -1,16 +1,12 @@
-import os
 import requests
 import time
-from pathlib import Path
-from dotenv import load_dotenv
 
-# Load environment variables from .env.local
-env_file = Path(__file__).parent.parent / '.env.local'
-if env_file.exists():
-    load_dotenv(env_file)
-
-_DEFAULT_EMAIL = os.getenv("EMAIL")
-_S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+# .env.local is loaded here, at import time -- see _env.py.
+from ._env import (
+    EMAIL as _DEFAULT_EMAIL,
+    S2_API_KEY as _S2_API_KEY,
+    OPENALEX_API_KEY as _OPENALEX_API_KEY,
+)
 
 def fetch_metadata_from_doi(doi, email=None, delay=0.2):
     """
@@ -45,9 +41,8 @@ def fetch_metadata_from_doi(doi, email=None, delay=0.2):
     # ---------- 1️⃣ OpenAlex ----------
     try:
         openalex_headers = dict(headers)
-        openalex_api_key = os.getenv("OPENALEXAPIKEY")
-        if openalex_api_key:
-            openalex_headers["Authorization"] = f"Bearer {openalex_api_key}"
+        if _OPENALEX_API_KEY:
+            openalex_headers["Authorization"] = f"Bearer {_OPENALEX_API_KEY}"
         r = requests.get(
             f"https://api.openalex.org/works/https://doi.org/{doi}",
             timeout=10,
@@ -55,15 +50,21 @@ def fetch_metadata_from_doi(doi, email=None, delay=0.2):
         )
         if r.status_code == 200:
             data = r.json()
+            # host_venue was removed from the OpenAlex schema; primary_location
+            # replaces it. Reading the old key silently yielded journal=None and
+            # a doi.org url for every record.
+            primary = data.get("primary_location") or {}
+            source = primary.get("source") or {}
+            biblio = data.get("biblio") or {}
             oa = {
                 "authors": "; ".join([a["author"]["display_name"] for a in data.get("authorships", [])]) or None,
                 "title": data.get("title"),
-                "journal": data.get("host_venue", {}).get("display_name"),
-                "volume": data.get("biblio", {}).get("volume"),
-                "issue": data.get("biblio", {}).get("issue"),
-                "pages": data.get("biblio", {}).get("first_page"),
+                "journal": source.get("display_name"),
+                "volume": biblio.get("volume"),
+                "issue": biblio.get("issue"),
+                "pages": biblio.get("first_page"),
                 "year": data.get("publication_year"),
-                "url": data.get("host_venue", {}).get("url") or f"https://doi.org/{doi}",
+                "url": primary.get("landing_page_url") or f"https://doi.org/{doi}",
             }
             meta = enrich(meta, oa)
             if is_complete(meta):

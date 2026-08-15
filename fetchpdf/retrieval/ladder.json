@@ -1,0 +1,362 @@
+{
+  "version": 1,
+  "_comment": [
+    "Tier ladder and per-source capability map. Reorder here rather than in code.",
+    "Override wholesale with FETCHPDF_LADDER=/path/to/your.json.",
+    "Tier names must match fetchpdf.retrieval.tiers.Tier members.",
+    "'requires' lists IdentifierSet fields that must be non-empty for the source",
+    "to be attempted at all -- this is what keeps quota-limited calls off records",
+    "that could never have used them.",
+    "No 'host' key on sources: rate limiting buckets on the actual URL host inside HttpClient, so a per-source host was inert config that looked like a knob. Adjust throttling in rate_limits below, keyed by real hostname."
+  ],
+  "ladders": {
+    "extraction": [
+      "T1_XML",
+      "T2_HTML",
+      "T3_SOURCE",
+      "T4_SUPPLEMENT",
+      "T5_PDF",
+      "T7_LANDING"
+    ],
+    "screening": [
+      "T1_XML",
+      "T2_HTML",
+      "T3_SOURCE",
+      "T6_PLAINTEXT",
+      "T5_PDF",
+      "T7_LANDING"
+    ]
+  },
+  "_ladders_comment": [
+    "T6 plain text is 4th for screening and ABSENT for extraction. Flattened text",
+    "keeps every number but anchors none of them to a row or column, so an",
+    "extraction model produces confident, plausible, wrong arm-to-outcome",
+    "assignments. That is worse than a missing table, so extraction refuses it",
+    "outright rather than ranking it last and degrading into it."
+  ],
+  "tier_sources": {
+    "T1_XML": [
+      "europepmc_xml",
+      "preprint_jats",
+      "pmc_efetch",
+      "elsevier_tdm",
+      "crossref_tdm"
+    ],
+    "T2_HTML": [
+      "unpaywall_html",
+      "publisher_html",
+      "arxiv_html"
+    ],
+    "T3_SOURCE": [
+      "arxiv_eprint"
+    ],
+    "T4_SUPPLEMENT": [
+      "europepmc_supplements",
+      "figshare_files",
+      "zenodo_files",
+      "osf_files"
+    ],
+    "T5_PDF": [
+      "legacy_pdf_chain",
+      "elsevier_pdf"
+    ],
+    "T6_PLAINTEXT": [
+      "core_fulltext"
+    ],
+    "T7_LANDING": [
+      "landing_page"
+    ]
+  },
+  "sources": {
+    "europepmc_xml": {
+      "callable": "epmc:fetch_fulltext_xml",
+      "requires": [
+        "pmcid"
+      ],
+      "notes": "Highest-value T1 route. Gated on search flags, but tolerates 404 anyway: ~12% of records with a PMCID are not in the EPMC OA subset."
+    },
+    "preprint_jats": {
+      "callable": "preprint:fetch_preprint_jats",
+      "requires": [
+        "doi"
+      ],
+      "notes": "bioRxiv/medRxiv JATS. Also the route for EPMC PPR records, whose availability flags say full text exists when it does not."
+    },
+    "pmc_efetch": {
+      "callable": "pmc:fetch_efetch_xml",
+      "requires": [
+        "pmcid"
+      ],
+      "notes": "FALLBACK ONLY -- same underlying PMC JATS as Europe PMC. Never stored alongside it; two copies of one source is not corroboration."
+    },
+    "elsevier_tdm": {
+      "callable": "crossref_tdm:fetch_elsevier_tdm",
+      "requires": [
+        "elsevier_pii"
+      ],
+      "notes": "Entitlement- and IP-bound. Non-entitled requests return 200 with an error payload, so the validator, not the status code, decides."
+    },
+    "crossref_tdm": {
+      "callable": "crossref_tdm:fetch_crossref_tdm",
+      "requires": [
+        "doi"
+      ],
+      "notes": "link[] with content-type text/xml AND intended-application text-mining. Crossref retired click-through tokens in Dec 2020, so 401/403 is the expected case, not an error."
+    },
+    "unpaywall_html": {
+      "callable": "publisher_html:fetch_unpaywall_fulltext",
+      "requires": [
+        "doi"
+      ],
+      "notes": "oa_locations[].url is sometimes XML or HTML full text rather than a PDF. publishedVersion preferred over acceptedVersion."
+    },
+    "publisher_html": {
+      "callable": "publisher_html:fetch_publisher_html",
+      "requires": [
+        "doi"
+      ],
+      "notes": "DOI resolution to publisher full text. At most OA publishers this HTML is generated from the same JATS as the XML endpoint."
+    },
+    "arxiv_html": {
+      "callable": "arxiv:fetch_latexml_html",
+      "requires": [
+        "arxiv_id"
+      ],
+      "notes": "Official arxiv.org/html covers ~Dec 2023 onward; ar5iv covers the back catalogue to 2007 (verified: 0704.0001 -> 200, 35 tables). Enabled because between them they cover effectively the whole corpus. Machine conversion, so the caveat is recorded in provenance."
+    },
+    "arxiv_eprint": {
+      "callable": "arxiv:fetch_eprint_source",
+      "requires": [
+        "arxiv_id"
+      ],
+      "notes": "LaTeX source tarball. arXiv tightened rate limits in Feb 2026 -- this host gets its own slow bucket."
+    },
+    "europepmc_supplements": {
+      "callable": "supplements:fetch_epmc_supplements",
+      "requires": [
+        "pmcid"
+      ],
+      "notes": "Keyed on the PMCID already resolved in phase 1, so cheaper than enumerating repositories."
+    },
+    "figshare_files": {
+      "callable": "supplements:fetch_figshare_files",
+      "requires": [
+        "doi"
+      ]
+    },
+    "zenodo_files": {
+      "callable": "supplements:fetch_zenodo_files",
+      "requires": [
+        "doi"
+      ]
+    },
+    "osf_files": {
+      "callable": "supplements:fetch_osf_files",
+      "requires": [
+        "doi"
+      ]
+    },
+    "legacy_pdf_chain": {
+      "callable": "legacy_pdf:fetch_via_legacy_chain",
+      "requires": [
+        "doi"
+      ],
+      "notes": "One call into the existing chain in fetch_pdf_from_doi. Preserves its retries, backoff and Playwright paths by construction rather than by duplication."
+    },
+    "elsevier_pdf": {
+      "callable": "crossref_tdm:fetch_elsevier_pdf",
+      "requires": [
+        "elsevier_pii"
+      ],
+      "notes": "Same endpoint as elsevier_tdm, asked with Accept: application/pdf. Entitlement is per-representation at Elsevier, so a record whose XML view is coredata-only or a 400-char corrigendum often still serves the full typeset PDF. Ordered after legacy_pdf_chain because the chain's routes cost no Elsevier quota."
+    },
+    "core_fulltext": {
+      "callable": "core_text:fetch_core_fulltext",
+      "requires": [
+        "doi"
+      ],
+      "notes": "Always stamped tables_unavailable=true. Refuses to return anything when target_task is extraction."
+    },
+    "landing_page": {
+      "callable": "landing:fetch_landing_page",
+      "requires": [
+        "doi"
+      ],
+      "notes": "Last resort. Recorded so a record that produced nothing usable is distinguishable from one never attempted."
+    }
+  },
+  "rate_limits": {
+    "_comment": "Per-host, never global: configured limits differ by more than an order of magnitude across these APIs. rps_keyed applies when key_env is set in the environment.",
+    "eutils.ncbi.nlm.nih.gov": {
+      "rps": 3,
+      "rps_keyed": 10,
+      "key_env": "ENTREZ_EUTILS_API_KEY",
+      "burst": 3
+    },
+    "pmc.ncbi.nlm.nih.gov": {
+      "rps": 3,
+      "rps_keyed": 10,
+      "key_env": "ENTREZ_EUTILS_API_KEY",
+      "burst": 3
+    },
+    "www.ncbi.nlm.nih.gov": {
+      "rps": 3,
+      "rps_keyed": 10,
+      "key_env": "ENTREZ_EUTILS_API_KEY",
+      "burst": 3
+    },
+    "www.ebi.ac.uk": {
+      "rps": 5,
+      "burst": 5
+    },
+    "api.crossref.org": {
+      "rps": 10,
+      "burst": 10
+    },
+    "api.semanticscholar.org": {
+      "rps": 1,
+      "rps_keyed": 10,
+      "key_env": "SEMANTIC_SCHOLAR_API_KEY",
+      "burst": 1
+    },
+    "api.unpaywall.org": {
+      "rps": 5,
+      "burst": 5
+    },
+    "api.openalex.org": {
+      "rps": 5,
+      "burst": 5
+    },
+    "api.elsevier.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "api.datacite.org": {
+      "rps": 3,
+      "burst": 3
+    },
+    "api.scholexplorer.openaire.eu": {
+      "rps": 3,
+      "burst": 3
+    },
+    "api.core.ac.uk": {
+      "rps": 2,
+      "burst": 2
+    },
+    "api.biorxiv.org": {
+      "rps": 2,
+      "burst": 2
+    },
+    "export.arxiv.org": {
+      "rps": 0.34,
+      "burst": 1
+    },
+    "arxiv.org": {
+      "rps": 0.34,
+      "burst": 1
+    },
+    "ar5iv.labs.arxiv.org": {
+      "rps": 0.5,
+      "burst": 1
+    },
+    "api.figshare.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "zenodo.org": {
+      "rps": 2,
+      "burst": 2
+    },
+    "api.osf.io": {
+      "rps": 2,
+      "burst": 2
+    },
+    "doi.org": {
+      "rps": 5,
+      "burst": 5
+    },
+    "_supplementary_comment": [
+      "--pull-supplementary fetches files rather than metadata, so it talks to a",
+      "second set of hosts: the CDNs and file endpoints the listing APIs point at.",
+      "Without entries here they all fall to _default, which is safe but treats a",
+      "publisher CDN and a scraped article page as equally robust. S3 is fast and",
+      "does not care; article pages and supp.apa.org are scraped one at a time."
+    ],
+    "pmc-oa-opendata.s3.amazonaws.com": {
+      "rps": 10,
+      "burst": 10
+    },
+    "ndownloader.figshare.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "files.osf.io": {
+      "rps": 2,
+      "burst": 2
+    },
+    "osf.io": {
+      "rps": 2,
+      "burst": 2
+    },
+    "datadryad.org": {
+      "rps": 2,
+      "burst": 2
+    },
+    "dataverse.harvard.edu": {
+      "rps": 2,
+      "burst": 2
+    },
+    "journals.plos.org": {
+      "rps": 2,
+      "burst": 2
+    },
+    "media.springernature.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "static-content.springer.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "ars.els-cdn.com": {
+      "rps": 2,
+      "burst": 2
+    },
+    "www.nature.com": {
+      "rps": 1,
+      "burst": 1
+    },
+    "link.springer.com": {
+      "rps": 1,
+      "burst": 1
+    },
+    "www.biorxiv.org": {
+      "rps": 1,
+      "burst": 1
+    },
+    "www.medrxiv.org": {
+      "rps": 1,
+      "burst": 1
+    },
+    "supp.apa.org": {
+      "rps": 1,
+      "burst": 1
+    },
+    "academic.oup.com": {
+      "rps": 1,
+      "burst": 1
+    },
+    "_default": {
+      "rps": 3,
+      "burst": 3
+    }
+  },
+  "thresholds": {
+    "_comment": "Character counts are of extracted body text, not raw bytes.",
+    "t1_min_chars": 5000,
+    "t2_min_chars": 5000,
+    "abstract_stub_chars": 2500,
+    "min_populated_td": 1,
+    "idconv_chunk_size": 200
+  }
+}

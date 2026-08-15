@@ -1,2 +1,3 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
+# Dependencies are declared in pyproject.toml -- this file just installs them,
+# so the two lists cannot drift apart.
+-e .
