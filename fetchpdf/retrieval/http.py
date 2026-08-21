@@ -35,6 +35,30 @@ from .ratelimit import HostRateLimiter
 _SECRET_PARAMS = {"apikey", "api_key", "key", "token", "access_token", "auth"}
 _SECRET_HEADERS = {"authorization", "x-api-key", "apikey"}
 
+#: Headers that carry a credential, i.e. the ones worth REMOVING and retrying
+#: when a host rejects them. Same membership as `_SECRET_HEADERS` today but a
+#: separate name on purpose: that set answers "must this be redacted before it
+#: is logged", this one answers "is this what the host just refused". A future
+#: header could easily need one and not the other.
+_CREDENTIAL_HEADERS = {"authorization", "x-api-key", "apikey"}
+
+#: Which environment variable supplies the credential for a host, so a rejection
+#: names the variable the user has to fix rather than "an API key somewhere".
+_CREDENTIAL_ENV = {
+    "api.semanticscholar.org": "SEMANTIC_SCHOLAR_API_KEY",
+    "api.openalex.org": "OPENALEXAPIKEY",
+    "api.core.ac.uk": "COREAPIKEY",
+}
+
+
+def _credential_env_for(host: str) -> Optional[str]:
+    return _CREDENTIAL_ENV.get(host)
+
+
+#: Hosts already reported as rejecting their credential, so the warning is
+#: emitted once per process rather than once per request.
+_WARNED_CREDENTIALS: set = set()
+
 _SECRET_IN_PATH_RE = re.compile(
     r"(?i)\b(apikey|api_key|access_token|token)[=/]([^&/?#\s]+)"
 )
@@ -215,6 +239,36 @@ class HttpClient:
                 )
                 self.call_count += 1
                 elapsed = time.monotonic() - started
+
+                # A key we sent and the host rejected is WORSE than no key:
+                # unkeyed, these APIs answer at a lower rate limit; keyed with a
+                # dead credential they answer 401/403 and the source drops out
+                # of the chain entirely. Measured 2026-08-17: an expired
+                # SEMANTIC_SCHOLAR_API_KEY turned every Semantic Scholar call --
+                # step 5 of the default resolution chain -- into a 403, while
+                # the same request with no key at all returned 200. Nothing
+                # said so, because a dead source just looks like a source that
+                # had nothing. Retry once without the credential and say which
+                # key is bad, so the failure is a warning rather than a silent
+                # capability loss.
+                if r.status_code in (401, 403) and polite:
+                    stripped = {k: v for k, v in (headers or {}).items()
+                                if k.lower() not in _CREDENTIAL_HEADERS}
+                    if stripped != (headers or {}):
+                        bad = _credential_env_for(host) or "its API key"
+                        # Once per host per process. The keyed hosts sit in the
+                        # per-record resolution chain, so a per-call warning
+                        # prints once per paper and buries the run log under
+                        # thousands of copies of one fact.
+                        if host not in _WARNED_CREDENTIALS:
+                            _WARNED_CREDENTIALS.add(host)
+                            print(f"    ⚠ {host} rejected {bad} ({r.status_code}); "
+                                  f"retrying unkeyed at the lower rate limit for "
+                                  f"the rest of this run. Refresh or unset it to "
+                                  f"silence this.")
+                        headers = stripped
+                        polite = False       # do not re-add it on the next pass
+                        continue
 
                 # 429/503 are worth waiting out; they mean "later", not "no".
                 if r.status_code in (429, 503) and attempt < retries - 1:

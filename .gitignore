@@ -129,16 +129,29 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# Project specific
+# Project specific -- run outputs, for when a batch is pointed at the repo root.
+#
+# Named rules, not blanket *.xml / *.md: tests/fixtures/ is full of committed
+# XML and the docs are Markdown, so a blanket rule would hide the fixtures this
+# suite is built on.
+#
+# This file is the source for BOTH repos. fetchpdf_public/.gitignore is written
+# by tools/make_public.py and is overwritten on every sync, so edit it here.
 *.pdf
 pdfs/
 papers/
 downloaded_papers/
 test_downloads/
-test_downloads/debug/
 missing_pdfs.html
-download_results.csv
 failed_dois.csv
+source_tracking.csv
+source_counts.json
+provenance.json
+references.json
+references.md
+body.md
+*_abstract.md
+*_linked_artifacts.json
 
 # Playwright
 .playwright/

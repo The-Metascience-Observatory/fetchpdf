@@ -26,6 +26,7 @@ import re
 from typing import Optional
 
 from ..._env import ELSEVIER_TDM_API_KEY
+from ..._http import elsevier_first_page_only
 from ..artifact import Artifact
 from ..tiers import Tier
 
@@ -120,6 +121,13 @@ def fetch_elsevier_pdf(ids, ctx) -> Optional[Artifact]:
     # occupying the PDF goal in the first place.
     if not response.content.startswith(b"%PDF"):
         ctx.log("    Elsevier PDF: 200 but not a PDF (not entitled)")
+        return None
+    # Partial entitlement is a REAL one-page PDF, not an error payload: the
+    # magic bytes and the T5 validator both pass on it. The X-ELS-Status
+    # warning header is the only signal, so it must be read here where the
+    # response headers still exist -- an Artifact does not carry them.
+    if elsevier_first_page_only(response.headers):
+        ctx.log("    Elsevier PDF: first-page preview only (not entitled to full PDF)")
         return None
 
     return Artifact(

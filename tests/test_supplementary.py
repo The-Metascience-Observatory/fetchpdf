@@ -25,6 +25,7 @@ from fetchpdf.retrieval.context import RetrievalContext
 from fetchpdf.retrieval.http import HttpClient
 from fetchpdf.retrieval.identifiers import IdentifierSet
 from fetchpdf.retrieval.ratelimit import HostRateLimiter
+from fetchpdf.retrieval.supplementary import _looks_like_a_document
 from fetchpdf.retrieval.tiers import load_ladder
 
 
@@ -2458,3 +2459,64 @@ class TestElsevierObjectStatus:
         both = _elsevier_object_urls(
             IdentifierSet(doi="10.1016/x", elsevier_pii="S123"))
         assert "/object/pii/" in both[0] and "/object/doi/" in both[1]
+
+
+class TestABinaryDocumentNeverBeginsWithMarkup:
+    """The stub that `fetchpdf-verify` cannot catch.
+
+    Elsevier's attachment endpoint answers a file request with HTTP 200 and an
+    `<attachment-metadata-response>` wrapper -- roughly 726 bytes of XML whose
+    only payload is the URL of the file you actually asked for. It was written
+    to disk as `mmc1.pdf`. Measured on a 925-paper corpus: 51 such stubs across
+    33 papers, 8 of them under a manifest reporting `status: ok`.
+
+    Verification cannot recover this. `_integrity_of` compares the sha256 on
+    disk against the sha256 recorded at download time and they match perfectly,
+    because the stub is exactly what was fetched. It answers "is what I have
+    what I fetched", not "is what I fetched a document". Downstream a 726-byte
+    XML file named `.pdf` reads as "this paper published this table" -- a claim
+    about the authors manufactured out of an API quirk.
+
+    The pre-existing HTML check was too narrow: this is XML, not HTML, and
+    `mmc1.pdf` is not in `_TEXTUAL_EXTENSIONS`, so nothing looked at it.
+    """
+
+    ELSEVIER_STUB = (
+        b'<attachment-metadata-response xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        b"<coredata><prism:doi>10.1016/j.neuron.2013.06.046</prism:doi></coredata>"
+        b"<attachment><prism:url>https://api.elsevier.com/content/article/pii/"
+        b"S089662731300562X/ref/mmc1</prism:url></attachment>"
+        b"</attachment-metadata-response>"
+    )
+
+    def test_the_real_elsevier_stub_is_refused(self):
+        ok, why = _looks_like_a_document(
+            "mmc1.pdf", self.ELSEVIER_STUB, "application/pdf",
+            len(self.ELSEVIER_STUB))
+        assert not ok
+        assert "markup" in why and "attachment-metadata-response" in why
+
+    @pytest.mark.parametrize("name,head", [
+        ("mmc1.pdf", b"%PDF-1.5\n%\xe2\xe3\xcf\xd3"),
+        ("table.xlsx", b"PK\x03\x04\x14\x00\x06\x00"),
+        ("figure.png", b"\x89PNG\r\n\x1a\n"),
+        ("data.docx", b"PK\x03\x04\x14\x00\x06\x00"),
+    ])
+    def test_a_genuine_binary_document_still_passes(self, name, head):
+        ok, why = _looks_like_a_document(name, head + b"x" * 400,
+                                         "application/octet-stream", 408)
+        assert ok, why
+
+    @pytest.mark.parametrize("name,head", [
+        ("supplement.xml", b'<?xml version="1.0"?><article><body/></article>'),
+        ("notes.html", b"<!doctype html><html><body>notes</body></html>"),
+        ("data.csv", b"subject,dose,response\n1,10,4.2\n"),
+        ("readme.txt", b"<this file legitimately starts with an angle bracket>"),
+    ])
+    def test_a_genuinely_textual_supplement_is_untouched(self, name, head):
+        """The rule keys on the DECLARED format. A supplement that really is
+        XML is a normal, common deposit and must not be refused for looking
+        like what it is."""
+        ok, why = _looks_like_a_document(name, head + b"y" * 200,
+                                         "text/plain", 250)
+        assert ok, why

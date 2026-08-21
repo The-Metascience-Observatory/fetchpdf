@@ -39,8 +39,12 @@ dependencies = [
 html = [
     "lxml>=4.9",
 ]
+images = [
+    "pymupdf>=1.24",
+]
 dev = [
     "pytest>=7.0.0",
+    "pytest-xdist>=3.0",
     "black>=23.0.0",
     "flake8>=6.0.0",
 ]
@@ -55,9 +59,18 @@ fetchpdf = "fetchpdf.fetchpdf:main"
 # Converts artifacts already on disk, so a corpus fetched before --to-markdown
 # existed does not need re-downloading.
 fetchpdf-md = "fetchpdf.retrieval.to_markdown:main"
+# Embedded-image dump for PDFs already on disk. Original bitstreams, not
+# page renders. pip install 'fetchpdf[images]'.
+fetchpdf-images = "fetchpdf.retrieval.extract_images:main"
 # Reads back the integrity metadata every manifest already carries. Offline:
 # answers "is what I have what I fetched", not "is there more to fetch".
 fetchpdf-verify = "fetchpdf.retrieval.verify:main"
+
+[tool.pytest.ini_options]
+# "auto" defers to pytest_xdist_auto_num_workers in tests/conftest.py, which
+# caps the count at min(8, cores-1). The cap cannot live here: addopts is
+# static text, and xdist has no expression syntax for worker counts.
+addopts = "-n auto"
 
 [tool.setuptools.packages.find]
 where = ["."]

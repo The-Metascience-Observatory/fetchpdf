@@ -466,6 +466,68 @@ def test_similarity_checking_links_are_not_candidates():
     )
 
 
+def _elsevier_pdf_response(headers):
+    """A first-page preview passes every content check: 200, %PDF, real bytes."""
+    response = FakeResponse(b"%PDF-1.4 one lonely page", content_type="application/pdf")
+    response.headers = headers
+    return response
+
+
+def test_elsevier_pdf_first_page_preview_is_rejected(monkeypatch):
+    """Partial entitlement: X-ELS-Status is the only signal, and it lives on
+    the response, not the Artifact -- so the source must read it. Header key
+    pinned lowercase, as the live API serves it over HTTP/2."""
+    from fetchpdf.retrieval.sources import crossref_tdm
+
+    monkeypatch.setattr(crossref_tdm, "ELSEVIER_TDM_API_KEY", "test-key")
+    http = FakeHttp(routes={"api.elsevier.com": _elsevier_pdf_response(
+        {"x-els-status": "WARNING - Response limited to first page because "
+                         "requestor not entitled to resource"})})
+    ids = IdentifierSet(elsevier_pii="S0000000000")
+    assert crossref_tdm.fetch_elsevier_pdf(ids, _ctx(http)) is None
+
+
+def test_elsevier_pdf_without_warning_is_still_t5(monkeypatch):
+    from fetchpdf.retrieval.sources import crossref_tdm
+
+    monkeypatch.setattr(crossref_tdm, "ELSEVIER_TDM_API_KEY", "test-key")
+    http = FakeHttp(routes={"api.elsevier.com": _elsevier_pdf_response({})})
+    ids = IdentifierSet(elsevier_pii="S0000000000")
+    artifact = crossref_tdm.fetch_elsevier_pdf(ids, _ctx(http))
+    assert artifact is not None
+    assert artifact.tier is Tier.T5_PDF
+
+
+def test_elsevier_preview_descends_to_the_next_pdf_source(tmp_path, monkeypatch):
+    """A first-page preview must not occupy the PDF rung: the engine keeps
+    walking the same tier and a later source still gets to win the record."""
+    from fetchpdf.retrieval.sources import crossref_tdm
+
+    monkeypatch.setattr(crossref_tdm, "ELSEVIER_TDM_API_KEY", "test-key")
+    http = FakeHttp(routes={"api.elsevier.com": _elsevier_pdf_response(
+        {"x-els-status": "WARNING - Response limited to first page because "
+                         "requestor not entitled to resource"})})
+    ids = IdentifierSet(doi="10.1016/test", elsevier_pii="S0000000000")
+
+    def other_pdf(ids_, ctx):
+        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+                        source="other_pdf", url="https://p/x.pdf", http_status=200)
+
+    result = run_engine(
+        tmp_path,
+        {Tier.T5_PDF: [("elsevier_pdf", crossref_tdm.fetch_elsevier_pdf),
+                       ("other_pdf", other_pdf)]},
+        ids=ids,
+        resolver=FakeResolver(ids, http),
+    )
+
+    # Elsevier really was asked first (and served the preview) ...
+    assert any("api.elsevier.com" in url for url, _ in http.requests)
+    # ... and the record was still won by the source after it.
+    assert result.artifact.source == "other_pdf"
+    assert result.path.endswith(".pdf")
+
+
 # --------------------------------------------------------------------------
 # 7. Flags
 # --------------------------------------------------------------------------

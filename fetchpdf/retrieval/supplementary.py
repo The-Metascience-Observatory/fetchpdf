@@ -114,6 +114,16 @@ _CHALLENGE_MARKERS = (
 
 _TEXTUAL_EXTENSIONS = (".html", ".htm", ".txt", ".csv", ".tsv", ".xml", ".json", ".md")
 
+#: Formats whose bytes cannot legitimately begin with `<`. Used to catch an API
+#: that answers a file request with an XML wrapper describing the file -- see
+#: `_looks_like_a_document`.
+_BINARY_DOC_EXTENSIONS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".gz", ".tar", ".rar", ".7z",
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".bmp", ".eps",
+    ".mov", ".mp4", ".avi", ".wmv", ".sav", ".dta", ".mat",
+)
+
 _MAGIC = (
     (b"%PDF", ".pdf"),
     (b"PK\x03\x04", ".zip"),
@@ -1536,6 +1546,25 @@ def _looks_like_a_document(name, head: bytes, content_type: str, size: int) -> T
         stripped = window.lstrip()[:9].lower()
         if (content_type or "").startswith("text/html") or stripped in (b"<!doctype", b"<html"):
             return False, f"served HTML for {name or 'an unnamed file'}"
+
+    # A binary document that begins with markup is not that document, whatever
+    # the extension claims. The HTML check above is too narrow to catch this:
+    # Elsevier's attachment endpoint answers 200 with an
+    # `<attachment-metadata-response>` wrapper -- ~726 bytes of XML whose only
+    # payload is the URL of the file you actually asked for -- and it was
+    # written straight to disk as `mmc1.pdf`. Measured on one corpus: 51 such
+    # stubs across 33 papers, and 8 of them sat under a manifest reporting
+    # `status: ok`.
+    #
+    # That is the worst shape a supplement failure can take. `fetchpdf-verify`
+    # still passes them, because the sha256 recorded at download time matches
+    # the sha256 on disk -- it answers "is what I have what I fetched", not "is
+    # what I fetched a document". Downstream, a 726-byte XML stub named .pdf
+    # reads as "this paper published this table", which is a claim about the
+    # authors manufactured out of an API quirk.
+    if lowered.endswith(_BINARY_DOC_EXTENSIONS) and window.lstrip()[:1] == b"<":
+        root = window.lstrip()[:60].decode("ascii", "replace").split(">")[0]
+        return False, f"served markup ({root}>) for {name or 'an unnamed file'}"
     return True, ""
 
 

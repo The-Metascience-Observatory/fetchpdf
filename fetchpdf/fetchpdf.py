@@ -9,6 +9,7 @@ import tempfile
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import requests
 import urllib3
 from requests.exceptions import SSLError
@@ -20,7 +21,7 @@ from ._env import (
     ENTREZ_API_KEY as _ENTREZ_API_KEY,
     S2_API_KEY as _S2_API_KEY,
 )
-from ._http import USER_AGENT
+from ._http import USER_AGENT, elsevier_first_page_only
 
 # The ID Converter moved: www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ now 301s
 # here. requests follows the redirect, so the old URL still worked -- it just
@@ -32,6 +33,14 @@ IDCONV_URL = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 # the check-then-act that sets the flag is guarded by a lock (mirrors _PUBMED_WEB_LOCK).
 _CORE_SESSION_DISABLED = False
 _CORE_SESSION_LOCK = threading.Lock()
+
+# Consecutive CORE *transport* failures (timeouts, resets) before we stop asking
+# for the rest of the run. Distinct from the 401/403 kill switch: a slow API is
+# not a bad key, but paying 15-30s per remaining record of a 6361-paper batch
+# is how CORE becomes the most expensive miss in the chain.
+_CORE_TIMEOUT_COUNT = 0
+_CORE_TIMEOUT_LIMIT = 3
+_CORE_TIMEOUT_DISABLED = False
 
 # CORE's budget is a DAILY quota (x-ratelimit-limit: 500), not a per-second
 # rate, so throttling does not help and retrying is actively harmful: every 429
@@ -89,6 +98,32 @@ def _core_quota_exhausted(verbose=False) -> bool:
     return True
 
 
+def _core_timeout_skip(verbose=False) -> bool:
+    """True when CORE has timed out enough times this run to be skipped."""
+    return _CORE_TIMEOUT_DISABLED
+
+
+def _core_note_timeout(verbose=False) -> None:
+    """Record a CORE transport failure; disable CORE after `_CORE_TIMEOUT_LIMIT`."""
+    global _CORE_TIMEOUT_COUNT, _CORE_TIMEOUT_DISABLED
+    with _CORE_SESSION_LOCK:
+        _CORE_TIMEOUT_COUNT += 1
+        if _CORE_TIMEOUT_COUNT < _CORE_TIMEOUT_LIMIT or _CORE_TIMEOUT_DISABLED:
+            return
+        _CORE_TIMEOUT_DISABLED = True
+    _print_yellow_warning(
+        "⚠️  CORE timed out repeatedly; skipping it for the rest of this run "
+        "(the API is slow, not unauthorized -- unset nothing)."
+    )
+
+
+def _core_note_success() -> None:
+    """A finished CORE search resets the consecutive-timeout counter."""
+    global _CORE_TIMEOUT_COUNT
+    with _CORE_SESSION_LOCK:
+        _CORE_TIMEOUT_COUNT = 0
+
+
 class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
     """A ThreadPoolExecutor whose workers cannot keep the process alive.
 
@@ -130,11 +165,13 @@ SOURCE_DISPLAY_NAMES = {
     "apa_supplemental": "APA",
     "core": "CORE",
     "crossref": "Crossref",
+    "crossref_preprint": "Crossref-preprint",
     "datacite": "DataCite",
     "datacite_related": "DataCite-related",
     "direct_doi": "direct-DOI",
     "doaj": "DOAJ",
     "elsevier": "Elsevier",
+    "elife": "eLife",
     "escholarship": "eScholarship",
     "europepmc": "EuropePMC",
     "existing": "on-disk",
@@ -253,20 +290,46 @@ def _unregister_pool_from_atexit(executor) -> bool:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from urllib.parse import urljoin, quote_plus, urlparse
 
+# PDF-preferring, used by try_download. text/html is present (q=0.9) so a
+# publisher that 406s an Accept with no HTML type still answers; the PDF
+# types stay first so a content-negotiating OA host serves the file.
 headers = {
     "User-Agent": USER_AGENT,
     "Accept": (
         "application/pdf,application/octet-stream,"
-        "application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     ),
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Referer": "",   # IMPORTANT: helps if PDF requires same-site referer
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Site": "none",
+}
+
+# Landing-page GETs. PDF-first Accept plus Sec-Fetch-Site: same-origin on a
+# first request to a new host is a bot tell and a documented 406 cause
+# (eLife's Fastly/Varnish among others). No empty Referer: that header is
+# either a real URL (set per request) or absent.
+HTML_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
+# 406 retry: drop Sec-Fetch / Accept-Encoding entirely. Some CDNs 406 a
+# Chrome UA that claims br without a matching Client Hints set.
+_HTML_HEADERS_MINIMAL = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 DOI_URL_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
@@ -1072,6 +1135,273 @@ def _decode_fs_tokens(s: str) -> str:
         s = s.replace(f"~{ord(ch):02x}~", ch)
     return s.replace("~", ":")
 
+
+# ---------------------------------------------------------------------------
+# Safe-filename -> DOI inverse (with legacy-encoding fallback)
+# ---------------------------------------------------------------------------
+
+def safe_filename_to_doi_variants(safe_name: str) -> list[str]:
+    """Decode a safe-DOI filename into candidate DOIs, most likely first.
+
+    Modern encoding (see ``doi_to_safe_filename``) writes ':' as '~' and any
+    '-{2,}' run as '~2d~' escapes, so the only '--' that appears in a
+    modern-encoded name is the one separating '10.NNNN' from the suffix.
+
+    An OLDER encoding (used by some corpora on disk) wrote BOTH '/' and ':'
+    as '--'. That makes the decoding ambiguous: '10.1023--a--1016394031947'
+    could mean either '10.1023/a/1016394031947' (modern reading, two path
+    segments) or '10.1023/A:1016394031947' (legacy reading, colon-DOI in
+    Kluwer/Springer style). We cannot tell without asking a registry.
+
+    Rather than commit to one reading, this function returns BOTH candidates
+    when the raw suffix contains '--' after the prefix separator; the caller
+    resolves the ambiguity (e.g., by trying each and keeping the one that
+    Crossref knows). Modern reading first because that's what any recently
+    written folder will be.
+
+    Returns
+    -------
+    list[str]
+        Ordered list of candidate DOIs. Empty for empty input. For inputs
+        that don't match the safe-DOI shape, returns [safe_name] verbatim so
+        the caller can pass through anything that already looks like a DOI.
+    """
+    if not safe_name:
+        return []
+    match = FILENAME_SAFE_DOI_RE.match(safe_name)
+    if not match:
+        return [safe_name]
+
+    prefix = match.group(1)
+    raw_suffix = match.group(2)
+
+    # Modern reading: '--' -> '/', '~XX~' + bare '~' -> forbidden chars + ':'.
+    # _decode_fs_tokens returns the '\x00' sentinel for '~2d~' so the '--'
+    # -> '/' pass below can't touch escaped hyphens; we restore them after.
+    modern_suffix = _decode_fs_tokens(raw_suffix).replace("--", "/").replace("\x00", "-")
+    modern = f"{prefix}/{modern_suffix}"
+    variants: list[str] = [modern]
+
+    # Legacy reading: any '--' in the suffix after the prefix separator is a
+    # colon (the first '--' -- the prefix separator -- was already consumed
+    # by FILENAME_SAFE_DOI_RE and is always '/'). Only produce this when the
+    # raw suffix actually contains '--'; a modern name never does.
+    if "--" in raw_suffix:
+        legacy_suffix = _decode_fs_tokens(raw_suffix).replace("--", ":").replace("\x00", "-")
+        legacy = f"{prefix}/{legacy_suffix}"
+        if legacy != modern:
+            variants.append(legacy)
+
+    return variants
+
+
+def _crossref_doi_exists(doi: str, email: str | None = None,
+                         timeout: float = 6.0) -> bool | None:
+    """Ask Crossref whether a DOI is registered. None on network error.
+
+    Cheapest endpoint that answers yes/no: ``/works/{doi}/agency`` returns
+    the registration agency for known DOIs and 404 for unknown ones. About
+    150 bytes on the wire either way.
+    """
+    if not doi or not doi.startswith("10."):
+        return None
+    try:
+        params = {}
+        h = dict(headers)
+        if email:
+            h["User-Agent"] = f"{h.get('User-Agent','fetchpdf/1.0')} (mailto:{email})"
+        r = requests.get(
+            f"https://api.crossref.org/works/{doi}/agency",
+            headers=h, timeout=timeout,
+        )
+        if r.status_code == 200:
+            return True
+        if r.status_code == 404:
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def _pick_variant_via_crossref(variants: list[str],
+                               email: str | None = None) -> str:
+    """Return the first candidate Crossref confirms; else the first candidate.
+
+    Callers use this when a safe-DOI decoded to multiple candidates and only
+    one of them is a real DOI. If Crossref is unreachable we keep the modern
+    reading -- the caller's batch will still record the failure honestly.
+    """
+    if len(variants) <= 1:
+        return variants[0] if variants else ""
+    for v in variants:
+        ok = _crossref_doi_exists(v, email=email)
+        if ok is True:
+            return v
+    return variants[0]
+
+
+def dois_from_dir(root_dir, email: str | None = None,
+                  verbose: bool = False) -> list[str]:
+    """Read subdirectory names of ``root_dir`` and decode each to a DOI.
+
+    A subdirectory whose name is not shaped like a safe DOI (does not match
+    ``FILENAME_SAFE_DOI_RE``) is silently skipped -- these are usually side
+    directories like ``done``, ``figmap``, ``panels``, etc. Legacy '--'-encoded
+    folder names are disambiguated via Crossref; when Crossref is
+    unreachable the modern reading is kept.
+
+    The returned list preserves discovery order and is deduplicated.
+    """
+    root = Path(root_dir)
+    if not root.is_dir():
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    n_ambig = 0
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        variants = safe_filename_to_doi_variants(entry.name)
+        if not variants:
+            continue
+        head = variants[0]
+        # Non-safe-DOI-shaped names come back as [name] verbatim. Skip anything
+        # that doesn't start with a DOI prefix rather than injecting nonsense
+        # into the batch.
+        if not head.startswith("10."):
+            continue
+        if len(variants) > 1:
+            n_ambig += 1
+            chosen = _pick_variant_via_crossref(variants, email=email)
+        else:
+            chosen = head
+        if chosen in seen:
+            continue
+        seen.add(chosen)
+        out.append(chosen)
+    if verbose and n_ambig:
+        print(f"   • {n_ambig} ambiguous legacy-encoded folder name(s) "
+              f"disambiguated via Crossref")
+    return out
+
+
+def migrate_legacy_folders(root_dir, email: str | None = None,
+                           dry_run: bool = True,
+                           verbose: bool = False) -> list[dict]:
+    """Rename legacy '--'-encoded folders under ``root_dir`` to modern encoding.
+
+    A folder is considered legacy when its name matches ``FILENAME_SAFE_DOI_RE``
+    AND its suffix contains further '--' AND Crossref confirms the legacy
+    reading (':' where the extra '--' sits) resolves to a real DOI while the
+    modern reading does not. That last check keeps this safe on directories
+    whose names happen to encode multi-segment DOIs (10.1093/abm/kaad072 →
+    10.1093--abm--kaad072 -- legitimate modern encoding, no migration).
+
+    Files inside a migrated folder whose stem starts with the OLD folder name
+    are also renamed so their stems match the new folder name -- fetchpdf's
+    sidecars (``{safe_doi}_supplementary_info.json`` etc.) rely on that
+    invariant.
+
+    Returns a list of action records: one dict per folder examined, with
+    keys ``dir``, ``action`` (renamed | merged | kept | error),
+    ``modern_doi``, ``legacy_doi``, ``new_name`` and, when relevant,
+    ``reason``. Nothing on disk changes when ``dry_run`` is True.
+    """
+    root = Path(root_dir)
+    actions: list[dict] = []
+    if not root.is_dir():
+        return actions
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        m = FILENAME_SAFE_DOI_RE.match(name)
+        if not m or "--" not in m.group(2):
+            continue
+
+        variants = safe_filename_to_doi_variants(name)
+        if len(variants) < 2:
+            continue
+
+        modern_doi, legacy_doi = variants[0], variants[1]
+        modern_ok = _crossref_doi_exists(modern_doi, email=email)
+        legacy_ok = _crossref_doi_exists(legacy_doi, email=email)
+
+        # Only migrate when the legacy reading resolves AND the modern one
+        # does not. If both resolve (extremely rare -- would be two DOIs
+        # coincidentally colliding under the two encodings), we refuse to
+        # act rather than risk destroying data.
+        if legacy_ok is not True or modern_ok is True:
+            actions.append({
+                "dir": str(entry),
+                "action": "kept",
+                "modern_doi": modern_doi,
+                "legacy_doi": legacy_doi,
+                "reason": (
+                    f"modern_resolves={modern_ok!r}, legacy_resolves={legacy_ok!r}"
+                    " -- either modern reading is valid or Crossref could not "
+                    "confirm the legacy reading; not renaming"
+                ),
+            })
+            continue
+
+        new_name = doi_to_safe_filename(legacy_doi)
+        new_path = root / new_name
+        record: dict = {
+            "dir": str(entry),
+            "modern_doi": modern_doi,
+            "legacy_doi": legacy_doi,
+            "new_name": new_name,
+        }
+
+        if new_path.exists() and new_path != entry:
+            # Merge legacy into the already-present modern folder (union of
+            # files, never clobber). The legacy folder is then removed once
+            # every file it held has a home.
+            record["action"] = "merged" if not dry_run else "would_merge"
+            record["merged_into"] = str(new_path)
+            if not dry_run:
+                for src in entry.rglob("*"):
+                    rel = src.relative_to(entry)
+                    dst = new_path / rel
+                    if src.is_dir():
+                        dst.mkdir(parents=True, exist_ok=True)
+                        continue
+                    if dst.exists():
+                        # Collision -- the modern-target's copy is the winner
+                        # by no-clobber policy, so the legacy version is
+                        # redundant. Drop it so the legacy tree fully empties
+                        # and the caller sees exactly one folder per DOI.
+                        src.unlink()
+                        continue
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    src.rename(dst)
+                # Remove the emptied legacy tree
+                for p in sorted(entry.rglob("*"), reverse=True):
+                    if p.is_dir() and not any(p.iterdir()):
+                        p.rmdir()
+                if not any(entry.iterdir()):
+                    entry.rmdir()
+        else:
+            record["action"] = "renamed" if not dry_run else "would_rename"
+            if not dry_run:
+                entry.rename(new_path)
+                # Rename inner files whose stem starts with the old folder
+                # name so sidecar filenames match the new folder name.
+                for f in new_path.iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.name.startswith(name):
+                        new_f = new_path / (new_name + f.name[len(name):])
+                        if not new_f.exists():
+                            f.rename(new_f)
+
+        actions.append(record)
+        if verbose:
+            print(f"   [{record['action']}] {name} -> {new_name}")
+    return actions
+
+
 #-----------------------------------------------------------------------------------------
 def try_download(url, save_path, verbose=False):
     """Try downloading PDF from URL and save to save_path."""
@@ -1155,7 +1485,7 @@ def try_download_with_session(url: str, save_path: str, referer: str = None, ver
         session.headers.update(headers)
         if referer:
             session.headers["Referer"] = referer
-            session.get(referer, timeout=15)  # visit page first to get cookies
+            session.get(referer, headers=HTML_HEADERS, timeout=15)
         r = session.get(url, timeout=20, allow_redirects=True, stream=True)
         content_type = r.headers.get("content-type", "").lower()
         if r.status_code == 200:
@@ -1296,11 +1626,26 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
         return False
 
     try:
-        landing_resp = requests.get(landing_url, headers=headers, timeout=25, allow_redirects=True)
+        landing_resp = requests.get(
+            landing_url, headers=HTML_HEADERS, timeout=25, allow_redirects=True
+        )
     except Exception as e:
         if verbose:
             print(f"  Landing page request failed: {str(e)[:120]}")
         return False
+
+    # 406 is content-negotiation, not a block. Retry once without Sec-Fetch /
+    # Accept-Encoding; some CDNs 406 a Chrome UA that claims br.
+    if landing_resp.status_code == 406:
+        try:
+            landing_resp = requests.get(
+                landing_url, headers=_HTML_HEADERS_MINIMAL, timeout=25,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"  Landing page 406-retry failed: {str(e)[:120]}")
+            return False
 
     # Landing already resolved to a PDF.
     if landing_resp.status_code == 200 and "pdf" in (landing_resp.headers.get("content-type", "").lower()):
@@ -1467,7 +1812,7 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
 
 
 @_timed("pmid_direct")
-def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False) -> bool:
+def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow_xml=True) -> bool:
     """
     Try PMID-native PDF retrieval when DOI is unavailable.
     Uses PMCID routes + Europe PMC full-text links.
@@ -1506,6 +1851,10 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False) -> bo
                 if verbose:
                     print(f"✅ PMID native PMCID route success for PMID {pmid}")
                 return True
+        if allow_xml:
+            xml_got = try_pmc_xml_fallback(pmcid, save_path, verbose=verbose, doi=f"pmid:{pmid}")
+            if xml_got:
+                return xml_got
 
     # Europe PMC record full-text URLs.
     try:
@@ -1601,6 +1950,273 @@ def _xml_path_for_pdf_path(save_path: str) -> str:
     return f"{base}.xml"
 
 
+_ELIFE_DOI_RE = re.compile(r"^10\.7554/elife\.(\d+)$", re.IGNORECASE)
+_XML_TDM_TYPES = {"application/xml", "text/xml"}
+EPMC_FULLTEXT_XML = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+
+
+def _elife_article_id(doi: str):
+    """Numeric eLife article id, or None if this is not an eLife DOI."""
+    if not doi:
+        return None
+    m = _ELIFE_DOI_RE.match(str(doi).strip())
+    return m.group(1) if m else None
+
+
+def _elife_xml_urls(doi: str):
+    """CDN XML URLs for an eLife DOI. v1 first; later versions are fallbacks.
+
+    elifesciences.org HTML 406s a PDF-first Accept (and, from some IPs, any
+    Chrome UA). The CDN does not: Crossref already publishes
+    cdn.elifesciences.org/articles/{id}/elife-{id}-v1.xml as a TDM link.
+    """
+    article_id = _elife_article_id(doi)
+    if not article_id:
+        return []
+    return [
+        f"https://cdn.elifesciences.org/articles/{article_id}/elife-{article_id}-v{n}.xml"
+        for n in range(1, 5)
+    ]
+
+
+def _looks_like_jats_fulltext(content) -> bool:
+    """True when bytes look like JATS with a body, not an EPMC error bean or stub."""
+    if not content:
+        return False
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="replace")
+    if len(content) < 200:
+        return False
+    head = content.lstrip()[:200].lower()
+    if not (head.startswith(b"<?xml") or head.startswith(b"<")):
+        return False
+    lowered = content.lower()
+    if b"<errorbean" in lowered[:4000] or b"<error>" in lowered[:2000]:
+        if b"<article" not in lowered[:8000]:
+            return False
+    return b"<body" in lowered
+
+
+def _try_save_jats_xml(url, save_path, verbose=False, doi=None):
+    """Fetch URL and write {stem}.xml if it is JATS full text. Returns that path or None."""
+    if not url:
+        return None
+    try:
+        r = _get_with_retries(url, timeout=30, retries=2)
+    except Exception as e:
+        if verbose:
+            print(f"  JATS XML fetch failed: {str(e)[:120]}")
+        return None
+    if getattr(r, "status_code", 0) != 200:
+        return None
+    content = getattr(r, "content", None) or b""
+    if not _looks_like_jats_fulltext(content):
+        if verbose:
+            print(f"  JATS XML at {str(url)[:80]} is not full text")
+        return None
+    xml_path = _xml_path_for_pdf_path(save_path)
+    try:
+        with open(xml_path, "wb") as f:
+            f.write(content)
+    except OSError as e:
+        if verbose:
+            print(f"  could not write JATS XML: {e}")
+        return None
+    label = doi or url
+    _print_yellow_warning(
+        f"WARNING: Saved full-text XML (not PDF) for {label} -> {xml_path}"
+    )
+    if verbose:
+        print(f"✅ JATS XML fallback success for {label}")
+    return xml_path
+
+
+def _crossref_tdm_xml_urls(message):
+    """Crossref text-mining XML links. similarity-checking URLs are landing pages."""
+    urls = []
+    for link in (message or {}).get("link") or []:
+        if not isinstance(link, dict):
+            continue
+        if (link.get("intended-application") or "").lower() != "text-mining":
+            continue
+        ctype = (link.get("content-type") or "").lower().split(";")[0].strip()
+        if ctype not in _XML_TDM_TYPES:
+            continue
+        url = link.get("URL")
+        if url:
+            urls.append(url)
+    return urls
+
+
+#: How many OA copies to actually GET. best_oa_location is often a publisher
+#: landing with no PDF while oa_locations[] still has a repository file.
+_OA_DIRECT_MAX = 5
+_OA_LANDING_MAX = 2
+
+_UNPAYWALL_VERSION_RANK = {
+    "publishedversion": 0, "acceptedversion": 1, "submittedversion": 2,
+}
+
+_CROSSREF_PREPRINT_RELS = (
+    "has-preprint", "is-preprint-of", "has-version", "is-version-of",
+)
+
+
+def _dedupe_keep_order(items):
+    seen = set()
+    out = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _dedupe_url_pairs(pairs):
+    """Keep the first (highest-ranked) occurrence of each URL."""
+    seen = set()
+    out = []
+    for url, is_direct in pairs:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append((url, is_direct))
+    return out
+
+
+def _collect_unpaywall_pdf_urls(data):
+    """(url, is_direct) from every Unpaywall OA copy, repository PDF first.
+
+    is_direct True means url_for_pdf or a URL that already looks like a file.
+    Publisher landings are last and the caller caps how many of those it GETs.
+    """
+    locs = [loc for loc in (data.get("oa_locations") or []) if isinstance(loc, dict)]
+    best = data.get("best_oa_location")
+    if isinstance(best, dict) and best not in locs:
+        locs = [best] + locs
+    scored = []
+    for loc in locs:
+        pdf = loc.get("url_for_pdf")
+        url = loc.get("url")
+        host_rank = 0 if (loc.get("host_type") or "").lower() == "repository" else 1
+        ver_rank = _UNPAYWALL_VERSION_RANK.get((loc.get("version") or "").lower(), 3)
+        if pdf:
+            scored.append((0, host_rank, ver_rank, pdf, True))
+        if url and url != pdf:
+            looks_file = ".pdf" in url.lower() or "/pdf" in url.lower()
+            scored.append((0 if looks_file else 2, host_rank, ver_rank, url, looks_file))
+    scored.sort()
+    return _dedupe_url_pairs([(url, is_direct) for *_, url, is_direct in scored])
+
+
+def _collect_openalex_pdf_urls(data):
+    """(url, is_direct) from OpenAlex locations[], not only best_oa_location."""
+    locs = [loc for loc in (data.get("locations") or []) if isinstance(loc, dict)]
+    for extra_key in ("best_oa_location", "primary_location"):
+        extra = data.get(extra_key)
+        if isinstance(extra, dict) and extra not in locs:
+            locs.insert(0, extra)
+    scored = []
+    for loc in locs:
+        # Closed locations have no file we are entitled to; skip them.
+        if loc.get("is_oa") is False:
+            continue
+        pdf = loc.get("pdf_url")
+        landing = loc.get("landing_page_url")
+        src = loc.get("source") or {}
+        host_rank = 0 if (src.get("type") or "").lower() == "repository" else 1
+        if pdf:
+            scored.append((0, host_rank, pdf, True))
+        if landing and landing != pdf:
+            looks_file = ".pdf" in landing.lower() or "/pdf" in landing.lower()
+            scored.append((0 if looks_file else 2, host_rank, landing, looks_file))
+    scored.sort()
+    return _dedupe_url_pairs([(url, is_direct) for *_, url, is_direct in scored])
+
+
+def _try_oa_location_urls(doi, candidates, save_path, verbose=False) -> bool:
+    """Download from ranked OA copies. Direct PDFs first; a few landings after."""
+    direct_left = _OA_DIRECT_MAX
+    landing_left = _OA_LANDING_MAX
+    for url, is_direct in candidates:
+        if not url:
+            continue
+        if is_direct and direct_left > 0:
+            direct_left -= 1
+            if try_download(url, save_path, verbose):
+                return True
+        if landing_left > 0:
+            landing_left -= 1
+            if try_landing_page_pdf_fallback(doi, url, save_path, verbose):
+                return True
+    return False
+
+
+def _crossref_related_dois(message, self_doi):
+    """Preprint/version DOIs from Crossref relation, excluding this record."""
+    rels = (message or {}).get("relation") or {}
+    found = []
+    self_doi = (self_doi or "").lower().strip()
+    for key in _CROSSREF_PREPRINT_RELS:
+        for item in rels.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            ident = (item.get("id") or "").strip()
+            id_type = (item.get("id-type") or "").lower()
+            if ident.lower().startswith("https://doi.org/"):
+                ident = ident.split("doi.org/", 1)[-1]
+            if not ident.lower().startswith("10."):
+                continue
+            if id_type and id_type != "doi":
+                continue
+            if ident.lower() == self_doi:
+                continue
+            found.append(ident)
+    return _dedupe_keep_order(found)[:2]
+
+
+def try_pmc_xml_fallback(pmcid, save_path, verbose=False, doi=None):
+    """Europe PMC fullTextXML for a PMCID. PDF-render 404s on XML-only OA."""
+    if not pmcid:
+        return None
+    pmcid = str(pmcid).strip().upper()
+    if not pmcid.startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+    return _try_save_jats_xml(
+        EPMC_FULLTEXT_XML.format(pmcid=pmcid),
+        save_path, verbose=verbose, doi=doi,
+    )
+
+
+def try_elife_xml_fallback(doi: str, save_path: str, verbose=False):
+    """eLife CDN / API XML. The HTML site 406s; this does not need it."""
+    article_id = _elife_article_id(doi)
+    if not article_id:
+        return None
+    urls = []
+    try:
+        r = _get_with_retries(
+            f"https://api.elifesciences.org/articles/{article_id}",
+            timeout=20, retries=2,
+        )
+        if r.status_code == 200:
+            xml_url = (r.json() or {}).get("xml")
+            if xml_url:
+                urls.append(xml_url)
+    except Exception as e:
+        if verbose:
+            print(f"  eLife API: {str(e)[:100]}")
+    for url in _elife_xml_urls(doi):
+        if url not in urls:
+            urls.append(url)
+    for url in urls:
+        got = _try_save_jats_xml(url, save_path, verbose=verbose, doi=doi)
+        if got:
+            return got
+    return None
+
+
 def _safe_page_content(page, timeout_ms: int = 5000) -> str:
     """Get page.content() while tolerating in-flight Playwright navigations.
 
@@ -1652,6 +2268,14 @@ def _try_elsevier_pdf_by_pii(pii: str, save_path: str, api_key: str, verbose=Fal
     if not content or not content.startswith(b"%PDF"):
         if verbose:
             print(f"  Elsevier PDF: 200 but not a PDF for {pii} (not entitled)")
+        return None
+    # Entitlement can also be PARTIAL: a key without PDF rights gets a genuine
+    # typeset first page -- 200, %PDF magic, plausible size -- and only the
+    # X-ELS-Status warning header says so. Printed unconditionally because the
+    # visible outcome changes: no PDF appears where "success" used to.
+    if elsevier_first_page_only(getattr(r, "headers", None)):
+        print(f"  Elsevier PDF: first-page preview only for {pii} "
+              f"(key not entitled to this record's PDF); discarding")
         return None
 
     try:
@@ -1933,6 +2557,8 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
     # Skip silently if CORE was disabled earlier in this session due to auth failure
     if _CORE_SESSION_DISABLED:
         return False
+    if _core_timeout_skip(verbose=verbose):
+        return False
 
     core_api_key = os.getenv("COREAPIKEY")
     if not core_api_key:
@@ -1950,12 +2576,14 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
             "Accept": "application/json",
             "User-Agent": "MetascienceObservatory/1.0",
         }
-        r = requests.get(
+        r = _get_with_retries(
             "https://api.core.ac.uk/v3/search/works/",
             params={"q": f'doi:"{doi}"', "limit": 3},
             headers=core_headers,
-            timeout=15,
+            timeout=30,
+            retries=3,
         )
+        _core_note_success()
         _core_quota_note_headers(r.headers)
         if r.status_code == 429:
             # A 429 means the daily budget is gone, not that we asked too fast.
@@ -2009,6 +2637,9 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
                 return True
         return False
     except Exception as e:
+        from requests.exceptions import ConnectionError as _ReqConnErr, Timeout as _ReqTimeout
+        if isinstance(e, (_ReqConnErr, _ReqTimeout, SSLError)):
+            _core_note_timeout(verbose=verbose)
         if verbose:
             print(f"  CORE error: {e}")
         return False
@@ -2410,9 +3041,12 @@ def fetch_pdf(doi,
             time.sleep(delay)
             if verbose:
                 print(f"  DOI unavailable for PMID {pmid_input}; trying PMID-native PDF fallbacks...")
-            if try_pmid_direct_pdf_fallback(pmid_input, save_path, verbose):
+            pmid_got = try_pmid_direct_pdf_fallback(
+                pmid_input, save_path, verbose, allow_xml=allow_xml_fallback
+            )
+            if pmid_got:
                 _record_source(_source_out, "pmid_direct")
-                return save_path
+                return pmid_got if isinstance(pmid_got, str) else save_path
         if verbose:
             print(f"  Could not normalize/resolve identifier: {original_identifier}")
         return None
@@ -3102,9 +3736,29 @@ def fetch_pdf(doi,
                         if verbose: print(f"✅ PMC/EuropePMC success for {doi} ({pmcid})")
                         _record_source(_source_out, "pmc")
                         return save_path
+                    # pdf=render 404s for OA records Europe PMC holds only as
+                    # JATS (eLife 34573, PLOS Currents). The XML is the paper.
+                    if allow_xml_fallback:
+                        xml_got = try_pmc_xml_fallback(
+                            pmcid, save_path, verbose=verbose, doi=doi
+                        )
+                        if xml_got:
+                            _record_source(_source_out, "pmc")
+                            return xml_got
     except Exception as e:
         if verbose: print(f"Error with PMC: {e}")
         pass
+
+    # ---------------- eLife CDN / API XML (HTML site 406s) ----------------
+    if allow_xml_fallback and _elife_article_id(doi):
+        try:
+            xml_got = try_elife_xml_fallback(doi, save_path, verbose=verbose)
+            if xml_got:
+                _record_source(_source_out, "elife")
+                return xml_got
+        except Exception as e:
+            if verbose:
+                print(f"Error with eLife XML: {e}")
 
     # ---------------- eScholarship via PubMed LinkOut ----------------
     # UC and other universities deposit in eScholarship; PubMed abstract lists these
@@ -3121,9 +3775,12 @@ def fetch_pdf(doi,
         r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={email}", timeout=10)
         if r.status_code == 200:
             data = r.json()
-            best = data.get("best_oa_location") or {}
-            pdf_url = best.get("url_for_pdf") or best.get("url")
-            if try_download(pdf_url, save_path, verbose):
+            # best_oa_location is often a publisher landing with no PDF while
+            # oa_locations[] still has a repository or preprint file. Walk them
+            # all (capped); the ranked helper puts url_for_pdf first.
+            if _try_oa_location_urls(
+                doi, _collect_unpaywall_pdf_urls(data), save_path, verbose
+            ):
                 if (verbose): print(f"✅ Unpaywall success for {doi}")
                 _record_source(_source_out, "unpaywall")
                 return save_path
@@ -3151,6 +3808,17 @@ def fetch_pdf(doi,
                         if (verbose): print(f"✅ Crossref direct link success for {doi}")
                         _record_source(_source_out, "crossref")
                         return save_path
+            # Text-mining XML. similarity-checking / unspecified links are
+            # landing pages (PLOS dx.plos.org, eLife HTML). eLife's TDM link
+            # is the CDN JATS file the HTML site 406s would have pointed at.
+            if allow_xml_fallback:
+                for xml_url in _crossref_tdm_xml_urls(m):
+                    xml_got = _try_save_jats_xml(
+                        xml_url, save_path, verbose=verbose, doi=doi
+                    )
+                    if xml_got:
+                        _record_source(_source_out, "crossref")
+                        return xml_got
             # Landing page fallback
             landing = m.get("URL")
             if try_download(landing, save_path, verbose):
@@ -3177,6 +3845,23 @@ def fetch_pdf(doi,
                 or (landing and ("sciencedirect.com" in landing.lower() or "elsevier.com" in landing.lower()))
             ):
                 elsevier_crossref_message = m
+            # A published paper's PsyArXiv/bioRxiv copy is a Crossref relation,
+            # not Unpaywall's "best" location. Re-enter the chain on that DOI;
+            # _visited stops a cycle.
+            for related in _crossref_related_dois(m, doi):
+                if verbose:
+                    print(f"  Trying Crossref related DOI: {related}")
+                related_path = fetch_pdf(
+                    related, save_path, email, verbose, delay=0,
+                    allow_xml_fallback=allow_xml_fallback,
+                    use_playwright=use_playwright,
+                    _source_out=_source_out, _visited=_visited,
+                )
+                if related_path:
+                    if verbose:
+                        print(f"✅ Crossref related DOI success for {doi} via {related}")
+                    _record_source(_source_out, "crossref_preprint")
+                    return related_path
     except Exception as e:
         if (verbose): print(f"Error with Crossref: {e}")
         pass
@@ -3261,9 +3946,9 @@ def fetch_pdf(doi,
         )
         if r.status_code == 200:
             data = r.json()
-            best = data.get("best_oa_location") or {}
-            pdf_url = best.get("url_for_pdf") or best.get("url")
-            if try_download(pdf_url, save_path, verbose):
+            if _try_oa_location_urls(
+                doi, _collect_openalex_pdf_urls(data), save_path, verbose
+            ):
                 if (verbose): print(f"✅ OpenAlex success for {doi}")
                 _record_source(_source_out, "openalex")
                 return save_path
@@ -3321,7 +4006,7 @@ def fetch_pdf(doi,
     # ---------------- Direct DOI resolver ----------------
     try:
         resolved_url = f"https://doi.org/{doi}"
-        request_headers = {**headers, "Referer": resolved_url}
+        request_headers = {**HTML_HEADERS}
         r = requests.get(resolved_url, headers=request_headers, timeout=20, allow_redirects=True)
         if r.status_code == 200:
             # Direct PDF response
@@ -3458,9 +4143,12 @@ def fetch_pdf(doi,
             pmid = doi_to_pmid(doi, verbose=verbose)
         if pmid:
             pmid_str = str(pmid).strip()
-            if try_pmid_direct_pdf_fallback(pmid_str, save_path, verbose):
+            pmid_got = try_pmid_direct_pdf_fallback(
+                pmid_str, save_path, verbose, allow_xml=allow_xml_fallback
+            )
+            if pmid_got:
                 _record_source(_source_out, "pmid_direct")
-                return save_path
+                return pmid_got if isinstance(pmid_got, str) else save_path
 
 
     # ---------------- Deferred Elsevier fallback (PDF, then XML) ------------
@@ -3724,7 +4412,7 @@ def _append_failed_to_csv(output_dir, doi, category, detail, lock):
             ])
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -3811,6 +4499,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             prioritize_xml=prioritize_xml, xml_only=xml_only,
             xml_html_only=xml_html_only, get_xml_or_html=get_xml_or_html,
             to_markdown=to_markdown,
+            extract_images=extract_images,
             target_task=target_task, upgrade_existing=upgrade_existing,
             want_provenance=want_provenance, pull_supplementary=pull_supplementary,
             refresh_supplementary=refresh_supplementary,
@@ -3830,7 +4519,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -3953,6 +4642,29 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             client = HttpClient(_resolver.http.limiter, email=email, verbose=verbose)
             _si_local.client = client
         return client
+
+    def _pull_images(path):
+        """Embedded-image dump for one PDF. Never changes the verdict.
+
+        Same reason as _pull_si: a missing PyMuPDF or a corrupt PDF must not
+        turn a successful fetch into a failed record. Fires on the already-
+        exists skip branch -- "I have 5,000 PDFs, now dump their images" is
+        the primary use of --extract-images, and fetch_pdf is never called
+        there.
+        """
+        if not extract_images or not path:
+            return
+        pdf = path if str(path).lower().endswith(".pdf") else (
+            os.path.splitext(path)[0] + ".pdf"
+        )
+        if not str(pdf).lower().endswith(".pdf") or not os.path.exists(pdf):
+            return
+        try:
+            from .retrieval.extract_images import extract_images as _xi
+            _xi(pdf, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"  images: {os.path.basename(pdf)} failed ({e})")
 
     def _pull_si(display_id, raw_id, canonical, save_path):
         """Supplementary pass for one record. Never changes the verdict.
@@ -4124,6 +4836,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             # otherwise swallow it: fetch_pdf is never called on this
             # branch, so a hook inside it would do nothing here.
             _pull_si(display_id, raw_identifier, canonical_doi, save_path)
+            _pull_images(existing_file)
             if track_source:
                 return (display_id, True, existing_file, "existing")
             return (display_id, True, existing_file)
@@ -4171,6 +4884,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # path, or a record with four supplementary PDFs would report "pdf 5" and
         # corrupt the format composition tally.
         _pull_si(display_id, raw_identifier, canonical_doi, save_path)
+        _pull_images(result or save_path)
 
         if success:
             # A --get-xml-or-html record has two artifacts. Both are counted, and
@@ -4696,6 +5410,40 @@ def main():
         help="CSV file with PMIDs to process (for batch download)"
     )
     parser.add_argument(
+        "--input-from-dirs",
+        dest="input_from_dirs",
+        default=None,
+        help=(
+            "Batch from an EXISTING corpus directory: read each subdirectory "
+            "name, decode it back to a DOI (safe-filename inverse), and add "
+            "it to the batch. Supports both modern ('~' for ':') and legacy "
+            "('--' for both '/' and ':') folder-name encodings; ambiguous "
+            "legacy names are resolved via a Crossref existence check. Non-"
+            "safe-DOI-shaped subdirectory names are skipped."
+        ),
+    )
+    parser.add_argument(
+        "--migrate-folders",
+        dest="migrate_folders",
+        default=None,
+        help=(
+            "Rename legacy '--'-encoded folders under this directory to the "
+            "current modern encoding ('~' for ':') and exit. A folder is "
+            "migrated only when Crossref confirms the legacy reading "
+            "resolves to a real DOI AND the modern reading does not, so "
+            "legitimate multi-segment DOI folders (10.1093/abm/kaad072) are "
+            "left alone. Inner files whose stem starts with the old folder "
+            "name are also renamed so sidecar filenames stay in sync. Pair "
+            "with --migrate-dry-run to preview."
+        ),
+    )
+    parser.add_argument(
+        "--migrate-dry-run",
+        dest="migrate_dry_run",
+        action="store_true",
+        help="Report what --migrate-folders would do without touching disk.",
+    )
+    parser.add_argument(
         "--pmid-column",
         default="pmid",
         help="Column name for PMIDs in CSV when using --pmid-csv (default: pmid)"
@@ -4815,6 +5563,15 @@ def main():
              "Markdown; tables stay canonical HTML so colspan/rowspan survive, which "
              "Markdown cannot express. Run fetchpdf-md on a directory to convert "
              "artifacts you already have."
+    )
+    parser.add_argument(
+        "--extract-images",
+        action="store_true",
+        help="Dump every embedded image bitstream from each retrieved PDF into "
+             "{stem}_images/ with a {stem}_images.json manifest. Original streams, "
+             "not page renders. Also runs for PDFs already on disk (the backfill "
+             "case). Requires: pip install 'fetchpdf[images]'. Or run "
+             "fetchpdf-images on a directory."
     )
     parser.add_argument(
         "--target-task",
@@ -4994,6 +5751,52 @@ def main():
                 "   Install it with:  pip install 'fetchpdf[html]'"
             )
 
+    # Short-circuit: migrate legacy folder names and exit. No downloads run.
+    if args.migrate_folders:
+        target = args.migrate_folders
+        if not os.path.isdir(target):
+            print(f"❌ --migrate-folders target is not a directory: {target}")
+            return 1
+        actions = migrate_legacy_folders(
+            target, email=args.email,
+            dry_run=args.migrate_dry_run,
+            verbose=args.verbose,
+        )
+        by_action: dict[str, int] = {}
+        for a in actions:
+            by_action[a["action"]] = by_action.get(a["action"], 0) + 1
+        prefix = "[dry-run] " if args.migrate_dry_run else ""
+        print(f"{prefix}Scanned {len(actions)} candidate legacy folder(s):")
+        for k, v in sorted(by_action.items()):
+            print(f"  {k}: {v}")
+        return 0
+
+    # Batch from an existing corpus dir (decode folder names → DOIs).
+    if args.input_from_dirs:
+        if not os.path.isdir(args.input_from_dirs):
+            print(f"❌ --input-from-dirs target is not a directory: {args.input_from_dirs}")
+            return 1
+        dois_from_folders = dois_from_dir(
+            args.input_from_dirs, email=args.email, verbose=args.verbose,
+        )
+        if not dois_from_folders:
+            print(f"❌ No safe-DOI-shaped subdirectories found under {args.input_from_dirs}")
+            return 1
+        # Feed the discovered list through the same batch path used by --csv,
+        # by writing a temporary in-memory CSV. Keeps a single code path for
+        # start_from_row / workers / everything else the batch already handles.
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".csv", delete=False, encoding="utf-8",
+        )
+        tmp.write("DOI\n")
+        for d in dois_from_folders:
+            tmp.write(d + "\n")
+        tmp.close()
+        args.csv = tmp.name
+        print(f"📁 --input-from-dirs: discovered {len(dois_from_folders)} DOI(s) "
+              f"from subdirectories of {args.input_from_dirs}")
+
     # Auto-detect CSV from positional input arg
     if args.input and not args.csv and not args.pmid_csv:
         if args.input.lower().endswith('.csv') and os.path.isfile(args.input):
@@ -5055,6 +5858,7 @@ def main():
             xml_html_only=args.xml_html_only,
             get_xml_or_html=args.get_xml_or_html,
             to_markdown=args.to_markdown,
+            extract_images=args.extract_images,
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
@@ -5132,6 +5936,7 @@ def main():
             xml_html_only=args.xml_html_only,
             get_xml_or_html=args.get_xml_or_html,
             to_markdown=args.to_markdown,
+            extract_images=args.extract_images,
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
@@ -5266,6 +6071,27 @@ def main():
                     print(f"   manifest: {summary.manifest_path}")
             except Exception as e:
                 print(f"\n📎 supplementary pass failed: {str(e)[:200]}")
+
+        if args.extract_images:
+            pdf = None
+            if result and str(result).lower().endswith(".pdf"):
+                pdf = result
+            elif os.path.exists(save_path) and save_path.lower().endswith(".pdf"):
+                pdf = save_path
+            if pdf:
+                try:
+                    from .retrieval.extract_images import extract_images as _xi
+                    img = _xi(pdf, verbose=args.verbose)
+                    if img.status in ("ok", "skipped"):
+                        print(f"\n🖼️  images: {img.status} "
+                              f"({img.written} stream(s)) -> {img.manifest_path}")
+                    elif img.status == "unavailable":
+                        print(f"\n🖼️  {img.detail}")
+                    else:
+                        print(f"\n🖼️  images: {img.status}"
+                              + (f" ({img.detail})" if img.detail else ""))
+                except Exception as e:
+                    print(f"\n🖼️  image extraction failed: {str(e)[:200]}")
 
         if result:
             print(f"\n✅ Successfully downloaded to {result}")

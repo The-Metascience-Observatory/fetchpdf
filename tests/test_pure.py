@@ -393,6 +393,62 @@ class TestElsevierGateRequiresRealStructure:
         )
 
 
+class TestElsevierFirstPagePreviewIsRejected:
+    """Partial entitlement is a REAL one-page PDF, not an error payload.
+
+    Observed 2026-08-16 on PII S0022510X13030578 (10.1016/j.jns.2013.11.028):
+    HTTP 200, %PDF magic, 1.9 MB, genuine typeset text -- and 1 page of 8. The
+    magic-bytes gate filed it as a success twice. The only in-band signal is
+    the X-ELS-Status response header, which is what these tests pin.
+    """
+
+    WARNING = ("WARNING - Response limited to first page because "
+               "requestor not entitled to resource")
+
+    def _run(self, monkeypatch, tmp_path, response_headers):
+        class R:
+            status_code = 200
+            content = b"%PDF-1.4 one lonely page"
+            headers = response_headers
+
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **kw: R())
+        save = tmp_path / "rec.pdf"
+        return fpd._try_elsevier_pdf_by_pii("S0000000000", str(save), "test-key"), save
+
+    def test_preview_is_discarded_not_saved(self, monkeypatch, tmp_path):
+        out, save = self._run(monkeypatch, tmp_path, {"X-ELS-Status": self.WARNING})
+        assert out is None
+        assert not save.exists()
+
+    def test_lowercased_header_still_matches(self, monkeypatch, tmp_path):
+        """The live API serves `x-els-status` over HTTP/2; requests' own dict
+        is case-insensitive but the ladder's plain-dict Response is not."""
+        out, save = self._run(monkeypatch, tmp_path, {"x-els-status": self.WARNING})
+        assert out is None
+        assert not save.exists()
+
+    def test_full_pdf_without_warning_is_still_accepted(self, monkeypatch, tmp_path):
+        out, save = self._run(monkeypatch, tmp_path, {"X-ELS-Status": "OK"})
+        assert out == str(save)
+        assert save.read_bytes().startswith(b"%PDF")
+
+    def test_elsevier_stays_after_every_other_fallback_in_the_chain(self):
+        """Deferral is what makes discarding the preview safe in the legacy
+        chain: every other PDF route has already run by the time Elsevier is
+        consulted, so a rejected preview leaves nothing untried. If someone
+        moves the Elsevier block earlier, a preview would once again be able
+        to preempt fallbacks that might hold the full PDF."""
+        import inspect
+
+        source = inspect.getsource(fpd.fetch_pdf)
+        elsevier = source.index("Deferred Elsevier fallback")
+        # The private last-resort block sits above Elsevier when present; a
+        # scrubbed tree has no such block, and Elsevier must still be last.
+        if "LAST RESORTS" in source:
+            assert source.index("LAST RESORTS") < elsevier
+        assert "Deferred Elsevier fallback" in source
+
+
 def test_semantic_scholar_tls_is_verified():
     """A permanent verify=False bypass lived here behind a stale comment.
 
@@ -480,3 +536,346 @@ class TestWindowsNameRules:
             encoded, decoded = self._roundtrip(doi)
             assert decoded == doi
             assert "~2e~" not in encoded and "~20~" not in encoded
+
+
+# ---------------------------------------------------------------------------
+# OA XML fallback, landing Accept, CORE timeout breaker.
+# The 6361-paper run missed gold-OA JATS (eLife, PLOS Currents) because the
+# default chain only saved Elsevier XML. These pin the recovery paths. Offline.
+# ---------------------------------------------------------------------------
+
+_JATS_BODY = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<article xmlns:xlink="http://www.w3.org/1999/xlink">'
+    b"<front><article-meta><title-group>"
+    b"<article-title>Correction: a real paper</article-title>"
+    b"</title-group></article-meta></front>"
+    b"<body>" + b"<p>Full text paragraph of the correction. </p>" * 12
+    + b"</body></article>"
+)
+
+
+class _XmlResp:
+    def __init__(self, content=_JATS_BODY, status=200):
+        self.status_code = status
+        self.content = content
+        self.headers = {"content-type": "application/xml"}
+        self.text = content.decode("utf-8", errors="replace")
+        self.url = "https://example.org/full.xml"
+
+
+class TestJatsXmlFallback:
+    def test_elife_cdn_url_from_doi(self):
+        doi = "10.7554/eLife.34573"
+        assert fpd._elife_article_id(doi) == "34573"
+        urls = fpd._elife_xml_urls(doi)
+        assert urls[0] == (
+            "https://cdn.elifesciences.org/articles/34573/elife-34573-v1.xml"
+        )
+        assert fpd._elife_article_id("10.1002/ajmg.b.32068") is None
+        assert fpd._elife_xml_urls("10.1002/ajmg.b.32068") == []
+
+    def test_crossref_tdm_xml_keeps_text_mining_drops_similarity(self):
+        message = {
+            "link": [
+                {"URL": "https://cdn.elifesciences.org/articles/34573/elife-34573-v1.xml",
+                 "content-type": "application/xml",
+                 "intended-application": "text-mining"},
+                {"URL": "https://elifesciences.org/articles/34573",
+                 "content-type": "unspecified",
+                 "intended-application": "similarity-checking"},
+                {"URL": "https://api.elsevier.com/content/article/PII:S1",
+                 "content-type": "text/xml",
+                 "intended-application": "text-mining"},
+            ]
+        }
+        urls = fpd._crossref_tdm_xml_urls(message)
+        assert urls == [
+            "https://cdn.elifesciences.org/articles/34573/elife-34573-v1.xml",
+            "https://api.elsevier.com/content/article/PII:S1",
+        ]
+
+    def test_error_bean_is_not_full_text(self):
+        bean = (
+            b'<?xml version="1.0"?><errorBean><errCode>0</errCode>'
+            b"<errMsg>Article with id PMC1 is not open access one</errMsg>"
+            b"</errorBean>"
+        )
+        assert fpd._looks_like_jats_fulltext(bean) is False
+        assert fpd._looks_like_jats_fulltext(_JATS_BODY) is True
+
+    def test_pmc_xml_is_saved_when_render_would_404(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(fpd, "_get_with_retries", lambda *a, **k: _XmlResp())
+        out = fpd.try_pmc_xml_fallback(
+            "PMC5758112", str(tmp_path / "rec.pdf"), doi="10.7554/eLife.34573"
+        )
+        assert out == str(tmp_path / "rec.xml")
+        assert (tmp_path / "rec.xml").read_bytes().startswith(b"<?xml")
+        assert b"<body" in (tmp_path / "rec.xml").read_bytes()
+
+    def test_pmc_xml_rejects_error_bean(self, monkeypatch, tmp_path):
+        bean = (
+            b'<?xml version="1.0"?><errorBean><errCode>0</errCode>'
+            b"<errMsg>Article with id PMC1 is not open access one</errMsg>"
+            b"</errorBean>" + b" " * 200
+        )
+        monkeypatch.setattr(fpd, "_get_with_retries",
+                            lambda *a, **k: _XmlResp(content=bean))
+        assert fpd.try_pmc_xml_fallback("PMC1", str(tmp_path / "rec.pdf")) is None
+        assert list(tmp_path.glob("*.xml")) == []
+
+    def test_elife_fallback_uses_api_xml_field(self, monkeypatch, tmp_path):
+        class Api:
+            status_code = 200
+            def json(self):
+                return {"xml": "https://cdn.elifesciences.org/articles/34573/elife-34573-v1.xml"}
+        calls = []
+        def fake_get(url, *a, **k):
+            calls.append(url)
+            if "api.elifesciences.org" in url:
+                return Api()
+            return _XmlResp()
+        monkeypatch.setattr(fpd, "_get_with_retries", fake_get)
+        out = fpd.try_elife_xml_fallback(
+            "10.7554/eLife.34573", str(tmp_path / "rec.pdf")
+        )
+        assert out == str(tmp_path / "rec.xml")
+        assert any("api.elifesciences.org/articles/34573" in u for u in calls)
+
+    def test_fetch_pdf_gates_pmc_xml_on_allow_xml_fallback(self):
+        import inspect
+        source = inspect.getsource(fpd.fetch_pdf)
+        pmc = source[source.index("PubMed Central"):source.index("eScholarship")]
+        assert "allow_xml_fallback" in pmc
+        assert "try_pmc_xml_fallback" in pmc
+        assert "try_elife_xml_fallback" in source
+        assert "_crossref_tdm_xml_urls" in source
+
+
+class TestLandingPageHeaders:
+    def test_download_accept_still_prefers_pdf(self):
+        accept = fpd.headers["Accept"]
+        assert accept.lower().startswith("application/pdf")
+        assert "text/html" in accept
+
+    def test_html_headers_lead_with_html_and_are_not_same_origin(self):
+        assert fpd.HTML_HEADERS["Accept"].startswith("text/html")
+        assert fpd.HTML_HEADERS.get("Sec-Fetch-Site") == "none"
+        assert "Referer" not in fpd.HTML_HEADERS
+        assert fpd.headers.get("Sec-Fetch-Site") == "none"
+        assert fpd.headers.get("Referer") in (None, "")
+
+    def test_landing_get_uses_html_accept(self, monkeypatch, tmp_path):
+        seen = []
+        class R:
+            status_code = 200
+            text = "<html></html>"
+            url = "https://publisher.example/article"
+            headers = {"content-type": "text/html"}
+            content = b"<html></html>"
+        def fake_get(url, *a, **kw):
+            seen.append(kw.get("headers") or {})
+            return R()
+        monkeypatch.setattr(fpd.requests, "get", fake_get)
+        monkeypatch.setattr(fpd, "try_download", lambda *a, **k: False)
+        monkeypatch.setattr(fpd, "try_download_with_session", lambda *a, **k: False)
+        monkeypatch.setattr(fpd, "_collect_landing_page_candidates",
+                            lambda *a, **k: [])
+        fpd.try_landing_page_pdf_fallback(
+            "10.1/x", "https://publisher.example/article", str(tmp_path / "x.pdf")
+        )
+        assert seen, "landing GET never happened"
+        assert seen[0]["Accept"].startswith("text/html")
+
+    def test_406_retries_once_with_minimal_headers(self, monkeypatch, tmp_path):
+        seen = []
+        class R:
+            def __init__(self, status):
+                self.status_code = status
+                self.text = "<html></html>"
+                self.url = "https://publisher.example/article"
+                self.headers = {"content-type": "text/html"}
+                self.content = b"<html></html>"
+        def fake_get(url, *a, **kw):
+            seen.append(kw.get("headers") or {})
+            return R(406 if len(seen) == 1 else 200)
+        monkeypatch.setattr(fpd.requests, "get", fake_get)
+        monkeypatch.setattr(fpd, "try_download", lambda *a, **k: False)
+        monkeypatch.setattr(fpd, "try_download_with_session", lambda *a, **k: False)
+        monkeypatch.setattr(fpd, "_collect_landing_page_candidates",
+                            lambda *a, **k: [])
+        fpd.try_landing_page_pdf_fallback(
+            "10.1/x", "https://publisher.example/article", str(tmp_path / "x.pdf")
+        )
+        assert len(seen) == 2
+        assert seen[0] is fpd.HTML_HEADERS or seen[0]["Accept"].startswith("text/html")
+        assert seen[1] is fpd._HTML_HEADERS_MINIMAL or "Sec-Fetch-Site" not in seen[1]
+
+
+class TestOaLocationWalk:
+    """best_oa_location is often a publisher landing; the PDF is in oa_locations[]."""
+
+    def test_unpaywall_repository_pdf_beats_publisher_landing(self):
+        data = {
+            "best_oa_location": {
+                "url": "https://publisher.example/article",
+                "url_for_pdf": None,
+                "host_type": "publisher",
+                "version": "publishedVersion",
+            },
+            "oa_locations": [
+                {
+                    "url": "https://publisher.example/article",
+                    "url_for_pdf": None,
+                    "host_type": "publisher",
+                    "version": "publishedVersion",
+                },
+                {
+                    "url": "https://repo.example/bitstreams/1",
+                    "url_for_pdf": "https://repo.example/bitstreams/1.pdf",
+                    "host_type": "repository",
+                    "version": "acceptedVersion",
+                },
+            ],
+        }
+        urls = fpd._collect_unpaywall_pdf_urls(data)
+        assert urls[0] == ("https://repo.example/bitstreams/1.pdf", True)
+        assert any(u == "https://publisher.example/article" for u, _ in urls)
+
+    def test_unpaywall_dedupes_the_best_copy(self):
+        loc = {"url_for_pdf": "https://x.pdf", "url": "https://x.pdf",
+               "host_type": "repository"}
+        urls = fpd._collect_unpaywall_pdf_urls(
+            {"best_oa_location": loc, "oa_locations": [loc]}
+        )
+        assert urls == [("https://x.pdf", True)]
+
+    def test_openalex_uses_pdf_url_not_unpaywall_field_names(self):
+        """The default chain used to read url_for_pdf on an OpenAlex payload."""
+        data = {
+            "best_oa_location": {
+                "is_oa": True,
+                "pdf_url": None,
+                "landing_page_url": "https://publisher.example/a",
+                "source": {"type": "journal"},
+            },
+            "locations": [
+                {
+                    "is_oa": True,
+                    "pdf_url": "https://arxiv.org/pdf/2401.00001",
+                    "landing_page_url": "https://arxiv.org/abs/2401.00001",
+                    "source": {"type": "repository"},
+                },
+                {
+                    "is_oa": False,
+                    "pdf_url": "https://closed.example/secret.pdf",
+                    "source": {"type": "journal"},
+                },
+            ],
+        }
+        urls = fpd._collect_openalex_pdf_urls(data)
+        assert urls[0] == ("https://arxiv.org/pdf/2401.00001", True)
+        assert all("closed.example" not in u for u, _ in urls)
+
+    def test_oa_try_caps_direct_and_landing(self, monkeypatch):
+        tried_direct, tried_landing = [], []
+        monkeypatch.setattr(
+            fpd, "try_download",
+            lambda url, path, verbose=False: tried_direct.append(url) or False,
+        )
+        monkeypatch.setattr(
+            fpd, "try_landing_page_pdf_fallback",
+            lambda doi, url, path, verbose=False: tried_landing.append(url) or False,
+        )
+        cands = [(f"https://repo/{i}.pdf", True) for i in range(10)]
+        cands += [(f"https://pub/{i}", False) for i in range(10)]
+        assert fpd._try_oa_location_urls("10.1/x", cands, "/tmp/x.pdf") is False
+        assert len(tried_direct) == fpd._OA_DIRECT_MAX == 5
+        assert len(tried_landing) == fpd._OA_LANDING_MAX == 2
+
+
+class TestCrossrefPreprintRelations:
+    def test_has_preprint_yields_the_doi(self):
+        message = {
+            "relation": {
+                "has-preprint": [
+                    {"id-type": "doi", "id": "10.31234/osf.io/abcde"},
+                    {"id-type": "doi", "id": "10.1002/same-as-self"},
+                ]
+            }
+        }
+        assert fpd._crossref_related_dois(message, "10.1002/same-as-self") == [
+            "10.31234/osf.io/abcde"
+        ]
+
+    def test_doi_org_prefix_is_stripped_and_non_dois_dropped(self):
+        message = {
+            "relation": {
+                "is-preprint-of": [
+                    {"id-type": "doi", "id": "https://doi.org/10.1037/pst0000581"},
+                    {"id-type": "pmid", "id": "12345678"},
+                    {"id": "10.1101/2024.01.01.12345"},
+                ]
+            }
+        }
+        assert fpd._crossref_related_dois(message, "10.1/x") == [
+            "10.1037/pst0000581",
+            "10.1101/2024.01.01.12345",
+        ]
+
+    def test_caps_at_two(self):
+        message = {
+            "relation": {
+                "has-preprint": [
+                    {"id-type": "doi", "id": f"10.1/{i}"} for i in range(5)
+                ]
+            }
+        }
+        assert len(fpd._crossref_related_dois(message, "10.9/z")) == 2
+
+
+class TestCoreTimeoutBreaker:
+    def setup_method(self):
+        fpd._CORE_TIMEOUT_COUNT = 0
+        fpd._CORE_TIMEOUT_DISABLED = False
+        fpd._CORE_SESSION_DISABLED = False
+
+    def teardown_method(self):
+        fpd._CORE_TIMEOUT_COUNT = 0
+        fpd._CORE_TIMEOUT_DISABLED = False
+
+    def test_search_goes_through_the_retry_helper(self, monkeypatch):
+        monkeypatch.setenv("COREAPIKEY", "test-key")
+        called = {}
+        def fake_get(url, *a, **kw):
+            called["url"] = url
+            called["timeout"] = kw.get("timeout")
+            called["retries"] = kw.get("retries")
+            raise AssertionError("stop after observing the call")
+        monkeypatch.setattr(fpd, "_get_with_retries", fake_get)
+        monkeypatch.setattr(fpd, "_core_quota_exhausted", lambda verbose=False: False)
+        try:
+            fpd.try_core_fallback.__wrapped__("10.1/x", "/tmp/x.pdf")
+        except AssertionError:
+            pass
+        assert "api.core.ac.uk" in called.get("url", "")
+        assert called.get("timeout") == 30
+        assert called.get("retries") == 3
+
+    def test_repeated_timeouts_skip_core_for_the_rest_of_the_run(self, monkeypatch):
+        from requests.exceptions import Timeout
+        monkeypatch.setenv("COREAPIKEY", "test-key")
+        monkeypatch.setattr(fpd, "_core_quota_exhausted", lambda verbose=False: False)
+        monkeypatch.setattr(
+            fpd, "_get_with_retries",
+            lambda *a, **k: (_ for _ in ()).throw(Timeout("read timed out")),
+        )
+        for _ in range(fpd._CORE_TIMEOUT_LIMIT):
+            assert fpd.try_core_fallback.__wrapped__("10.1/x", "/tmp/x.pdf") is False
+        assert fpd._CORE_TIMEOUT_DISABLED is True
+        # Next call must not hit the network.
+        monkeypatch.setattr(
+            fpd, "_get_with_retries",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("CORE was not skipped")),
+        )
+        assert fpd.try_core_fallback.__wrapped__("10.1/x", "/tmp/x.pdf") is False

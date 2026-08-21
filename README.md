@@ -2,6 +2,7 @@
 
 A comprehensive Python package to download academic papers (PDFs) from DOIs (or PMIDs resolved to DOIs) using multiple fallback sources.
 
+
 ## Table of Contents
 
 - [Features](#features)
