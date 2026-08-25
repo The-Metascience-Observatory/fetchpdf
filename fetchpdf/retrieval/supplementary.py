@@ -275,6 +275,9 @@ def pull_for_record(raw_identifier, doi=None, pmid=None, save_path=None,
                     download_data_artifacts=False,
                     max_data_artifact_bytes=None,
                     llm_adjudicate_artifacts=False,
+                    llm_agent_retrieval=False,
+                    llm_backend=None,
+                    max_llm_records=0,
                     llm_model=None,
                     unpack_data_artifacts=False,
                     download_related_unverified=False,
@@ -308,6 +311,9 @@ def pull_for_record(raw_identifier, doi=None, pmid=None, save_path=None,
                        download_data_artifacts=download_data_artifacts,
                        max_data_artifact_bytes=max_data_artifact_bytes,
                        llm_adjudicate_artifacts=llm_adjudicate_artifacts,
+                       llm_agent_retrieval=llm_agent_retrieval,
+                       llm_backend=llm_backend,
+                       max_llm_records=max_llm_records,
                        llm_model=llm_model,
                        download_related_unverified=download_related_unverified)
 
@@ -331,13 +337,16 @@ def pull_for_record(raw_identifier, doi=None, pmid=None, save_path=None,
             run.take(entry)
         _retry_transients(run, stem)
 
-        # Providers that had to download into a temp dir (atypon_suppl) are
-        # done with it once every file has been committed.
-        try:
-            from .supplement_atypon import cleanup_scratch
-            cleanup_scratch(ctx)
-        except Exception:
-            pass
+        # Providers that had to download into a temp dir (atypon_suppl, and
+        # the retrieval agent's downloading backend) are done with it once
+        # every file has been committed.
+        for module in ("supplement_atypon", "llm_agent_retrieval"):
+            try:
+                cleanup = __import__(f"fetchpdf.retrieval.{module}",
+                                     fromlist=["cleanup_scratch"])
+                cleanup.cleanup_scratch(ctx)
+            except Exception:
+                pass
         summary = run.finish(manifest_path, ids, reports, max_file_bytes)
         # The link services' answers, including the empty ones. Written after
         # the manifest so a crash between the two loses the links, never the
@@ -486,6 +495,12 @@ class _Run:
         Keyed on the provider tag: _files_in_repository stamps routed files as
         "<via>:<provider>", so the prefix names the discovery route.
         """
+        # The retrieval agent's DATASET files are tagged
+        # "fulltext_scan:llm_agent" precisely so they match the
+        # "fulltext_scan" prefix below and land in _data_artifacts/ on the
+        # data budget. Its SUPPLEMENT files are tagged "llm_agent", which
+        # deliberately does not match: those are the paper's own SI and belong
+        # in the flat numbered namespace beside the PDF.
         provider = getattr(entry, "provider", "") or ""
         return provider.startswith(("scholix_related:", "epmc_datalinks:",
                                     "datacite_related:", "fulltext_scan"))
@@ -811,7 +826,7 @@ class _Run:
             "provider": entry.provider,
             "listing_index": entry.listing_index,
             "container": container,
-            "url": redact(url or entry.url),
+            "url": _provenance_url(entry, url),
             "content_type": content_type,
             "role": entry.role,
             "bytes": size,
@@ -1462,6 +1477,31 @@ def _error_bean(path: str) -> Optional[str]:
     return "errorBean with no errMsg"
 
 
+def _provenance_url(entry, transferred_url=None) -> Optional[str]:
+    """Where this file actually came from, for the manifest.
+
+    Normally that is the URL we transferred. The exception is a file some
+    provider had already fetched to a scratch directory and handed over as
+    `file://...`: HttpClient.download adopts those under the same rules as a
+    network transfer, which is the right thing for the BYTES and the wrong
+    thing for the RECORD -- a temp path stops meaning anything the moment the
+    directory is removed, and the manifest is what a reader consults to ask
+    where a file came from.
+
+    So a provider that knows the real origin puts it in `extra["source_url"]`
+    and it wins. Losing that would be this toolkit's own signature defect: a
+    local path presented as a provenance.
+    """
+    extra = getattr(entry, "extra", None) or {}
+    source = extra.get("source_url")
+    if source:
+        return redact(str(source))
+    candidate = transferred_url or entry.url
+    if str(candidate or "").startswith("file://"):
+        return None          # honest: we do not know, rather than a temp path
+    return redact(candidate)
+
+
 def _is_zip(path: str) -> bool:
     """By magic bytes, not extension: a .zip served as .dat is still a zip, and a
     .docx is a zip we must NOT unpack -- hence the extension check as well."""
@@ -1624,9 +1664,9 @@ def _wire(resolver, http, ladder, save_path, email, verbose):
         http = getattr(resolver, "http", None)
     if http is None:
         from .http import HttpClient
-        from .ratelimit import HostRateLimiter
+        from .ratelimit import HostRateLimiter, shared_host_limiter
 
-        http = HttpClient(HostRateLimiter(ladder.rate_limits), email=email, verbose=verbose)
+        http = HttpClient(shared_host_limiter(ladder.rate_limits), email=email, verbose=verbose)
 
     owns_resolver = resolver is None
     if owns_resolver:
@@ -1643,6 +1683,8 @@ def _wire(resolver, http, ladder, save_path, email, verbose):
 def _context(http, resolver, ladder, save_path, verbose, email, delay,
              use_playwright, download_data_artifacts=False,
              max_data_artifact_bytes=None, llm_adjudicate_artifacts=False,
+             llm_agent_retrieval=False, llm_backend=None,
+             max_llm_records=0,
              llm_model=None, download_related_unverified=False):
     from .context import RetrievalContext
 
@@ -1658,6 +1700,9 @@ def _context(http, resolver, ladder, save_path, verbose, email, delay,
     # they configure one optional provider, not the retrieval itself, and
     # RetrievalContext is shared with every source in the ladder.
     ctx.llm_adjudicate_artifacts = llm_adjudicate_artifacts
+    ctx.llm_agent_retrieval = llm_agent_retrieval
+    ctx.llm_backend = llm_backend
+    ctx.max_llm_records = max_llm_records
     ctx.llm_model = llm_model
     return ctx
 

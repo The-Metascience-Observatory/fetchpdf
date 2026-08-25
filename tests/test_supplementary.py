@@ -2359,6 +2359,360 @@ def test_make_subfolder_keeps_run_level_files_at_the_root(tmp_path, monkeypatch)
     assert (tmp_path / "failed_dois.csv").exists(), "run-level CSV left the root"
 
 
+def test_make_subfolder_leaves_no_directory_when_nothing_was_downloaded(tmp_path, monkeypatch):
+    """The directory has to be created before the download (nothing down the
+    writing chain calls makedirs), so a record that fails every source would
+    otherwise leave an empty folder -- and a run over a few thousand missing
+    DOIs would bury the hits in empty directories."""
+    module = batch_module()
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+    monkeypatch.setattr(module, "fetch_pdf", lambda *a, **k: None)
+
+    run_batch(dois=["10.1234/x"], output_dir=str(tmp_path), make_subfolder=True)
+
+    assert not (tmp_path / "10.1234--x").exists(), \
+        "a failed record left an empty per-record directory behind"
+
+
+def test_make_subfolder_keeps_a_directory_that_has_anything_in_it(tmp_path, monkeypatch):
+    """The cleanup tests emptiness, not the success flag: whatever the record
+    did write -- here a partial the engine left behind after reporting failure
+    -- is not something the pruner may delete."""
+    module = batch_module()
+
+    def fetch_leaving_a_partial(doi, save_path, *a, **k):
+        with open(save_path + ".part", "wb") as f:
+            f.write(b"half a pdf")
+        return None
+
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+    monkeypatch.setattr(module, "fetch_pdf", fetch_leaving_a_partial)
+
+    run_batch(dois=["10.1234/x"], output_dir=str(tmp_path), make_subfolder=True)
+
+    assert (tmp_path / "10.1234--x" / "10.1234--x.pdf.part").exists(), \
+        "the pruner deleted a directory that still held a file"
+
+
+def test_make_subfolder_survives_a_record_that_raises(tmp_path, monkeypatch):
+    """The prune runs in a finally, so a record that dies mid-download cleans up
+    on the way out instead of leaving its folder pinned by the exception."""
+    module = batch_module()
+
+    def exploding_fetch(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+    monkeypatch.setattr(module, "fetch_pdf", exploding_fetch)
+
+    with pytest.raises(RuntimeError):
+        run_batch(dois=["10.1234/x"], output_dir=str(tmp_path), make_subfolder=True)
+
+    assert not (tmp_path / "10.1234--x").exists(), \
+        "a crashed record left an empty per-record directory behind"
+
+
+def test_make_subfolder_leaves_no_directory_when_the_abstract_is_missing(tmp_path, monkeypatch):
+    """--abstract-only is a separate return path out of the record, and it gets
+    the same treatment: no abstract, no folder."""
+    module = batch_module()
+
+    import fetchpdf.fetch_abstract_from_doi as abstract_mod
+    monkeypatch.setattr(abstract_mod, "save_abstract_markdown", lambda *a, **k: None)
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+
+    run_batch(dois=["10.1234/x"], output_dir=str(tmp_path),
+              abstract_only=True, make_subfolder=True)
+
+    assert not (tmp_path / "10.1234--x").exists(), \
+        "a record with no abstract left an empty per-record directory behind"
+
+
+# -- --on-existing -----------------------------------------------------------
+# The skip itself is silent and per-record, so a re-run over a directory you
+# already filled gives no hint that --pull-supplementary would fetch the SI for
+# what is already there. These cover the prompt that surfaces it -- and, first,
+# that it stays out of the way of every unattended caller.
+
+
+def _boom(why):
+    """An input() that fails the test if it is ever called.
+
+    Poisoned rather than mocked: in these cases a prompt IS the bug, and a mock
+    returning a default would swallow it.
+    """
+    def _called(*_a, **_k):
+        raise AssertionError(why)
+    return _called
+
+
+def _si_summary():
+    import fetchpdf.retrieval.supplementary as supplementary
+
+    return supplementary.SupplementarySummary(status="none_found")
+
+
+def _corpus(tmp_path, existing=("10.1234/a",), listed=("10.1234/a", "10.1234/b"),
+            subfolder=True):
+    """A CSV plus an output dir already holding `existing` as downloaded PDFs."""
+    module = batch_module()
+    out = tmp_path / "out"
+    out.mkdir()
+    for doi in existing:
+        safe = module.doi_to_safe_filename(doi)
+        rec = (out / safe) if subfolder else out
+        rec.mkdir(exist_ok=True)
+        (rec / f"{safe}.pdf").write_bytes(b"%PDF-1.4\n" + b"x" * 2000)
+    csv = tmp_path / "papers.csv"
+    csv.write_text("DOI\n" + "".join(d + "\n" for d in listed), encoding="utf-8")
+    return str(csv), str(out)
+
+
+def run_main(argv, monkeypatch, on_input=None):
+    """main() with the given argv, offline. Returns (exit_code, printed text)."""
+    import sys
+
+    module = batch_module()
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+    monkeypatch.setattr(module, "fetch_pdf", lambda *a, **k: None)
+    if on_input is not None:
+        monkeypatch.setattr(module, "_stdio_is_interactive", lambda: True)
+        monkeypatch.setattr("builtins.input", on_input)
+    saved = sys.argv
+    sys.argv = ["fetchpdf"] + argv
+    try:
+        with isolated_stdio() as out:
+            code = module.main()
+    finally:
+        sys.argv = saved
+    return code, printed(out)
+
+
+def test_no_tty_never_prompts_and_the_run_is_unchanged(tmp_path, monkeypatch):
+    """The regression that would hang CI rather than fail it.
+
+    Nothing else in this package has ever read stdin, so cron jobs, pipes and the
+    -n auto test suite have to walk straight through this. input() is poisoned
+    rather than mocked: a call is the bug, and a mock would hide it.
+    """
+    csv, out = _corpus(tmp_path)
+    monkeypatch.setattr("builtins.input", _boom("prompted without a tty"))
+
+    code, text = run_main(
+        [csv, "-o", out, "--make-subfolder", "--no-missing-report"], monkeypatch)
+
+    assert code in (0, 1)
+    assert "already have artifacts" in text, "the count was not reported at all"
+    assert "⏭️  Skipping 10.1234/a" in text, "the run did not proceed as before"
+
+
+def test_the_reported_count_is_what_the_run_actually_skips(tmp_path, monkeypatch):
+    """A scan that counted differently from the worker would be worse than none:
+    the number is shown to the operator as the size of the choice."""
+    csv, out = _corpus(tmp_path, existing=("10.1234/a",),
+                       listed=("10.1234/a", "10.1234/b", "10.1234/c"))
+
+    _, text = run_main(
+        [csv, "-o", out, "--make-subfolder", "--no-missing-report"], monkeypatch)
+
+    assert "1 of 3 records already have artifacts" in text
+    assert text.count("⏭️  Skipping") == 1
+
+
+def test_on_existing_skip_never_prompts_even_on_a_tty(tmp_path, monkeypatch):
+    csv, out = _corpus(tmp_path)
+
+    code, text = run_main(
+        [csv, "-o", out, "--make-subfolder", "--no-missing-report",
+         "--on-existing", "skip"],
+        monkeypatch, on_input=_boom("prompted despite --on-existing skip"))
+
+    assert code in (0, 1)
+    assert "[m] skip, but pull SI/SM" not in text
+
+
+def test_on_existing_supplement_pulls_si_without_asking(tmp_path, monkeypatch):
+    """The scripted form of answering 'm': no prompt, and the SI pass runs on the
+    already-present record without re-downloading its PDF."""
+    import fetchpdf.retrieval.supplementary as supplementary
+
+    csv, out = _corpus(tmp_path)
+    pulled = []
+    monkeypatch.setattr(supplementary, "pull_for_record",
+                        lambda **k: pulled.append(k["save_path"]) or _si_summary())
+
+    pdf = tmp_path / "out" / "10.1234--a" / "10.1234--a.pdf"
+    before = pdf.read_bytes()
+
+    run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report",
+              "--on-existing", "supplement"],
+             monkeypatch, on_input=_boom("prompted despite --on-existing supplement"))
+
+    assert pulled, "--on-existing supplement did not turn the SI pass on"
+    assert pdf.read_bytes() == before, "the existing PDF was rewritten"
+
+
+def test_answering_m_is_the_same_as_on_existing_supplement(tmp_path, monkeypatch):
+    import fetchpdf.retrieval.supplementary as supplementary
+
+    csv, out = _corpus(tmp_path)
+    pulled = []
+    monkeypatch.setattr(supplementary, "pull_for_record",
+                        lambda **k: pulled.append(k["save_path"]) or _si_summary())
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                       monkeypatch, on_input=lambda _prompt: "m")
+
+    # The "Choice [s]: " string is input()'s own prompt argument, which a mocked
+    # input never writes -- assert on the menu the code prints itself.
+    assert "[m] skip, but pull SI/SM" in text, "the menu never appeared"
+    assert pulled, "answering m did not turn the SI pass on"
+
+
+def test_answering_a_aborts_without_downloading(tmp_path, monkeypatch):
+    csv, out = _corpus(tmp_path)
+
+    code, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                          monkeypatch, on_input=lambda _prompt: "a")
+
+    assert code == 0
+    assert "📥 Downloading" not in text, "abort still downloaded something"
+
+
+def test_empty_answer_takes_the_skip_default(tmp_path, monkeypatch):
+    csv, out = _corpus(tmp_path)
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                       monkeypatch, on_input=lambda _prompt: "")
+
+    assert "⏭️  Skipping 10.1234/a" in text
+    assert "📥 Downloading 10.1234/b" in text
+
+
+def test_an_unrecognised_answer_re_asks(tmp_path, monkeypatch):
+    """Better to ask twice than to guess: 'y' could plausibly mean any of the
+    three, and picking one would act on an intent nobody expressed."""
+    csv, out = _corpus(tmp_path)
+    answers = iter(["y", "m"])
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                       monkeypatch, on_input=lambda _prompt: next(answers))
+
+    assert "Please answer s, m or a." in text
+    assert next(answers, None) is None, "the second answer was never read"
+
+
+def test_ctrl_c_at_the_menu_aborts_cleanly(tmp_path, monkeypatch):
+    """Nothing has been downloaded yet, so an interrupt here is an abort, not a
+    traceback."""
+    csv, out = _corpus(tmp_path)
+
+    def interrupt(_prompt):
+        raise KeyboardInterrupt
+
+    code, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                          monkeypatch, on_input=interrupt)
+
+    assert code == 0
+    assert "📥 Downloading" not in text
+
+
+def test_a_closed_stdin_mid_prompt_takes_the_default(tmp_path, monkeypatch):
+    """A tty that vanishes must not spin forever on a stream with no lines left."""
+    csv, out = _corpus(tmp_path)
+
+    def eof(_prompt):
+        raise EOFError
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                       monkeypatch, on_input=eof)
+
+    assert "⏭️  Skipping 10.1234/a" in text
+
+
+def test_pull_supplementary_already_set_suppresses_the_prompt(tmp_path, monkeypatch):
+    """The question is already answered; asking it again is noise."""
+    import fetchpdf.retrieval.supplementary as supplementary
+
+    csv, out = _corpus(tmp_path)
+    monkeypatch.setattr(supplementary, "pull_for_record", lambda **k: _si_summary())
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report",
+                        "--pull-supplementary"],
+                       monkeypatch, on_input=_boom("prompted with --pull-supplementary"))
+
+    assert "already have artifacts" not in text
+
+
+def test_abstract_only_suppresses_the_prompt(tmp_path, monkeypatch):
+    """--abstract-only already warns that --pull-supplementary is ignored, so
+    offering it here would contradict that warning."""
+    csv, out = _corpus(tmp_path)
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report",
+                        "--abstract-only"],
+                       monkeypatch, on_input=_boom("prompted under --abstract-only"))
+
+    assert "already have artifacts" not in text
+
+
+def test_the_deferring_flags_suppress_the_prompt(tmp_path, monkeypatch):
+    """--get-xml-or-html hands the already-here decision to the engine, which
+    backfills the missing half instead of skipping. There is no skip to offer an
+    alternative to, and saying there is would misreport the run."""
+    csv, out = _corpus(tmp_path)
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report",
+                        "--get-xml-or-html"],
+                       monkeypatch, on_input=_boom("prompted under --get-xml-or-html"))
+
+    assert "already have artifacts" not in text
+
+
+def test_nothing_on_disk_means_no_prompt(tmp_path, monkeypatch):
+    csv, out = _corpus(tmp_path, existing=())
+
+    _, text = run_main([csv, "-o", out, "--make-subfolder", "--no-missing-report"],
+                       monkeypatch, on_input=_boom("prompted with an empty output dir"))
+
+    assert "already have artifacts" not in text
+
+
+def test_the_count_reads_both_layouts(tmp_path):
+    """Flat and subfolder differ by exactly one path segment, and the scan has to
+    follow whichever the run will use -- a flat corpus counted under
+    --make-subfolder would promise skips that never happen."""
+    module = batch_module()
+    _corpus(tmp_path, subfolder=False)
+    dois = ["10.1234/a", "10.1234/b"]
+    out = str(tmp_path / "out")
+
+    assert module.count_existing_records(dois, out, make_subfolder=False) == (1, 2)
+    assert module.count_existing_records(dois, out, make_subfolder=True) == (0, 2)
+
+
+def test_the_count_canonicalises_case_the_same_way_the_worker_does(tmp_path):
+    """A CSV row in a different case than the folder still matches, because both
+    sides go through canonicalize_doi (which lowercases) before encoding. The
+    point is not case-insensitivity for its own sake -- it is that the scan and
+    the worker reach the identical filename by the identical route."""
+    module = batch_module()
+    _corpus(tmp_path, existing=("10.1097/pr9.1",), listed=("10.1097/PR9.1",))
+
+    assert module.count_existing_records(
+        ["10.1097/PR9.1"], str(tmp_path / "out"), make_subfolder=True) == (1, 1)
+
+
+def test_a_pmid_row_is_counted_as_missing_not_resolved(tmp_path):
+    """The scan must not hit the network: a round trip per row would cost more
+    than the skip it describes. PMIDs therefore undercount rather than resolve."""
+    module = batch_module()
+    _corpus(tmp_path, existing=(), listed=())
+
+    assert module.count_existing_records(
+        ["12345678", "pmid:12345678"], str(tmp_path / "out")) == (0, 2)
+
+
 def test_make_subfolder_routes_the_abstract_into_the_record_directory(tmp_path, monkeypatch):
     """save_abstract_markdown takes a DIRECTORY, so it needs the record dir passed
     explicitly -- otherwise the exists-check and the write disagree and the

@@ -29,7 +29,17 @@ def fetch_via_legacy_chain(ids, ctx) -> Optional[Artifact]:
 
     # Imported at call time: fetchpdf imports the engine, so a
     # module-scope import here would be a cycle.
-    from ...fetchpdf import fetch_pdf
+    #
+    # The CHAIN, not the `fetch_pdf` wrapper. The wrapper falls back to a
+    # structured-full-text walk when it cannot produce a PDF -- correct for a
+    # caller who asked for a paper, wrong here, where the tiered engine has
+    # ALREADY walked and failed T1 and T2 before descending to this rung. Going
+    # through the wrapper re-ran that walk verbatim for every hard record, with
+    # `resolver=None`, so it also discarded the primed batch resolver and built
+    # a fresh limiter, client and cache per record -- then announced it had
+    # saved structured text to a temp path the caller never sees.
+    from ...fetchpdf import _fetch_pdf_chain as fetch_pdf
+    from ...fetchpdf import download_url_for
 
     directory = os.path.dirname(os.path.abspath(ctx.save_path)) or "."
     os.makedirs(directory, exist_ok=True)
@@ -65,7 +75,10 @@ def fetch_via_legacy_chain(ids, ctx) -> Optional[Artifact]:
             content=content,
             tier=Tier.T5_PDF,
             source="legacy_pdf_chain",
-            url="",
+            # The URL the bytes actually came from, recorded by try_download.
+            # This was "" until now, which is why a wrong artifact on disk could
+            # not say where it came from.
+            url=download_url_for(written) or download_url_for(temp_path),
             http_status=200,
             served_content_type="application/pdf",
             identifier_used=ids.doi,

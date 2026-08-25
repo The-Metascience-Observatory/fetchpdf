@@ -18,6 +18,7 @@ Three rules hold throughout:
 """
 
 import os
+import re
 import tempfile
 from typing import List, Optional, Tuple
 
@@ -28,7 +29,7 @@ from .context import RetrievalContext
 from . import goals
 from .http import HttpClient
 from .provenance import ProvenanceRecord, write_sidecar
-from .ratelimit import HostRateLimiter
+from .ratelimit import HostRateLimiter, shared_host_limiter
 from .resolve import BatchResolver
 from .tiers import ARTIFACT_EXTENSIONS, Tier, TIER_EXTENSIONS, load_ladder
 from .validate import validate_t1, validate_t2
@@ -115,7 +116,7 @@ def retrieve_tiered(
     if owns_resolver:
         # Single-record mode: a resolver of its own, so the CLI path works
         # without a batch priming it. Batch mode passes a primed one in.
-        limiter = HostRateLimiter(ladder.rate_limits)
+        limiter = shared_host_limiter(ladder.rate_limits)
         http = HttpClient(limiter, email=email, verbose=verbose)
         resolver = BatchResolver(
             http, ResolutionCache.for_output_dir(output_dir, verbose), ladder, verbose
@@ -441,7 +442,29 @@ def _validate_for_tier(artifact: Artifact, ctx, ids=None) -> ValidationResult:
             return ValidationResult.failure("not a PDF despite T5 classification")
         if len(artifact.content) < 1024:
             return ValidationResult.failure("PDF implausibly small")
-        return ValidationResult(ok=True, checks_passed=["pdf-magic", "min-size"])
+        # "Is it a PDF" was the whole gate here, and it is a file-type check
+        # wearing an identity check's clothes. T2 has refused a page that
+        # declares a different article since _citation_doi_mismatch; a PDF got
+        # no such question, so a document from the paper's own reference list
+        # passed as the paper. See retrieval/pdf_identity.
+        from .pdf_identity import article_pages, article_title, verify_pdf_identity
+
+        verdict = verify_pdf_identity(
+            artifact.content,
+            ids.doi if ids is not None else None,
+            article_title(ids) if ids is not None else "",
+            pages=article_pages(ids) if ids is not None else "",
+            # Left by _accept when a structured copy of THIS record was taken
+            # earlier in the same walk. A publisher's first-page preview carries
+            # the article's own DOI and title, so no identity signal can see it;
+            # its length against the full text can.
+            reference_chars=ctx.scratch.get("structured_text_chars"),
+        )
+        if not verdict.ok:
+            return ValidationResult.failure(verdict.reason)
+        return ValidationResult(
+            ok=True, checks_passed=["pdf-magic", "min-size"] + verdict.signals
+        )
     if tier == Tier.T6_PLAINTEXT:
         text = artifact.content.decode("utf-8", errors="replace")
         minimum = ctx.threshold("abstract_stub_chars", 2500)
@@ -461,6 +484,7 @@ def _validate_for_tier(artifact: Artifact, ctx, ids=None) -> ValidationResult:
 
 def _accept(artifact: Artifact, stem: str, ctx, provenance) -> str:
     """Normalize, chunk, write the artifact, then the sidecar."""
+    _note_structured_length(artifact, ctx)
     chunks, canonical_tokens = _normalize(artifact, ctx)
     path = stem + artifact.suffix
     _write_atomic(path, artifact.content)
@@ -469,6 +493,25 @@ def _accept(artifact: Artifact, stem: str, ctx, provenance) -> str:
         provenance.resolution_chain = _chain_of(ctx)
         provenance.accept(artifact, path, chunks=chunks, canonical_tokens=canonical_tokens)
     return path
+
+
+def _note_structured_length(artifact: Artifact, ctx) -> None:
+    """Record how much prose a structured artifact carries, for later tiers.
+
+    T1 and T2 are walked before T5, so by the time a PDF is judged this is the
+    length of the same article in a format that cannot be truncated by a
+    paywall. See pdf_identity._truncation_reason.
+    """
+    if artifact.tier not in (Tier.T1_XML, Tier.T2_HTML):
+        return
+    try:
+        text = artifact.content.decode("utf-8", errors="replace")
+    except Exception:
+        return
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+    plain = " ".join(re.sub(r"<[^>]+>", " ", text).split())
+    if plain:
+        ctx.scratch.setdefault("structured_text_chars", len(plain))
 
 
 def _normalize(artifact: Artifact, ctx) -> Tuple[list, int]:

@@ -52,6 +52,29 @@ class TokenBucket:
             self._last = time.monotonic() + max(0.0, seconds)
 
 
+#: The process-wide limiter. Politeness is a property of the PROCESS, not of a
+#: batch: an API's allowance does not multiply because we started a second
+#: walk. Three call sites used to build their own -- the tiered engine, the
+#: supplementary pass and the legacy chain's Crossref helper -- so a run that
+#: touched two of them had two budgets for the same host and could serve
+#: Crossref 20 requests a second against a published allowance of 10.
+#:
+#: First config wins, which is correct here because every caller passes the
+#: same `ladder.rate_limits`. Tests that want an isolated limiter construct
+#: HostRateLimiter directly.
+_SHARED_LIMITER = None
+_SHARED_LOCK = threading.Lock()
+
+
+def shared_host_limiter(config: Optional[dict] = None) -> "HostRateLimiter":
+    """The one limiter every production caller should use."""
+    global _SHARED_LIMITER
+    with _SHARED_LOCK:
+        if _SHARED_LIMITER is None:
+            _SHARED_LIMITER = HostRateLimiter(config)
+        return _SHARED_LIMITER
+
+
 class HostRateLimiter:
     """Resolves a host to its bucket, honoring the keyed/unkeyed distinction."""
 

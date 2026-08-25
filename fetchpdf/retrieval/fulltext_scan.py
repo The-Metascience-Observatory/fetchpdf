@@ -101,9 +101,12 @@ _CITATION_CONTEXT = re.compile(
     re.I,
 )
 
-#: A PsyArXiv DOI embeds "osf.io" but names a PREPRINT, not a deposit. Without
-#: this, 10.31234/osf.io/8r9p7 is scraped as OSF id "8r9p7" and downloaded.
-_PREPRINT_DOI = re.compile(r"10\.31234/", re.I)
+#: Preprint-server DOIs that embed "osf.io" but name a PREPRINT, not a deposit.
+#: Without this, 10.31234/osf.io/8r9p7 is scraped as OSF id "8r9p7" and
+#: downloaded. 10.31219 is OSF Preprints' own prefix and was missing: a live
+#: corpus reference list carries "OSF https://doi.org/10.31219/osf.io/k268q",
+#: which this scan would otherwise have fetched as somebody else's deposit.
+_PREPRINT_DOI = re.compile(r"10\.(?:31234|31219)/", re.I)
 
 #: Rule 3 boost -- a URL inside a data-availability section is as strong a
 #: signal as prose gets. Not required (only 4 of 13 records have such a
@@ -262,6 +265,47 @@ def _inside_citation(text: str, position: int) -> bool:
     return last_open > last_close
 
 
+#: A bibliography heading standing alone on its line. Markdown hashes and a
+#: leading section number are allowed because that is how a PDF-to-text pass
+#: and a converted body render one. Deliberately NOT matched inside markup: in
+#: JATS the same word arrives as <title>References</title>, which is
+#: _inside_citation's job and is decided structurally rather than by a heading.
+_REFERENCE_HEADING = re.compile(
+    r"^[ \t]{0,3}(?:#{1,6}[ \t]*)?(?:\d{0,2}[.)][ \t]*)?"
+    r"(references|bibliography|works\s+cited|literature\s+cited|"
+    r"reference\s+list)[ \t]*:?[ \t]*$",
+    re.I | re.M,
+)
+
+
+def _after_reference_heading(text: str, position: int) -> bool:
+    """True when the URL at `position` sits in the bibliography of plain text.
+
+    The plain-text sibling of `_inside_citation`, and it exists because that
+    function is built entirely on JATS tags: on a PDF or a markdown body it
+    returns False at every position, so every reference-list URL becomes a live
+    candidate. That is the "dirty directories" failure -- somebody else's
+    deposit downloaded and filed under this paper.
+
+    POSITION-BASED, NOT TRUNCATING, for the reason
+    `test_deposit_before_a_reference_list_is_accepted` records: availability
+    sentences sit immediately before the bibliography, so cutting the document
+    at the heading discards the very prose this scan exists to read.
+
+    And a data-availability heading BETWEEN the bibliography and the URL
+    re-opens the document. Journals that put availability statements in back
+    matter after the references are common enough that a blanket "everything
+    after References is a citation" rule would refuse the strongest signal
+    there is.
+    """
+    last_end = None
+    for match in _REFERENCE_HEADING.finditer(text, 0, position):
+        last_end = match.end()
+    if last_end is None:
+        return False
+    return not _DAS_SECTION.search(text[last_end:position])
+
+
 def _section_is_das(text: str, position: int) -> bool:
     """True when the URL sits under a data/code-availability heading.
 
@@ -307,7 +351,9 @@ def scan_text(text: str) -> List[Candidate]:
             before = _strip_tags(text[max(0, start - 200):start])
             verdict, reason = _judge(
                 repo, ident, context, in_das,
-                in_citation=_inside_citation(text, start), before=before)
+                in_citation=(_inside_citation(text, start)
+                             or _after_reference_heading(text, start)),
+                before=before)
 
             candidate = Candidate(
                 repo=repo, ident=ident, url=_normalize(repo, ident),
@@ -321,29 +367,96 @@ def scan_text(text: str) -> List[Candidate]:
     return sorted(best.values(), key=lambda c: (c.repo, c.ident))
 
 
-#: Artifacts whose text is worth scanning. PDFs are excluded deliberately --
-#: extracting their text is a separate cost and a separate failure mode, and
-#: the markup formats are where the structural citation signal (rule 3) lives.
-_SCANNABLE = (".xml", ".html", ".htm", ".nxml")
+#: Markup artifacts whose text is worth scanning. These come first because
+#: they carry the structural citation signal rule 3 depends on -- in markup we
+#: know we are inside a reference entry, on plain text we can only infer it.
+#: Suffixes rather than extensions: the concat below is literal, so
+#: `.fulltext.html` and a converted `_from_pdf_body.md` are reached the same
+#: way a bare `.xml` is.
+_SCANNABLE = (".xml", ".nxml", ".html", ".htm", ".fulltext.html",
+              "_from_pdf_body.md", "_from_xml.md", "_from_html.md")
+
+#: Read only if no markup was found. A PDF's text is the same prose with the
+#: structure thrown away, so scanning it alongside the XML would add nothing
+#: but a second chance to misjudge the reference list.
+_SCANNABLE_PDF = (".pdf",)
 
 
-def scan_record(stem: str) -> List[Candidate]:
-    """Scan whatever full text is already on disk for one record.
-
-    `stem` is the output path stem (no extension), matching how the rest of the
-    supplementary subsystem addresses a record.
-    """
-    candidates: Dict[str, Candidate] = {}
-    rank = {ACCEPT: 2, UNCERTAIN: 1, REFUSE: 0}
-    for extension in _SCANNABLE:
-        path = stem + extension
+def _read_markup(stem: str):
+    """`(path, text)` for every markup artifact on disk for this record."""
+    for suffix in _SCANNABLE:
+        path = stem + suffix
         if not os.path.exists(path):
             continue
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
-                text = handle.read()
+                yield path, handle.read()
         except OSError:
             continue
+
+
+def _read_pdf(stem: str, log=None):
+    """`(path, text)` for the record's PDF, when there is text to be had.
+
+    Silence here would be the project's own worst failure mode -- a machine
+    with no PDF engine would report "scanned, nothing found" for every
+    PDF-only record. So the two ways this comes back empty are logged with
+    different sentences: no engine on this machine, versus no text layer in
+    this document.
+    """
+    from .pdf_text import engine_status, pdf_text
+
+    for suffix in _SCANNABLE_PDF:
+        path = stem + suffix
+        if not os.path.exists(path):
+            continue
+        engine, detail = engine_status()
+        if engine is None:
+            if log:
+                log(f"    fulltext_scan: {detail}")
+            return
+        text = pdf_text(path)
+        if not text:
+            if log:
+                log(f"    fulltext_scan: {os.path.basename(path)} has no text "
+                    f"layer ({engine} read nothing)")
+            return
+        yield path, text
+
+
+def record_text(stem: str, log=None):
+    """`(path, text)` for the one source `scan_record` would read, or None.
+
+    Public because the retrieval agent needs exactly the same text and exactly
+    the same markup-beats-PDF choice. Two readers disagreeing about what "the
+    paper" is would be a subtle way for the agent to judge prose the scan never
+    saw.
+    """
+    for path, text in _read_markup(stem):
+        return path, text
+    for path, text in _read_pdf(stem, log=log):
+        return path, text
+    return None
+
+
+def scan_record(stem: str, log=None) -> List[Candidate]:
+    """Scan whatever full text is already on disk for one record.
+
+    `stem` is the output path stem (no extension), matching how the rest of the
+    supplementary subsystem addresses a record.
+
+    Markup wins when both exist. The PDF is the fallback, not a supplement to
+    the XML, because it is the same prose with the citation structure stripped:
+    scanning both would only give the weaker reading a second vote.
+    """
+    candidates: Dict[str, Candidate] = {}
+    rank = {ACCEPT: 2, UNCERTAIN: 1, REFUSE: 0}
+
+    sources = list(_read_markup(stem))
+    if not sources:
+        sources = list(_read_pdf(stem, log=log))
+
+    for _path, text in sources:
         for candidate in scan_text(text):
             previous = candidates.get(candidate.key)
             if previous is None or rank[candidate.verdict] > rank[previous.verdict]:

@@ -174,3 +174,81 @@ def test_urls_are_normalized_to_something_resolvable():
 def test_empty_text_is_not_an_error():
     assert scan_text("") == []
     assert scan_text(None) == []
+
+
+# --- plain text: the same contract without the markup ----------------------
+#
+# _inside_citation is built entirely on JATS tags, so on a PDF or a converted
+# body it returns False at every position and every reference-list URL becomes
+# a live candidate. These pin the plain-text sibling that replaces it.
+
+def test_plain_text_deposit_in_the_body_is_accepted():
+    text = ("Data availability\n"
+            "All data are deposited at https://osf.io/abcde/.\n")
+    assert _verdict(text) == ACCEPT
+
+
+def test_plain_text_url_in_the_reference_list_is_refused():
+    text = ("Data availability\n"
+            "All data are deposited at https://osf.io/abcde/.\n\n"
+            "References\n"
+            "1. Someone. A paper. https://osf.io/zzzzz/. 2020.\n")
+    by_id = {c.ident: c.verdict for c in scan_text(text)}
+    assert by_id["abcde"] == ACCEPT
+    assert by_id["zzzzz"] == REFUSE
+
+
+def test_every_reference_heading_form_is_recognised():
+    """A PDF-to-text pass renders the heading half a dozen ways."""
+    for heading in ("References", "REFERENCES", "## References",
+                    "7. References", "Bibliography", "Literature Cited",
+                    "Works Cited", "Reference List"):
+        text = (f"Body prose naming nothing.\n\n{heading}\n"
+                "1. Someone. https://osf.io/qqqqq/. 2020.\n")
+        assert _verdict(text) == REFUSE, heading
+
+
+def test_a_deposit_sentence_just_before_the_bibliography_survives():
+    """The plain-text twin of test_deposit_before_a_reference_list_is_accepted.
+
+    Truncating the document at the heading would discard exactly this prose,
+    which is why the guard is position-based.
+    """
+    text = ("Anonymized csv files have been deposited in the Open Science "
+            "Framework at https://osf.io/gyhw2/.\n\n"
+            "References\n1. Someone. A paper. 2020.\n")
+    assert _verdict(text) == ACCEPT
+
+
+def test_an_availability_section_after_the_references_reopens_the_document():
+    """Journals that put back matter after the bibliography still get read."""
+    text = ("Body prose.\n\nReferences\n1. Someone. A paper. 2020.\n\n"
+            "Data availability\n"
+            "The dataset is deposited at https://osf.io/wwwww/.\n")
+    assert _verdict(text) == ACCEPT
+
+
+def test_markup_does_not_trip_the_plain_text_guard():
+    """<title>References</title> is _inside_citation's job, not the heading's.
+
+    A JATS reference-list title is not a line-anchored heading, and treating it
+    as one would refuse every deposit in every XML document that has a
+    bibliography -- which is all of them.
+    """
+    text = ('<sec><title>References</title></sec>'
+            '<p>Data are deposited at '
+            '<ext-link xlink:href="https://osf.io/eeeee/">'
+            'https://osf.io/eeeee/</ext-link>.</p>')
+    assert _verdict(text) == ACCEPT
+
+
+def test_osf_preprints_prefix_is_refused_like_psyarxiv():
+    """10.31219 is OSF Preprints' own prefix, and it was missing.
+
+    Found live in a corpus reference list:
+    "Bahrami MA (2023) ... OSF https://doi.org/10.31219/osf.io/k268q".
+    Without this the scan downloads somebody else's preprint as a dataset.
+    """
+    text = ("Bahrami MA (2023) Some paper title. OSF "
+            "https://doi.org/10.31219/osf.io/k268q\n")
+    assert _verdict(text) == REFUSE

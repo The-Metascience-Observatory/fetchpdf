@@ -315,6 +315,80 @@ class HttpClient:
             elapsed=0.0,
         )
 
+    # -- the JSON request ---------------------------------------------------
+
+    def post_json(self, url, payload, headers=None, timeout=None, retries=2,
+                  polite=False) -> Response:
+        """POST a JSON body, with the same rate limiting, backoff and redaction.
+
+        Added for the retrieval agent's OpenRouter backend, and routed through
+        here rather than through `requests` directly for one reason: `redact`
+        and `_SECRET_HEADERS`. A bearer token that reaches a log line reaches
+        the manifest and the sidecar too, and those are files a corpus gets
+        shared as.
+
+        Fewer retries than `get` by default. A model call is expensive and
+        slow, so a repeat is not the cheap insurance it is for a metadata
+        lookup, and an inference endpoint that 429s wants a real wait rather
+        than three quick attempts.
+
+        Never raises for an HTTP status, exactly as `get` does not -- the
+        caller decides what a status means, and a dead endpoint must degrade
+        the agent rather than kill the record.
+        """
+        host = urlparse(url).netloc
+        if polite:
+            headers = self.polite_headers(host, headers)
+
+        backoff = 1.0
+        last_error = ""
+        for attempt in range(max(1, retries)):
+            self.limiter.acquire(host)
+            started = time.monotonic()
+            try:
+                r = self.session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout or self.timeout,
+                )
+                self.call_count += 1
+                elapsed = time.monotonic() - started
+
+                if r.status_code in (429, 503) and attempt < retries - 1:
+                    wait = _retry_after(r) or backoff * (2 ** attempt)
+                    self.limiter.penalize(host, wait)
+                    if self.verbose:
+                        print(f"    {host} {r.status_code}; backing off {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+
+                return Response(
+                    url=redact(r.url),
+                    request_url=redact(url),
+                    status=r.status_code,
+                    content=r.content,
+                    content_type=r.headers.get("content-type", "").split(";")[0].strip().lower(),
+                    headers={
+                        k: ("REDACTED" if k.lower() in _SECRET_HEADERS else v)
+                        for k, v in r.headers.items()
+                    },
+                    elapsed=elapsed,
+                )
+            except self._TRANSIENT as e:
+                last_error = str(e)[:200]
+                if attempt < retries - 1:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+            except Exception as e:
+                last_error = str(e)[:200]
+                break
+
+        if self.verbose:
+            print(f"    {host} unreachable: {last_error}")
+        return Response(url=redact(url), request_url=redact(url), status=0,
+                        content=b"", content_type="", headers={}, elapsed=0.0)
+
     # -- the size-capped transfer -------------------------------------------
 
     def download(self, url, dest, max_bytes, params=None, headers=None, timeout=None,

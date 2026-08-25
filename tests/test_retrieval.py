@@ -23,6 +23,7 @@ from fetchpdf.retrieval.artifact import Artifact
 from fetchpdf.retrieval.classify import classify
 from fetchpdf.retrieval.http import redact
 from fetchpdf.retrieval.identifiers import IdentifierSet
+from conftest import text_pdf
 from fetchpdf.retrieval.tiers import Ladder, Tier, load_ladder
 from fetchpdf.retrieval.validate import validate_t1
 
@@ -251,7 +252,7 @@ def test_low_ranked_xml_beats_high_ranked_pdf(tmp_path):
 
     def pdf_source(ids, ctx):
         calls.append("pdf")
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf_src", url="https://p/x.pdf", http_status=200)
 
     def xml_source(ids, ctx):
@@ -278,7 +279,7 @@ def test_demotion_continues_down_the_ladder(tmp_path):
                         source="stub", url="https://x", http_status=200)
 
     def good_pdf(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -297,7 +298,7 @@ def test_source_that_raises_demotes_rather_than_killing_the_record(tmp_path):
         raise RuntimeError("publisher API had a bad day")
 
     def good_pdf(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -510,7 +511,9 @@ def test_elsevier_preview_descends_to_the_next_pdf_source(tmp_path, monkeypatch)
     ids = IdentifierSet(doi="10.1016/test", elsevier_pii="S0000000000")
 
     def other_pdf(ids_, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        # This record is 10.1016/test, so the PDF has to say so: the T5 gate now
+        # refuses a PDF that declares a different article.
+        return Artifact(content=text_pdf(doi="10.1016/test"), tier=Tier.T5_PDF,
                         source="other_pdf", url="https://p/x.pdf", http_status=200)
 
     result = run_engine(
@@ -542,7 +545,7 @@ def test_xml_only_fails_cleanly_without_descending(tmp_path):
 
     def pdf_source(ids, ctx):
         pdf_called.append(True)
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -592,7 +595,7 @@ def test_xml_html_only_accepts_html_but_never_descends_to_pdf(tmp_path):
 
     def pdf_source(ids, ctx):
         pdf_called.append(True)
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -613,7 +616,7 @@ def test_xml_html_only_fails_cleanly_when_neither_exists(tmp_path):
         return None
 
     def pdf_source(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -866,7 +869,7 @@ def test_denial_stub_does_not_become_plain_text():
 def test_declared_tier_loses_to_content(tmp_path):
     """A source promising XML that returns a PDF must not be accepted at T1."""
     def liar(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T1_XML,
+        return Artifact(content=text_pdf(), tier=Tier.T1_XML,
                         source="liar", url="https://l", http_status=200,
                         served_content_type="text/xml")
 
@@ -906,7 +909,7 @@ def test_better_than_expected_tier_is_kept(tmp_path):
 def test_pdf_zero_table_count_is_not_reported_as_a_finding(tmp_path):
     """Nothing here parses PDFs, so 'table_count: 0' on a PDF is not a claim."""
     def pdf_source(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(tmp_path, {Tier.T5_PDF: [("pdf", pdf_source)]}, want_provenance=True)
@@ -1198,7 +1201,7 @@ def test_validator_crash_demotes_rather_than_killing_the_batch(tmp_path, monkeyp
                         source="html", url="https://h", http_status=200)
 
     def pdf_source(ids, ctx):
-        return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+        return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                         source="pdf", url="https://p", http_status=200)
 
     result = run_engine(
@@ -1224,7 +1227,7 @@ def _xml_src(ids, ctx):
 
 
 def _pdf_src(ids, ctx):
-    return Artifact(content=b"%PDF-1.7" + b"x" * 5000, tier=Tier.T5_PDF,
+    return Artifact(content=text_pdf(), tier=Tier.T5_PDF,
                     source="pdf", url="https://p", http_status=200)
 
 

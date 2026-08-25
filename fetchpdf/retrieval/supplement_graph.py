@@ -523,6 +523,11 @@ def enumerate_fulltext_scan(ids, ctx) -> List[SupplementFile]:
     disk, so it costs no network requests for discovery. Link indexes missed
     every one of the 14 OSF deposits found this way in a real corpus.
 
+    Reads the record's PDF when there is no markup beside it. That was a
+    silent coverage hole rather than a limitation: measured 2026-08-22, 606 of
+    1,491 corpus records are PDF-only, and every one of them was reported as
+    "scanned, nothing found" without ever being opened.
+
     Precision, not recall, is the risk here -- half the repository URLs in a
     paper belong to somebody else -- so fulltext_scan applies its rules first
     and only accepted candidates are routed. Refused and uncertain ones are
@@ -538,7 +543,7 @@ def enumerate_fulltext_scan(ids, ctx) -> List[SupplementFile]:
     if not stem:
         return []
     try:
-        candidates = scan_record(stem)
+        candidates = scan_record(stem, log=ctx.log)
     except Exception as error:                      # never break a run over a scan
         ctx.log(f"    fulltext_scan: {error}")
         return []
@@ -599,7 +604,17 @@ def _github_tarball(repo: str, ctx) -> List[SupplementFile]:
         name=f"{repo.replace('/', '-')}-{branch}.tar.gz",
         url=_GITHUB_TARBALL.format(repo=repo, branch=branch),
         provider="fulltext_scan:github",
-        is_archive=True,
+        # NOT is_archive. That flag means "expand rather than keep", and the
+        # expander is `_expand_zip` -- zipfile, on a gzip stream. Every GitHub
+        # repository this provider has ever found was refused
+        # `not-an-archive` because of it: zero `fulltext_scan:github` files
+        # exist across 1,934 corpus manifests, and the tarball URL itself is
+        # fine (verified: HTTP 200, 6.5 MB of valid gzip).
+        #
+        # Keeping it whole is also the right policy on its own terms. A
+        # repository is a replication package, and this module already refuses
+        # to explode those by default -- unpacking one produced 199 files from
+        # a vendored Stata library in a single record.
         role=ROLE_SUPPLEMENT,
         extra={"github_repo": repo, "branch": branch},
     )]

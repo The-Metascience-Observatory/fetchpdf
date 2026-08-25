@@ -705,7 +705,16 @@ def _providers() -> Tuple[Tuple[str, Any], ...]:
         # records Europe PMC has already said it is withholding, which on a
         # 46-record corpus was 1, not 46.
         ("atypon_suppl", _atypon_if_withheld),                 # E19
+        # E20 truly last: the only provider that costs money, and the only one
+        # that benefits from knowing what all the others already found.
+        ("llm_agent", _llm_agent),                             # E20
     )
+
+
+def _llm_agent(ids, ctx):
+    """Imported at call time: a run without the flag never loads a backend."""
+    from .llm_agent_retrieval import enumerate_llm_agent
+    return enumerate_llm_agent(ids, ctx)
 
 
 #: The provider names, in order, without importing the provider modules. Kept in
@@ -729,6 +738,7 @@ PROVIDER_NAMES: Tuple[str, ...] = (
     "epmc_datalinks",
     "fulltext_scan",
     "atypon_suppl",
+    "llm_agent",
 )
 
 
@@ -758,6 +768,10 @@ def enumerate_all(ids, ctx, providers=None) -> Tuple[List[SupplementFile], List[
     providers = providers if providers is not None else _providers()
     found: List[SupplementFile] = []
     reports: List[dict] = []
+    # A live reference, so a provider that runs LAST can see what the earlier
+    # ones already listed. Only the retrieval agent uses it, and only to avoid
+    # asking a model to go and fetch a file we are already holding.
+    ctx.scratch["enumerated_so_far"] = found
     for name, enumerator in providers:
         try:
             files = enumerator(ids, ctx) or []

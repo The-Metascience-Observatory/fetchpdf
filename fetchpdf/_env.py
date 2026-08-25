@@ -44,6 +44,11 @@ OPENALEX_API_KEY = os.getenv("OPENALEXAPIKEY")
 CORE_API_KEY = os.getenv("COREAPIKEY")
 SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY")
 
+# The retrieval agent's OpenRouter backend. Optional: without it that backend
+# reports itself unavailable and the run falls back to the Claude Code CLI, or
+# to the deterministic rules alone. A missing key is never a failed record.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
 # Elsevier full-text (TDM) retrieval.
 ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")
 

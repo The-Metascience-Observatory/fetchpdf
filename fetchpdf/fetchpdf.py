@@ -7,7 +7,9 @@ import html
 import shutil
 import tempfile
 import subprocess
+import collections
 import threading
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import requests
@@ -213,6 +215,473 @@ def _note_news_item(doi: str) -> bool:
             return False
         _NEWS_ITEM_SEEN.add(doi)
         return True
+
+
+#: The requested article's title and page range, per DOI, for the identity check
+#: that decides whether a downloaded PDF is actually this paper. Filled in bulk
+#: at the start of a batch, then from the payloads the chain already parses, and
+#: only as a last resort by asking for one DOI on its own.
+_TITLE_MEMO = {}
+_PAGES_MEMO = {}
+_TITLE_LOCK = threading.Lock()
+
+#: DOIs whose metadata we could not ASK for -- a 429, a timeout, a DNS blip --
+#: as opposed to DOIs Crossref answered for and had no title for. The two must
+#: never be confused: "this record has no title" is a fact about the record,
+#: while "we could not reach Crossref" is a fact about the afternoon, and under
+#: reject-always the second one was deleting correct files. Verified: with the
+#: single-DOI lookup 429ing, an accepted manuscript that prints its title and
+#: not its DOI was refused and unlinked, and the empty title was then cached for
+#: the rest of the run so every retry refused it again.
+_METADATA_UNAVAILABLE = set()
+
+#: Crossref publishes its own allowance in every response: `x-rate-limit-limit:
+#: 10`, `x-rate-limit-interval: 1s`, measured 2026-08-23. The tiered engine has
+#: always respected it; the legacy chain called requests.get directly from five
+#: places, so with ten workers there was no ceiling at all.
+#:
+#: The bucket is fetched from `shared_host_limiter`, NOT built here. A private
+#: one was the whole bug in the first version of this: two buckets, each
+#: politely allowing 10/s, is 20/s.
+_CROSSREF_HOST = "api.crossref.org"
+
+#: How many DOIs to ask about in one request. Crossref takes a comma-joined
+#: `filter=doi:...` list; measured 2026-08-23, batches of 20/50/100/150 all
+#: return every item, at URL lengths of 1.7-5.3 KB. Fifty is the conservative
+#: pick and was also the fastest. A 10,000-DOI run needs 200 requests for every
+#: title and page range instead of 10,000.
+_CROSSREF_BATCH = 50
+
+
+def _crossref_bucket():
+    """The one process-wide token bucket for Crossref."""
+    from .retrieval.ratelimit import shared_host_limiter
+    from .retrieval.tiers import load_ladder
+
+    try:
+        limits = load_ladder().rate_limits
+    except Exception:
+        limits = None
+    return shared_host_limiter(limits).bucket(_CROSSREF_HOST)
+
+
+def _crossref_get(url: str, params=None, timeout=20, retries=3, verbose=False):
+    """A rate-limited, 429-aware Crossref GET. Returns the parsed message or None.
+
+    Returns None for "could not ask" and {} for "asked, nothing there" -- the
+    caller has to tell those apart, because one of them is allowed to become a
+    permanent answer and the other is not.
+    """
+    params = dict(params or {})
+    if _DEFAULT_EMAIL:
+        params.setdefault("mailto", _DEFAULT_EMAIL)
+    for attempt in range(retries):
+        _crossref_bucket().acquire()
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+        except Exception as e:
+            if verbose:
+                print(f"  Crossref request failed: {str(e)[:80]}")
+            time.sleep(min(2 ** attempt, 8))
+            continue
+        if r.status_code == 200:
+            try:
+                return r.json().get("message") or {}
+            except ValueError:
+                return None
+        if r.status_code == 404:
+            return {}
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = _retry_after_seconds(r) or min(2 ** attempt, 8)
+            if verbose:
+                print(f"  Crossref HTTP {r.status_code}; waiting {wait:.1f}s")
+            # Drain the SHARED bucket rather than sleeping this thread. Sleeping
+            # here is what makes a rate-limited run keep hammering: one worker
+            # backs off while the other nine carry on spending the very budget
+            # that just ran out. Penalising instead makes the NEXT acquire --
+            # this thread's and everyone else's -- do the waiting, once.
+            _crossref_bucket().penalize(wait)
+            continue
+        return None
+    return None
+
+
+def _crossref_raw_get(url: str, **kwargs):
+    """requests.get against Crossref, throttled by the shared bucket.
+
+    A one-line seam for the chain's own Crossref steps, which need the raw
+    response (status codes, `link[]`, the /agency endpoint) rather than the
+    parsed message `_crossref_get` returns. What matters is that they take a
+    token from the SAME bucket as everything else: ten workers each politely
+    keeping to 10/s is 100/s, which is how a --workers 10 run got 429ed.
+    """
+    _crossref_bucket().acquire()
+    return requests.get(url, **kwargs)
+
+
+def _retry_after_seconds(response):
+    raw = (response.headers or {}).get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), 60.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _datacite_title(doi: str, verbose=False):
+    """(title, page_range) from DataCite, or None when it could not be asked.
+
+    Crossref does not register Zenodo, OSF, figshare, Dryad or most
+    institutional repositories, and "Crossref has no record" was being read as
+    "this record has no title" -- which, under a verifier that deletes what it
+    cannot check, destroyed the correct PDF for every one of those DOIs on
+    sight. Replication corpora are full of them: 8 of the 9 unverifiable records
+    in the inbox have a DataCite title.
+
+    Returns `("", "")` for a DOI DataCite genuinely does not have, which IS an
+    answer, versus None for a request that failed, which is not.
+    """
+    from .retrieval.ratelimit import shared_host_limiter
+
+    url = "https://api.datacite.org/dois/" + quote_plus((doi or "").strip().lower())
+    try:
+        shared_host_limiter().bucket("api.datacite.org").acquire()
+        r = requests.get(url, headers={"Accept": "application/json"}, timeout=20)
+    except Exception as e:
+        if verbose:
+            print(f"  DataCite request failed for {doi}: {str(e)[:80]}")
+        return None
+    if r.status_code == 404:
+        return "", ""
+    if r.status_code != 200:
+        return None
+    try:
+        attributes = ((r.json() or {}).get("data") or {}).get("attributes") or {}
+    except ValueError:
+        return None
+    titles = attributes.get("titles") or []
+    title = str((titles[0] or {}).get("title") or "") if titles else ""
+    container = attributes.get("container") or {}
+    first, last = container.get("firstPage") or "", container.get("lastPage") or ""
+    page_range = f"{first}-{last}" if first and last else str(first or "")
+    return title, page_range
+
+
+def _remember_title(doi: str, title, page_range=None) -> None:
+    if not doi:
+        return
+    key = doi.strip().lower()
+    if isinstance(title, (list, tuple)):
+        title = title[0] if title else ""
+    title = str(title or "").strip()
+    with _TITLE_LOCK:
+        if title:
+            _TITLE_MEMO.setdefault(key, title)
+        if page_range:
+            _PAGES_MEMO.setdefault(key, str(page_range).strip())
+    if title:
+        _METADATA_UNAVAILABLE.discard(key)
+
+
+def prime_record_metadata(dois, verbose=False) -> int:
+    """Fetch titles and page ranges for a whole batch, ~50 DOIs per request.
+
+    Called once before a run so that the per-record path almost never has to
+    ask. This is what keeps --workers 10 under Crossref's 10/s: the identity
+    check needs a title for every record, and asking per record made the
+    verification the most rate-limit-hungry step in the tool.
+    """
+    wanted = []
+    seen = set()
+    for raw in dois:
+        doi = str(raw or "").strip().lower()
+        if not doi.startswith("10.") or doi in seen:
+            continue
+        seen.add(doi)
+        with _TITLE_LOCK:
+            if doi in _TITLE_MEMO:
+                continue
+        wanted.append(doi)
+    if not wanted:
+        return 0
+
+    filled = 0
+    for start in range(0, len(wanted), _CROSSREF_BATCH):
+        chunk = wanted[start:start + _CROSSREF_BATCH]
+        message = _crossref_get(
+            "https://api.crossref.org/works",
+            params={"filter": ",".join("doi:" + d for d in chunk),
+                    "select": "DOI,title,page", "rows": len(chunk)},
+            timeout=45, verbose=verbose,
+        )
+        if message is None:
+            _METADATA_UNAVAILABLE.update(chunk)
+            continue
+        answered = set()
+        for item in message.get("items") or []:
+            doi = str(item.get("DOI") or "").strip().lower()
+            if not doi:
+                continue
+            answered.add(doi)
+            titles = item.get("title") or []
+            if titles:
+                _remember_title(doi, titles[0], item.get("page"))
+                filled += 1
+        # Crossref answered, but "not in Crossref" is not "has no title" -- it
+        # is most often a DataCite DOI. Left unmemoised so `_title_for` asks
+        # DataCite when the record is actually reached; memoising "" here is
+        # what used to delete every Zenodo and OSF PDF.
+        for doi in chunk:
+            if doi not in answered and verbose:
+                print(f"    not in Crossref, will try DataCite: {doi}")
+    if verbose:
+        print(f"  Crossref metadata primed for {filled}/{len(wanted)} record(s)"
+              f" in {(len(wanted) + _CROSSREF_BATCH - 1) // _CROSSREF_BATCH} request(s)")
+    return filled
+
+
+def _title_for(doi: str, verbose=False) -> str:
+    """This DOI's title: from the memo, else one Crossref call, else "".
+
+    A failed lookup is NOT cached. Caching it would turn one 429 into a
+    permanent "this record has no title", and a record with no title cannot be
+    verified, and an unverifiable PDF is deleted.
+    """
+    if not doi:
+        return ""
+    key = doi.strip().lower()
+    with _TITLE_LOCK:
+        if key in _TITLE_MEMO:
+            return _TITLE_MEMO[key]
+    message = _crossref_get(f"https://api.crossref.org/works/{key}", verbose=verbose)
+    if message is None:
+        _METADATA_UNAVAILABLE.add(key)
+        if verbose:
+            print(f"  Could not reach Crossref for {doi}; identity check will be weaker")
+        return ""
+    titles = message.get("title") or []
+    if titles:
+        _remember_title(key, titles[0], message.get("page"))
+        return str(titles[0])
+
+    # Crossref answered and has no such record. That is not the end of the
+    # question -- it does not register Zenodo, OSF, figshare or Dryad DOIs.
+    found = _datacite_title(key, verbose=verbose)
+    if found is None:
+        _METADATA_UNAVAILABLE.add(key)
+        return ""
+    title, page_range = found
+    if title:
+        _remember_title(key, title, page_range)
+        return title
+    with _TITLE_LOCK:
+        _TITLE_MEMO.setdefault(key, "")
+    return ""
+
+
+#: URLs already downloaded and refused for a given DOI, so the same file is not
+#: fetched and judged again. try_landing_page_pdf_fallback runs from nine call
+#: sites per record and several of them converge on the same publisher URL: one
+#: Brill preview was downloaded, parsed and discarded four times in a single
+#: run before this existed.
+_REJECTED_URLS = collections.defaultdict(set)
+_REJECTED_LOCK = threading.Lock()
+
+#: Endpoints that exist to serve a preview rather than the article. Checked
+#: before the download, because the cheapest rejection is the one that never
+#: transfers a file. Both were observed serving two pages of a seventeen- and a
+#: thirty-two-page article.
+_PREVIEW_URL_MARKERS = ("/previewpdf/", "/preview-pdf/", "previewpdf?")
+
+
+def _looks_like_preview_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return any(marker in lowered for marker in _PREVIEW_URL_MARKERS)
+
+
+def _already_rejected(doi: str, url: str) -> bool:
+    if not doi or not url:
+        return False
+    with _REJECTED_LOCK:
+        return url in _REJECTED_URLS[doi.strip().lower()]
+
+
+def _note_rejected(doi: str, url: str) -> None:
+    if not doi or not url:
+        return
+    with _REJECTED_LOCK:
+        _REJECTED_URLS[doi.strip().lower()].add(url)
+
+
+def _metadata_was_unavailable(doi: str) -> bool:
+    return (doi or "").strip().lower() in _METADATA_UNAVAILABLE
+
+
+#: Records whose PDF was kept without being verified, because the metadata to
+#: verify it against could not be fetched. Reported at the end of a run: an
+#: unverified artifact is a smaller problem than a deleted one, but it is not
+#: nothing, and a run that produced a hundred of them was a run against a
+#: rate-limited Crossref rather than a clean corpus.
+_UNVERIFIED_KEPT = {}
+_UNVERIFIED_LOCK = threading.Lock()
+
+
+def _note_unverified(doi: str, url: str = "") -> None:
+    with _UNVERIFIED_LOCK:
+        _UNVERIFIED_KEPT.setdefault((doi or "").strip().lower(), url)
+
+
+def unverified_records() -> dict:
+    """DOI -> source URL for every PDF kept without verification this run."""
+    with _UNVERIFIED_LOCK:
+        return dict(_UNVERIFIED_KEPT)
+
+
+def _report_unverified_keeps() -> None:
+    """Name the records whose PDF nobody was able to check.
+
+    Printed unconditionally. A run that produced a hundred of these was a run
+    against a rate-limited Crossref, not a clean corpus, and the difference is
+    invisible in the success count -- every one of them counted as a success.
+    """
+    kept = unverified_records()
+    if not kept:
+        return
+    _print_yellow_warning(
+        f"⚠️  {len(kept)} PDF(s) were KEPT WITHOUT VERIFICATION because Crossref "
+        f"could not be reached for their metadata. Re-run these once it is "
+        f"reachable; they are the only artifacts in this run nobody checked:"
+    )
+    for doi in sorted(kept)[:20]:
+        print(f"     - {doi}")
+    if len(kept) > 20:
+        print(f"     ... and {len(kept) - 20} more")
+
+
+def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=False) -> bool:
+    """True if the bytes just written are this DOI's paper. Deletes them if not.
+
+    ONLY this paper's own material. A PDF the paper CITES belongs to somebody
+    else and must not be collected. The bibliography of a research article is a
+    list of other people's files, and a `try_download` that accepts on
+    Content-Type alone will take one of them the moment the paper's own PDF is
+    unavailable -- which is exactly what happened to 10.1111/all.14949.
+
+    Returning False rather than aborting is the point: the caller's loop moves
+    on to the next candidate, so a wrong hit costs one request instead of
+    ending the search on somebody else's document.
+    """
+    if not save_path or not os.path.exists(save_path):
+        return False
+    # Only PDFs are judged here. The chain's XML fallbacks write .xml through
+    # the same paths and have already passed _looks_like_jats_fulltext.
+    try:
+        with open(save_path, "rb") as f:
+            if f.read(4) != b"%PDF":
+                return True
+    except OSError:
+        return False
+
+    from .retrieval.pdf_identity import TRUNCATED, WRONG, verify_pdf_identity
+
+    title = _title_for(doi, verbose=verbose)
+    with _TITLE_LOCK:
+        page_range = _PAGES_MEMO.get((doi or "").strip().lower(), "")
+    verdict = verify_pdf_identity(save_path, doi, title, pages=page_range)
+    if verdict.ok:
+        return True
+
+    # Deleting requires POSITIVE evidence that this is the wrong document, and
+    # evidence we can actually trust. Two rules, and the asymmetry between them
+    # is the whole point: a wrong file kept can be found again by re-running the
+    # audit, a right file deleted cannot.
+    #
+    #   1. Only WRONG and TRUNCATED are positive findings. NO_REFERENCE,
+    #      UNREADABLE and NO_ENGINE all mean "nobody checked" -- an absent title,
+    #      a scanned page, an install with no PDF reader. None of them is a
+    #      statement about the file, and every one of them used to delete it.
+    #   2. Not even those, when the metadata the verdict rests on could not be
+    #      fetched. A 429 is a fact about the afternoon, not about the paper.
+    #
+    # Measured before this existed: re-judging 706 known-good corpus PDFs with
+    # metadata unavailable deleted eight of them, and every DataCite-only DOI
+    # (Zenodo, OSF, figshare) was destroyed on sight because Crossref has no
+    # record of it and "no record" was being read as "no title".
+    if verdict.state not in (WRONG, TRUNCATED) or _metadata_was_unavailable(doi):
+        _note_unverified(doi, url)
+        _print_yellow_warning(
+            f"⚠️  Could not verify the PDF for {doi}: {verdict.reason} "
+            f"KEEPING the file unverified rather than deleting something nobody "
+            f"checked -- re-check this record once its metadata is reachable."
+        )
+        return True
+
+    _note_rejected(doi, url)
+    _print_yellow_warning(
+        f"⚠️  Discarded a PDF fetched for {doi}: {verdict.reason}"
+        + (f"\n     source: {url[:110]}" if url else "")
+    )
+    _unlink_quietly(save_path)
+    return False
+
+
+#: Destination path -> the URL its bytes came from. Recorded in `try_download`,
+#: which every route that writes a PDF passes through, so the provenance
+#: sidecar can finally say WHERE a file came from. Until now
+#: `sources/legacy_pdf.py` constructed its Artifact with `url=""` and
+#: `provenance.py` dropped `Artifact.extra`, so a wrong file on disk carried no
+#: record of its own origin -- which is why diagnosing the Dietary Guidelines
+#: mis-fetch meant re-running the code rather than reading the sidecar.
+_DOWNLOAD_URLS = {}
+_DOWNLOAD_URL_LOCK = threading.Lock()
+
+
+def _note_download_url(save_path: str, url: str) -> None:
+    if not save_path or not url:
+        return
+    with _DOWNLOAD_URL_LOCK:
+        _DOWNLOAD_URLS[os.path.abspath(save_path)] = url
+
+
+def download_url_for(save_path: str) -> str:
+    """The URL a downloaded artifact came from, or "" if unrecorded."""
+    if not save_path:
+        return ""
+    with _DOWNLOAD_URL_LOCK:
+        return _DOWNLOAD_URLS.get(os.path.abspath(save_path), "")
+
+
+def _stat_key(path: str):
+    """(size, mtime) for a path, or None. Enough to tell "untouched" from "rewritten"."""
+    try:
+        info = os.stat(path)
+        return (info.st_size, info.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _artifact_snapshot(save_path: str) -> dict:
+    """Every artifact already on disk for this record, by absolute path."""
+    from .retrieval.tiers import ARTIFACT_EXTENSIONS
+
+    snapshot = {}
+    if not save_path:
+        return snapshot
+    stem = os.path.splitext(save_path)[0]
+    for candidate in [save_path] + [stem + ext for ext in ARTIFACT_EXTENSIONS]:
+        key = _stat_key(candidate)
+        if key is not None:
+            snapshot[os.path.abspath(candidate)] = key
+    return snapshot
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        if path and os.path.exists(path):
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 def _looks_like_no_fulltext_item(html_text: str) -> bool:
@@ -436,6 +905,26 @@ def defers_existing_to_engine(tiered: bool, upgrade_existing: bool,
     looks like a success.
     """
     return bool(tiered and (upgrade_existing or get_xml_or_html))
+
+
+def skip_check_extensions(tiered: bool) -> list:
+    """Which suffixes count as "this record is already downloaded".
+
+    Two gates, deliberately. How many suffixes count is a property of the TIERED
+    path only: widening it for --pull-supplementary would start skipping
+    default-path records that happen to have a .fulltext.html or .landing.html on
+    disk, which the chain would otherwise have re-attempted.
+
+    Shared rather than inlined because two places have to agree exactly -- the
+    batch worker's per-record skip and the startup scan that tells the operator
+    how many records it is about to skip. A scan that counted a wider set would
+    promise a skip that never happens.
+    """
+    if tiered:
+        from .retrieval.tiers import ARTIFACT_EXTENSIONS
+
+        return list(ARTIFACT_EXTENSIONS)
+    return [".pdf", ".xml"]
 
 
 def _record_source(_source_out, source):
@@ -822,7 +1311,7 @@ def pmid_to_doi(pmid: str, verbose=False):
                 # Add mailto for polite pool (10 req/s vs 5 req/s)
                 if _DEFAULT_EMAIL:
                     params["mailto"] = _DEFAULT_EMAIL
-                r = requests.get("https://api.crossref.org/works", params=params, timeout=15)
+                r = _crossref_raw_get("https://api.crossref.org/works", params=params, timeout=15)
                 if r.status_code != 200:
                     continue
                 items = ((r.json() or {}).get("message") or {}).get("items") or []
@@ -887,7 +1376,7 @@ def pmid_to_doi(pmid: str, verbose=False):
                     crossref_params = {}
                     if _DEFAULT_EMAIL:
                         crossref_params["mailto"] = _DEFAULT_EMAIL
-                    verify_r = requests.get(
+                    verify_r = _crossref_raw_get(
                         f"https://api.crossref.org/works/{quote_plus(best_doi)}",
                         params=crossref_params,
                         timeout=10,
@@ -1210,7 +1699,7 @@ def _crossref_doi_exists(doi: str, email: str | None = None,
         h = dict(headers)
         if email:
             h["User-Agent"] = f"{h.get('User-Agent','fetchpdf/1.0')} (mailto:{email})"
-        r = requests.get(
+        r = _crossref_raw_get(
             f"https://api.crossref.org/works/{doi}/agency",
             headers=h, timeout=timeout,
         )
@@ -1402,6 +1891,179 @@ def migrate_legacy_folders(root_dir, email: str | None = None,
     return actions
 
 
+#: What prompt_on_existing may return, and the values --on-existing accepts for
+#: the first two. Named so the parser choices and the callers cannot drift.
+ON_EXISTING_ASK = "ask"
+ON_EXISTING_SKIP = "skip"
+ON_EXISTING_SUPPLEMENT = "supplement"
+ON_EXISTING_ABORT = "abort"
+
+
+def count_existing_records(identifiers, output_dir, make_subfolder=False,
+                           extensions=None) -> tuple:
+    """How many of ``identifiers`` the batch worker would skip as already here.
+
+    Mirrors the worker's own path arithmetic exactly -- the record dir of
+    _download_one_inner, then its ARTIFACT_EXTENSIONS loop -- because the number
+    is shown to the operator as "N of M will be skipped". A scan that counted
+    differently from the run would be worse than no scan at all.
+
+    Two deliberate limitations, both to keep this free:
+
+    * No identifier resolution. resolve_identifier_to_doi returns immediately for
+      anything already "10."-shaped, but a PMID costs a round trip, and a scan
+      that hit the network once per row would be slower than the skip it is
+      describing. PMID-only rows are therefore counted as missing even when their
+      folder is on disk -- the run itself still skips them, so the prompt
+      undercounts rather than overpromising.
+    * Case is settled by canonicalize_doi, which lowercases -- the same call the
+      worker makes before encoding a filename, so both sides agree. Do not add
+      a case-insensitive directory scan on top: folders written by something
+      other than this worker (tools/fetch_into_subfolders.py documents a corpus
+      built from pre-lowercased DOIs) would then be counted as skippable when
+      the run would not in fact skip them.
+
+    Returns (n_existing, n_total).
+    """
+    if extensions is None:
+        extensions = skip_check_extensions(False)
+
+    total = 0
+    existing = 0
+    for identifier in identifiers:
+        raw = str(identifier).strip()
+        if not raw:
+            continue
+        total += 1
+        display_id = canonicalize_doi(sanitize_doi(raw))
+        if not display_id.startswith("10."):
+            continue  # a PMID or junk -- see the docstring
+        safe_doi = doi_to_safe_filename(display_id)
+        record_dir = (os.path.join(output_dir, safe_doi)
+                      if make_subfolder else output_dir)
+        stem = os.path.join(record_dir, safe_doi)
+        if any(os.path.exists(stem + ext) for ext in extensions):
+            existing += 1
+    return existing, total
+
+
+def _prompt_choice(n_existing, n_total, output_dir):
+    """Draw the menu and read one keystroke-ish line. Returns a choice constant.
+
+    Split from prompt_on_existing so the guards can be tested without a tty and
+    the menu without re-deciding whether to show it.
+    """
+    print()
+    print(f"\U0001F4C1 {n_existing:,} of {n_total:,} records already have "
+          f"artifacts in {output_dir}.")
+    print()
+    print(f"   [s] skip them             download only the "
+          f"{n_total - n_existing:,} still missing   (default)")
+    print("   [m] skip, but pull SI/SM  keep the papers, fetch supplementary "
+          "material for all of them")
+    print("   [a] abort")
+    print()
+    while True:
+        try:
+            answer = input("Choice [s]: ").strip().lower()
+        except EOFError:
+            # stdin closed underneath us mid-prompt. Take the default rather
+            # than looping forever on a stream that will never yield a line.
+            print()
+            return ON_EXISTING_SKIP
+        except KeyboardInterrupt:
+            # Ctrl-C at a menu means "I did not mean to start this", not
+            # "crash". Nothing has been downloaded yet, so abort is clean.
+            print()
+            return ON_EXISTING_ABORT
+        if answer in ("", "s", "skip"):
+            return ON_EXISTING_SKIP
+        if answer in ("m", "supplement", "si", "sm"):
+            return ON_EXISTING_SUPPLEMENT
+        if answer in ("a", "abort", "q", "quit"):
+            return ON_EXISTING_ABORT
+        print("   Please answer s, m or a.")
+
+
+def prompt_on_existing(identifiers, args):
+    """Offer the operator a choice when a run is about to skip existing records.
+
+    The skip itself is silent and per-record, so "I already have these papers,
+    this time I want their supplementary material" currently requires knowing
+    that --pull-supplementary fires on the skip branch. This surfaces it.
+
+    Returns one of the ON_EXISTING_* constants. Only the supplement answer has a
+    side effect: it sets args.pull_supplementary for the rest of the run, which
+    keeps every PDF already on disk exactly where it is and adds the SI pass.
+
+    Silent no-op (returns skip) unless every guard passes. The tty guard is the
+    load-bearing one: nothing else in this package has ever read stdin, so cron
+    jobs, pipes and the -n auto test suite must reach this and walk straight
+    through it.
+    """
+    if args.abstract_only:
+        # --abstract-only already warns that --pull-supplementary is ignored;
+        # offering it here would contradict that.
+        return ON_EXISTING_SKIP
+    if getattr(args, "pull_supplementary", False):
+        return ON_EXISTING_SKIP  # the question is already answered
+    if args.on_existing == ON_EXISTING_SUPPLEMENT:
+        args.pull_supplementary = True
+        return ON_EXISTING_SUPPLEMENT
+    if args.on_existing == ON_EXISTING_SKIP:
+        return ON_EXISTING_SKIP
+
+    tiered = bool(args.prioritize_xml or args.xml_only or args.xml_html_only
+                  or args.get_xml_or_html)
+    if defers_existing_to_engine(tiered, args.upgrade_existing,
+                                 args.get_xml_or_html):
+        # The worker skips nothing under these flags -- the engine reasons per
+        # goal instead, backfilling the missing half or hunting a better tier.
+        # There is no skip to offer an alternative to, and claiming otherwise
+        # would misreport what the run is about to do.
+        return ON_EXISTING_SKIP
+
+    n_existing, n_total = count_existing_records(
+        identifiers, args.output_dir,
+        make_subfolder=args.make_subfolder,
+        extensions=skip_check_extensions(tiered),
+    )
+    if not n_existing:
+        return ON_EXISTING_SKIP
+
+    if not _stdio_is_interactive():
+        _print_yellow_warning(
+            f"\u26A0\uFE0F  {n_existing:,} of {n_total:,} records already have "
+            f"artifacts in {args.output_dir} and will be skipped. "
+            f"Use --on-existing supplement to fetch their supplementary material."
+        )
+        return ON_EXISTING_SKIP
+
+    choice = _prompt_choice(n_existing, n_total, args.output_dir)
+    if choice == ON_EXISTING_SUPPLEMENT:
+        args.pull_supplementary = True
+    return choice
+
+
+def _stdio_is_interactive() -> bool:
+    """Both ends attached to a terminal, and neither one lying about it.
+
+    isatty is missing entirely on the stdout wrappers this package installs
+    (PrefixedOutput implements write and flush and nothing else), and stdin can
+    be None under pythonw-style launchers -- so a bare .isatty() call is an
+    AttributeError waiting for the one caller who wires it up wrong. Anything
+    unexpected here means "not a terminal", which is the safe answer: it keeps
+    the run non-interactive.
+    """
+    import sys
+
+    try:
+        return bool(sys.stdin and sys.stdin.isatty()
+                    and sys.stdout and sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 #-----------------------------------------------------------------------------------------
 def try_download(url, save_path, verbose=False):
     """Try downloading PDF from URL and save to save_path."""
@@ -1456,6 +2118,7 @@ def try_download(url, save_path, verbose=False):
                     for chunk in r.iter_content(8192):
                         if chunk:
                             f.write(chunk)
+                _note_download_url(save_path, url)
                 if verbose:
                     print("PDF downloaded OK from direct URL.")
                 return True
@@ -1466,6 +2129,7 @@ def try_download(url, save_path, verbose=False):
                         for chunk in chunks:
                             if chunk:
                                 f.write(chunk)
+                    _note_download_url(save_path, url)
                     if verbose:
                         print("PDF downloaded OK (octet-stream).")
                     return True
@@ -1494,6 +2158,7 @@ def try_download_with_session(url: str, save_path: str, referer: str = None, ver
                     for chunk in r.iter_content(8192):
                         if chunk:
                             f.write(chunk)
+                _note_download_url(save_path, url)
                 if verbose:
                     print("PDF downloaded OK (session).")
                 return True
@@ -1504,6 +2169,7 @@ def try_download_with_session(url: str, save_path: str, referer: str = None, ver
                         for chunk in chunks:
                             if chunk:
                                 f.write(chunk)
+                    _note_download_url(save_path, url)
                     if verbose:
                         print("PDF downloaded OK (session, octet-stream).")
                     return True
@@ -1524,17 +2190,140 @@ def _is_plausible_http_url(url: str) -> bool:
     return True
 
 
-def _collect_landing_page_candidates(landing_url: str, html_text: str):
-    """Extract and prioritize likely PDF/download URLs from landing page HTML."""
-    candidates = []
+#: Where a candidate URL came from, best first. This is the ranking; `score`
+#: only breaks ties inside a band.
+#:
+#: Provenance, not URL shape, because the shape cannot tell them apart. The
+#: page's own `citation_pdf_url` and a PDF cited in its bibliography are both
+#: "a URL ending in .pdf", and the old scorer gave both +4.0 -- the article's
+#: own copy stayed in front only by stable-sort luck, and lost the moment it
+#: was bot-walled. (The old scorer's +3.0 for `citation_pdf_url` never fired at
+#: all: it searched for that string *inside the URL*, where it never appears.
+#: The signal it was reaching for is ORIGIN_DECLARED, assigned at harvest time
+#: while we still know which regex produced the link.)
+ORIGIN_DECLARED = 0    # <meta citation_pdf_url|og:pdf> -- the page says this IS its PDF
+ORIGIN_DOI_PATH = 1    # the requested DOI's suffix appears in the URL path
+ORIGIN_SAME_HOST = 2   # served by the same site as the landing page
+ORIGIN_REPOSITORY = 3  # off-host, but an OA repository or a file endpoint
+ORIGIN_FOREIGN = 4     # off-host with no reason to think it is ours -- DROPPED
 
-    # High-signal metadata fields used by many publishers/repositories.
+_Candidate = namedtuple("_Candidate", "url origin score")
+
+#: Off-host hosts that legitimately serve a copy of somebody else's article.
+#: Not new knowledge -- these were already spelled out twice in this function,
+#: in the score bonuses and in the downloadable-keyword list.
+_REPOSITORY_HOSTS = (
+    "arxiv.org", "escholarship.org", "psycharchives.org", "psycharchives.de",
+    "econstor.eu", "zenodo.org", "osf.io", "ndownloader.figshare.com",
+    "figshare.com", "europepmc.org", "pmc.ncbi.nlm.nih.gov",
+    "ncbi.nlm.nih.gov", "biorxiv.org", "medrxiv.org", "core.ac.uk",
+    "ssrn.com", "papers.ssrn.com", "dspace.mit.edu", "hal.science",
+)
+
+#: Path shapes that identify a file endpoint rather than a document someone
+#: happens to link. These are safe OFF-host because they name a repository's
+#: delivery route, not merely a file extension.
+_REPOSITORY_PATHS = (
+    "/bitstream/", "/bitstreams/", "viewcontent.cgi", "/api/access/datafile",
+    "/doi/pdf/", "/doi/pdfdirect/", "pdfdirect", "/content/qt",
+    "/article/file/", "/ndownloader/",
+)
+
+#: Markers that mean "downloadable" only when the LANDING PAGE ITSELF serves
+#: them. This is the split that fixes the reported bug: `/files/` matches
+#: dietaryguidelines.gov/sites/default/files/..., and a bare `.pdf` matches
+#: eaaci.org/globalatlas/GlobalAtlasAllergy.pdf -- both cited works, both
+#: previously kept on the strength of the substring alone.
+_SAME_HOST_MARKERS = (
+    ".pdf", "download", "full.pdf", "/doi/pdf", "pdfdirect", "/content/",
+    "/document/", "/files/", "/article/file/",
+)
+
+#: The minimum "this is a file, not a page" signal, required in every band.
+_FILE_MARKERS = (
+    ".pdf", "/pdf", "download", "pdfdirect", "viewcontent.cgi", "/bitstream",
+    "/api/access/datafile", "/content/qt", "/ndownloader/", "/article/file/",
+)
+
+
+def _doi_suffix_in_path(url: str, doi: str) -> bool:
+    """Whether the requested DOI's own suffix appears in this URL's path."""
+    if not doi or "/" not in doi:
+        return False
+    suffix = doi.split("/", 1)[1].strip().lower()
+    if len(suffix) < 4:
+        return False
+    return suffix in (urlparse(url).path or "").lower()
+
+
+def _host_matches(host: str, landing_host: str) -> bool:
+    if not host or not landing_host:
+        return False
+    return (host == landing_host
+            or host.endswith("." + landing_host)
+            or landing_host.endswith("." + host))
+
+
+def _candidate_origin(url: str, landing_host: str, doi: str) -> int:
+    """Which band this URL belongs to, from where it points rather than how it reads.
+
+    Every band still requires the URL to look like a FILE. Being on a friendly
+    host is not enough on its own: a PMC article page carries a few hundred
+    same-host and NCBI-wide navigation links, and admitting those would spend
+    the eight candidate slots on account settings and bibliography pages before
+    reaching anything downloadable.
+    """
+    host = (urlparse(url).netloc or "").lower()
+    lowered = url.lower()
+    looks_like_file = any(k in lowered for k in _FILE_MARKERS)
+
+    if looks_like_file and _doi_suffix_in_path(url, doi):
+        return ORIGIN_DOI_PATH
+    if _host_matches(host, landing_host):
+        return ORIGIN_SAME_HOST if any(k in lowered for k in _SAME_HOST_MARKERS) else ORIGIN_FOREIGN
+    on_repository_host = any(host == h or host.endswith("." + h) for h in _REPOSITORY_HOSTS)
+    if any(k in lowered for k in _REPOSITORY_PATHS):
+        return ORIGIN_REPOSITORY
+    if on_repository_host and looks_like_file:
+        return ORIGIN_REPOSITORY
+    return ORIGIN_FOREIGN
+
+
+def _collect_landing_page_candidates(landing_url: str, html_text: str, doi: str = "",
+                                     verbose: bool = False):
+    """Likely PDF/download URLs on a landing page, ranked by where they came from.
+
+    ONLY this paper's own material. A PDF the paper CITES belongs to somebody
+    else and must not be collected. The bibliography of a research article is a
+    list of other people's files, and a regex that keeps every `.pdf` on the
+    page keeps all of them.
+
+    Verified on PMC9292464 (10.1111/all.14949): 667 raw links, 108 survivors
+    under the old filter, and the third-ranked one was the USDA's *Dietary
+    Guidelines for Americans* -- a work the paper cites. It was downloaded and
+    saved as the paper, because it was a genuine `application/pdf` and the
+    article's own copy, ranked first, was behind a bot wall.
+
+    Returns `_Candidate(url, origin, score)`, best first.
+    """
+    harvested = []
+
+    # High-signal metadata: the page naming its own PDF. Kept separate from the
+    # generic link sweep because after urljoin you can no longer tell a meta tag
+    # from an href, and that difference is the entire ranking.
     for m in re.findall(
-        r'<meta[^>]+(?:name|property)=["\'](?:citation_pdf_url|og:pdf|dc\.identifier)["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+(?:name|property)=["\'](?:citation_pdf_url|og:pdf)["\'][^>]+content=["\']([^"\']+)["\']',
         html_text,
         re.IGNORECASE,
     ):
-        candidates.append(urljoin(landing_url, html.unescape(m.strip())))
+        harvested.append((urljoin(landing_url, html.unescape(m.strip())), ORIGIN_DECLARED))
+
+    for m in re.findall(
+        r'<meta[^>]+(?:name|property)=["\']dc\.identifier["\'][^>]+content=["\']([^"\']+)["\']',
+        html_text,
+        re.IGNORECASE,
+    ):
+        harvested.append((urljoin(landing_url, html.unescape(m.strip())), None))
 
     # Common link-bearing attributes.
     for m in re.findall(
@@ -1542,11 +2331,11 @@ def _collect_landing_page_candidates(landing_url: str, html_text: str):
         html_text,
         re.IGNORECASE,
     ):
-        candidates.append(urljoin(landing_url, html.unescape(m.strip())))
+        harvested.append((urljoin(landing_url, html.unescape(m.strip())), None))
 
     # Bare URLs in inline scripts/JSON-LD.
     for m in re.findall(r'https?://[^\s"\'<>]+', html_text, re.IGNORECASE):
-        candidates.append(html.unescape(m.strip()))
+        harvested.append((html.unescape(m.strip()), None))
 
     blocked_domains = (
         "googletagmanager.com",
@@ -1560,50 +2349,52 @@ def _collect_landing_page_candidates(landing_url: str, html_text: str):
 
     landing_host = (urlparse(landing_url).netloc or "").lower()
 
-    # Keep only plausible, relevant URLs and dedupe.
-    deduped = []
+    candidates = []
     seen = set()
-    for c in candidates:
-        if not _is_plausible_http_url(c):
+    dropped_foreign = 0
+    for url, forced_origin in harvested:
+        if not _is_plausible_http_url(url):
             continue
-        cl = c.lower()
-        if any(d in cl for d in blocked_domains):
-            continue
-        # Keep links likely to lead to downloadable content.
-        looks_downloadable = any(
-            k in cl for k in [
-                ".pdf", "download", "full.pdf", "/doi/pdf", "pdfdirect",
-                "/bitstream/", "viewcontent.cgi", "/api/access/datafile",
-                "/article/file/", "/content/", "/document/", "/files/",
-            ]
-        )
-        same_host = (urlparse(c).netloc or "").lower() == landing_host
-        if not looks_downloadable and not same_host:
+        lowered = url.lower()
+        if any(d in lowered for d in blocked_domains):
             continue
         # Exclude obvious non-document assets.
-        if re.search(r"\.(png|jpe?g|gif|svg|webp|css|js|ico|woff2?|ttf)(\?|$)", cl):
+        if re.search(r"\.(png|jpe?g|gif|svg|webp|css|js|ico|woff2?|ttf)(\?|$)", lowered):
             continue
-        if c in seen:
+        if url in seen:
             continue
-        seen.add(c)
-        deduped.append(c)
+        seen.add(url)
 
-    # Score candidates by PDF-likelihood.
-    def _score(url: str) -> float:
-        u = url.lower()
-        s = 0.0
-        if ".pdf" in u:
-            s += 4.0
-        if "citation_pdf_url" in u:
-            s += 3.0
-        if any(k in u for k in ["/doi/pdf", "pdfdirect", "/download", "download=", "/bitstream/", "/content/", "viewcontent.cgi"]):
-            s += 2.0
-        if any(k in u for k in ["tandfonline.com", "sagepub.com", "wiley.com", "jneurosci.org", "direct.mit.edu", "econstor.eu", "canterbury.ac.nz"]):
-            s += 0.8
-        return s
+        origin = forced_origin
+        if origin is None:
+            origin = _candidate_origin(url, landing_host, doi)
+        if origin == ORIGIN_FOREIGN:
+            dropped_foreign += 1
+            continue
+        candidates.append(_Candidate(url, origin, _score(url)))
 
-    deduped.sort(key=_score, reverse=True)
-    return deduped
+    if verbose and dropped_foreign:
+        print(f"  Landing-page links dropped as somebody else's "
+              f"(off-host, no repository signature): {dropped_foreign}")
+
+    candidates.sort(key=lambda c: (c.origin, -c.score))
+    return candidates
+
+
+def _score(url: str) -> float:
+    """Tie-break within an origin band. Never decides between bands."""
+    u = url.lower()
+    s = 0.0
+    if ".pdf" in u:
+        s += 4.0
+    if any(k in u for k in ["/doi/pdf", "pdfdirect", "/download", "download=",
+                            "/bitstream/", "/content/", "viewcontent.cgi"]):
+        s += 2.0
+    if any(k in u for k in ["tandfonline.com", "sagepub.com", "wiley.com",
+                            "jneurosci.org", "direct.mit.edu", "econstor.eu",
+                            "canterbury.ac.nz"]):
+        s += 0.8
+    return s
 
 
 #: How many landing-page candidates to actually try, and how many of those get a
@@ -1709,8 +2500,10 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
         )
 
     # Scraped landing-page candidates.
-    scraped = _collect_landing_page_candidates(final_landing, html_text)
-    candidate_urls = deterministic + [u for u in scraped if u not in deterministic]
+    scraped = _collect_landing_page_candidates(final_landing, html_text, doi=doi,
+                                               verbose=verbose)
+    scraped_urls = [c.url for c in scraped]
+    candidate_urls = deterministic + [u for u in scraped_urls if u not in deterministic]
 
     # Not every DOI has a paper behind it. A magazine news item is a complete,
     # correct result with no full text to fetch, and reporting it as "Nothing
@@ -1735,10 +2528,23 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
         )
 
     for index, candidate in enumerate(candidate_urls[:_LANDING_MAX_CANDIDATES]):
-        if try_download(candidate, save_path, verbose):
+        if _looks_like_preview_url(candidate):
             if verbose:
-                print(f"✅ Landing-page extracted PDF success for {doi}")
-            return True
+                print(f"  Skipping preview endpoint: {candidate[:100]}")
+            continue
+        if _already_rejected(doi, candidate):
+            if verbose:
+                print(f"  Skipping URL already refused for this record: {candidate[:90]}")
+            continue
+        if try_download(candidate, save_path, verbose):
+            # A valid PDF is not necessarily THIS paper's PDF. Before this
+            # check, the first candidate that returned application/pdf ended
+            # the search -- and on a page whose own PDF is bot-walled, that is
+            # a document from the reference list.
+            if _accept_downloaded_pdf(save_path, doi, candidate, verbose):
+                if verbose:
+                    print(f"✅ Landing-page extracted PDF success for {doi}")
+                return True
         # The session retry costs a second full timeout on the same URL, so it is
         # capped far tighter than the candidate list. _collect_landing_page_candidates
         # puts the high-signal sources first (citation_pdf_url, og:pdf), and those
@@ -1746,9 +2552,10 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
         if index < _LANDING_SESSION_RETRIES and try_download_with_session(
             candidate, save_path, referer=final_landing, verbose=verbose
         ):
-            if verbose:
-                print(f"✅ Landing-page session PDF success for {doi}")
-            return True
+            if _accept_downloaded_pdf(save_path, doi, candidate, verbose):
+                if verbose:
+                    print(f"✅ Landing-page session PDF success for {doi}")
+                return True
 
     return False
 
@@ -1953,6 +2760,7 @@ def _xml_path_for_pdf_path(save_path: str) -> str:
 _ELIFE_DOI_RE = re.compile(r"^10\.7554/elife\.(\d+)$", re.IGNORECASE)
 _XML_TDM_TYPES = {"application/xml", "text/xml"}
 EPMC_FULLTEXT_XML = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+EFETCH_PMC_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 
 def _elife_article_id(doi: str):
@@ -2135,6 +2943,9 @@ def _collect_openalex_pdf_urls(data):
     return _dedupe_url_pairs([(url, is_direct) for *_, url, is_direct in scored])
 
 
+_OSF_ITEM_RE = re.compile(r"osf\.io/([a-z0-9]{5})(?:[/?#]|$)", re.IGNORECASE)
+
+
 def _try_oa_location_urls(doi, candidates, save_path, verbose=False) -> bool:
     """Download from ranked OA copies. Direct PDFs first; a few landings after."""
     direct_left = _OA_DIRECT_MAX
@@ -2142,9 +2953,20 @@ def _try_oa_location_urls(doi, candidates, save_path, verbose=False) -> bool:
     for url, is_direct in candidates:
         if not url:
             continue
+        # An OSF item is a project, not a file: scraping its page yields nothing
+        # because the file list is rendered client-side. Unpaywall lists these
+        # as the only OA copy for green-OA psychology records, so without this
+        # the whole location is wasted.
+        osf_match = _OSF_ITEM_RE.search(url)
+        if osf_match and _download_pdf_from_osf_api(
+            osf_match.group(1), save_path, verbose, doi=doi
+        ):
+            return True
         if is_direct and direct_left > 0:
             direct_left -= 1
-            if try_download(url, save_path, verbose):
+            if try_download(url, save_path, verbose) and _accept_downloaded_pdf(
+                save_path, doi, url, verbose
+            ):
                 return True
         if landing_left > 0:
             landing_left -= 1
@@ -2185,6 +3007,19 @@ def try_pmc_xml_fallback(pmcid, save_path, verbose=False, doi=None):
         pmcid = f"PMC{pmcid}"
     return _try_save_jats_xml(
         EPMC_FULLTEXT_XML.format(pmcid=pmcid),
+        save_path, verbose=verbose, doi=doi,
+    )
+
+
+def try_pmc_efetch_xml_fallback(pmcid, save_path, verbose=False, doi=None):
+    """NCBI efetch JATS for a PMCID. Serves records Europe PMC's OA route will not."""
+    if not pmcid:
+        return None
+    numeric = str(pmcid).strip().upper().replace("PMC", "")
+    if not numeric.isdigit():
+        return None
+    return _try_save_jats_xml(
+        _ncbi_url(f"{EFETCH_PMC_URL}?db=pmc&id={numeric}&retmode=xml"),
         save_path, verbose=verbose, doi=doi,
     )
 
@@ -2307,7 +3142,7 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
         crossref_params = {}
         if _DEFAULT_EMAIL:
             crossref_params["mailto"] = _DEFAULT_EMAIL
-        r = requests.get(
+        r = _crossref_raw_get(
             f"https://api.crossref.org/works/{doi}",
             params=crossref_params,
             timeout=12
@@ -2427,52 +3262,91 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
 
 
 #-----------------------------------------------------------------------------------------
-def _download_pdf_from_osf_api(osf_id: str, save_path: str, verbose=False) -> bool:
-    """Try OSF API file providers for directly uploaded PDF files."""
+#: How far into an OSF project's folder tree to look, and how many PDFs to try.
+#: A real project is organised by submission round -- "PCIRR Stage 1",
+#: "PCIRR Stage 2 Endorsed manuscript", "POC print" -- so every PDF that matters
+#: is at least one folder down, and a top-level-only scan finds nothing at all.
+_OSF_MAX_DEPTH = 4
+_OSF_MAX_FILES = 25
+
+
+def _osf_pdf_files(files_url: str, verbose=False):
+    """Every PDF in an OSF file tree, breadth-first, as (path, download_url)."""
+    found = []
+    queue = [(files_url, "")]
+    seen = set()
+    depth = 0
+    while queue and depth <= _OSF_MAX_DEPTH and len(found) < _OSF_MAX_FILES:
+        next_level = []
+        for url, prefix in queue:
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                r = requests.get(url, timeout=25)
+                if r.status_code != 200:
+                    continue
+                items = (r.json() or {}).get("data") or []
+            except Exception as e:
+                if verbose:
+                    print(f"    OSF listing failed: {str(e)[:80]}")
+                continue
+            for item in items:
+                attrs = item.get("attributes") or {}
+                name = attrs.get("name") or ""
+                rel = (item.get("relationships", {}).get("files", {})
+                       .get("links", {}).get("related", {}).get("href"))
+                if attrs.get("kind") == "folder":
+                    if rel:
+                        next_level.append((rel, prefix + "/" + name))
+                elif name.lower().endswith(".pdf"):
+                    dl = (item.get("links") or {}).get("download")
+                    if dl:
+                        found.append((prefix + "/" + name, dl))
+                        if len(found) >= _OSF_MAX_FILES:
+                            break
+        queue = next_level
+        depth += 1
+    return found
+
+
+def _download_pdf_from_osf_api(osf_id: str, save_path: str, verbose=False,
+                               doi: str = "") -> bool:
+    """The article's own PDF from an OSF project, registration or preprint.
+
+    A project is not a file, so there is rarely one obvious candidate: the node
+    behind 10.1037/cns0000401 holds fourteen PDFs -- six preprint revisions,
+    three "Draftable Comparison Export" diffs, two replies to decision letters,
+    a cover letter, an endorsed manuscript and the published print. Picking the
+    first one found is a coin flip, and the first one found there is a draft.
+
+    So every candidate is offered to the identity check and the first that
+    passes wins. That check is what makes looking this hard safe: without it,
+    walking a stranger's folder tree for "a PDF" is precisely how the wrong file
+    ends up filed as the paper.
+    """
     try:
-        guid_url = f"https://api.osf.io/v2/guids/{osf_id}/"
-        g = requests.get(guid_url, timeout=20)
+        g = requests.get(f"https://api.osf.io/v2/guids/{osf_id}/", timeout=20)
         if g.status_code != 200:
             return False
-
-        gdata = (g.json() or {}).get("data") or {}
-        gtype = gdata.get("type")
-        if gtype == "registrations":
-            files_url = f"https://api.osf.io/v2/registrations/{osf_id}/files/"
-        elif gtype == "nodes":
-            files_url = f"https://api.osf.io/v2/nodes/{osf_id}/files/"
-        elif gtype == "preprints":
-            files_url = f"https://api.osf.io/v2/preprints/{osf_id}/files/"
-        else:
+        gtype = ((g.json() or {}).get("data") or {}).get("type")
+        if gtype not in ("registrations", "nodes", "preprints"):
             return False
+        files_url = f"https://api.osf.io/v2/{gtype}/{osf_id}/files/"
 
-        providers = requests.get(files_url, timeout=20)
-        if providers.status_code != 200:
-            return False
-
-        for provider in (providers.json() or {}).get("data", []):
-            rel = (
-                provider.get("relationships", {})
-                .get("files", {})
-                .get("links", {})
-                .get("related", {})
-                .get("href")
-            )
-            if not rel:
+        candidates = _osf_pdf_files(files_url, verbose=verbose)
+        if verbose:
+            print(f"    OSF {osf_id}: {len(candidates)} PDF(s) in the file tree")
+        for path, dl_url in candidates:
+            if _already_rejected(doi, dl_url):
                 continue
-            listing = requests.get(rel, timeout=20)
-            if listing.status_code != 200:
+            if not try_download(dl_url, save_path, verbose):
                 continue
-            for item in (listing.json() or {}).get("data", []):
-                attrs = item.get("attributes", {})
-                name = (attrs.get("name") or "").lower()
-                if attrs.get("kind") != "file" or not name.endswith(".pdf"):
-                    continue
-                dl_url = (item.get("links") or {}).get("download")
-                if dl_url and try_download(dl_url, save_path, verbose):
-                    if verbose:
-                        print(f"✅ OSF API file download success for {osf_id}")
-                    return True
+            if doi and not _accept_downloaded_pdf(save_path, doi, dl_url, verbose):
+                continue
+            if verbose:
+                print(f"✅ OSF API file download success for {osf_id}: {path[-70:]}")
+            return True
     except Exception as e:
         if verbose:
             print(f"  OSF API file fallback error: {str(e)[:120]}")
@@ -2910,6 +3784,129 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
 
 #-----------------------------------------------------------------------------------------
 def fetch_pdf(doi,
+              save_path,
+              email=None,
+              verbose=False,
+              delay=0.1,
+              allow_xml_fallback=True,
+              use_playwright=False,
+              prioritize_xml=False,
+              xml_only=False,
+              xml_html_only=False,
+              get_xml_or_html=False,
+              to_markdown=False,
+              target_task="extraction",
+              upgrade_existing=False,
+              want_provenance=False,
+              _source_out=None,
+              _paths_out=None,
+              _visited=None,
+              _resolver=None,
+              ):
+    """The chain, plus the question the chain never asked: is this the paper?
+
+    A thin wrapper rather than an edit at each of the chain's forty
+    `return save_path` sites. Every route that can write a PDF funnels through
+    its return value, so one check here covers the direct downloads, the
+    Crossref links, the repository routes and the Playwright page renders alike
+    -- including any route added later, which is the part that matters.
+
+    Not redundant with the checks inside the chain's own candidate loops: those
+    let a search CONTINUE past a wrong file, where this one can only refuse the
+    finished result. Catching it here and nowhere else would turn "wrong PDF"
+    into "no PDF" for records whose right copy was two candidates further down.
+
+    Verification is skipped in three cases, each for its own reason:
+      * the tiered path already ran it, at `engine._validate_for_tier`;
+      * the result is not a PDF -- an .xml result has passed `validate_t1`;
+      * the file was already on disk. Re-verifying a corpus on every re-run
+        would delete files this change never fetched; that is a different
+        decision from "do not fetch the wrong file", and not this one's to make.
+
+    The signature is spelled out rather than collapsed into **kwargs because
+    the chain re-enters itself positionally -- `fetch_pdf(related, save_path,
+    email, verbose, delay=0, ...)` at the Crossref-relation and DataCite steps.
+    """
+    # Snapshot what is already on disk for this record. The chain's
+    # skip-if-exists check returns a path it did not fetch, and re-judging a
+    # corpus on every re-run would delete files this change never wrote --
+    # a different decision from "do not fetch the wrong file", and not this
+    # one's to make. _source_out is not enough on its own: callers may pass
+    # none, and the skip-if-exists path then reports nothing at all.
+    pre_existing = _artifact_snapshot(save_path)
+
+    written = _fetch_pdf_chain(
+        doi, save_path, email=email, verbose=verbose, delay=delay,
+        allow_xml_fallback=allow_xml_fallback, use_playwright=use_playwright,
+        prioritize_xml=prioritize_xml, xml_only=xml_only,
+        xml_html_only=xml_html_only, get_xml_or_html=get_xml_or_html,
+        to_markdown=to_markdown, target_task=target_task,
+        upgrade_existing=upgrade_existing, want_provenance=want_provenance,
+        _source_out=_source_out, _paths_out=_paths_out, _visited=_visited,
+        _resolver=_resolver,
+    )
+
+    tiered = bool(prioritize_xml or xml_only or xml_html_only or get_xml_or_html)
+    if tiered:
+        return written
+    if written and _source_out is not None and _source_out[0] == "existing":
+        return written
+    if written and pre_existing.get(os.path.abspath(written)) == _stat_key(written):
+        return written
+
+    resolved = resolve_identifier_to_doi(doi, verbose=verbose) or doi
+    if written and _accept_downloaded_pdf(written, resolved, verbose=verbose):
+        return written
+    if written:
+        _record_source(_source_out, None)
+
+    # No acceptable PDF. Structured full text is a BETTER artifact than a PDF,
+    # not a consolation prize -- it is tier 1 on the extraction ladder and the
+    # PDF is tier 5 -- so a record that cannot yield a PDF should still yield
+    # the paper if the paper exists in markup anywhere. Not gated behind a flag,
+    # because "no PDF" and "no full text" are different answers and only one of
+    # them is worth a human's time.
+    #
+    # Restricted to T1/T2, which contain no T5 rung, so this cannot re-enter
+    # the chain it was called from.
+    if not allow_xml_fallback:
+        return None
+    try:
+        from .retrieval.engine import retrieve_tiered
+
+        if verbose:
+            print(f"  No usable PDF for {resolved}; trying structured full text")
+        result = retrieve_tiered(
+            raw_identifier=doi,
+            doi=resolved,
+            pmid=extract_pmid(doi),
+            save_path=save_path,
+            target_task=target_task,
+            xml_html_only=True,
+            want_provenance=want_provenance,
+            email=email,
+            verbose=verbose,
+            delay=delay,
+            use_playwright=use_playwright,
+            resolver=_resolver,
+        )
+    except Exception as e:
+        if verbose:
+            print(f"  Structured-full-text fallback failed: {str(e)[:120]}")
+        return None
+
+    path = getattr(result, "path", None)
+    if path and os.path.exists(path):
+        _record_source(_source_out, "structured_fallback")
+        _print_yellow_warning(
+            f"WARNING: No PDF available for {resolved}; saved structured full "
+            f"text instead -> {path}"
+        )
+        return path
+    return None
+
+
+def _fetch_pdf_chain(doi,
                        save_path,
                        email=None,
                        verbose=False,
@@ -3382,7 +4379,7 @@ def fetch_pdf(doi,
                                         continue
 
                                 # Method 3: OSF API file-provider fallback
-                                if _download_pdf_from_osf_api(osf_id, save_path, verbose):
+                                if _download_pdf_from_osf_api(osf_id, save_path, verbose, doi=doi):
                                     _record_source(_source_out, "osf")
                                     _quiet_close(browser)
                                     return save_path
@@ -3745,6 +4742,26 @@ def fetch_pdf(doi,
                         if xml_got:
                             _record_source(_source_out, "pmc")
                             return xml_got
+                        # Europe PMC serves fullTextXML only for records inside
+                        # its OA subset. NIH author manuscripts are not in it --
+                        # free to read on the PMC website, not redistributable --
+                        # so that endpoint 404s while NCBI efetch serves the same
+                        # JATS. Verified on PMC9292464 (10.1111/all.14949):
+                        # Europe PMC 404, ?pdf=render 500, the web PDF behind a
+                        # reCAPTCHA, and efetch 200 with a 27,571-character
+                        # <body>. Without this the record has no full text at
+                        # all, which is how its chain reached a landing-page
+                        # scrape and came back with a cited document.
+                        #
+                        # A non-OA record's efetch reply is a well-formed
+                        # <article> with no <body> and the refusal in an XML
+                        # comment; _looks_like_jats_fulltext already rejects it.
+                        xml_got = try_pmc_efetch_xml_fallback(
+                            pmcid, save_path, verbose=verbose, doi=doi
+                        )
+                        if xml_got:
+                            _record_source(_source_out, "pmc_efetch")
+                            return xml_got
     except Exception as e:
         if verbose: print(f"Error with PMC: {e}")
         pass
@@ -3775,6 +4792,7 @@ def fetch_pdf(doi,
         r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={email}", timeout=10)
         if r.status_code == 200:
             data = r.json()
+            _remember_title(doi, data.get("title"))
             # best_oa_location is often a publisher landing with no PDF while
             # oa_locations[] still has a repository or preprint file. Walk them
             # all (capped); the ranked helper puts url_for_pdf first.
@@ -3794,13 +4812,14 @@ def fetch_pdf(doi,
         crossref_params = {}
         if _DEFAULT_EMAIL:
             crossref_params["mailto"] = _DEFAULT_EMAIL
-        r = requests.get(
+        r = _crossref_raw_get(
             f"https://api.crossref.org/works/{doi}",
             params=crossref_params,
             timeout=10
         )
         if r.status_code == 200:
             m = r.json().get("message", {})
+            _remember_title(doi, m.get("title"), m.get("page"))
             # Direct PDF links in Crossref metadata
             for link in m.get("link", []):
                 if link.get("content-type") == "application/pdf":
@@ -4411,8 +5430,27 @@ def _append_failed_to_csv(output_dir, doi, category, detail, lock):
                 (detail or "")[:500],
             ])
 
+def _prune_empty_record_dir(record_dir):
+    """Drop a --make-subfolder directory the record never wrote anything into.
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+    The per-record directory has to be created *before* the download starts --
+    nothing down the writing chain calls makedirs -- so a record that fails
+    every source would otherwise leave an empty folder behind, and a run over a
+    few thousand missing DOIs would bury the hits in empty directories.
+    os.rmdir rather than rmtree, and unconditional rather than only-on-failure:
+    a directory with anything at all in it (a PDF, an abstract, a partial the
+    engine left) is a directory this must not touch, and the emptiness test is
+    the one check that gets that right without trusting a success flag.
+    """
+    if not record_dir:
+        return
+    try:
+        os.rmdir(record_dir)
+    except OSError:
+        pass  # non-empty (the normal success case), gone already, or in use
+
+
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -4509,6 +5547,9 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             download_data_artifacts=download_data_artifacts,
             max_data_artifact_bytes=max_data_artifact_bytes,
             llm_adjudicate_artifacts=llm_adjudicate_artifacts,
+            llm_agent_retrieval=llm_agent_retrieval,
+            llm_backend=llm_backend,
+            max_llm_records=max_llm_records,
             llm_model=llm_model,
             unpack_data_artifacts=unpack_data_artifacts,
             download_related_unverified=download_related_unverified,
@@ -4519,7 +5560,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -4558,20 +5599,15 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     _ladder = None
     _tiered = prioritize_xml or xml_only or xml_html_only or get_xml_or_html
 
-    # Two gates, deliberately. How many suffixes count as "already downloaded" is
-    # a property of the TIERED path only: widening it for --pull-supplementary
-    # would start skipping default-path records that happen to have a
-    # .fulltext.html or .landing.html on disk, which the chain would otherwise
-    # have re-attempted. The shared resolver is a separate question.
-    if _tiered:
-        from .retrieval.tiers import ARTIFACT_EXTENSIONS
-    else:
-        ARTIFACT_EXTENSIONS = [".pdf", ".xml"]
+    # Two gates, deliberately: which suffixes count as "already downloaded" is a
+    # property of the tiered path only (see skip_check_extensions). The shared
+    # resolver is a separate question.
+    ARTIFACT_EXTENSIONS = skip_check_extensions(_tiered)
 
     if _tiered or pull_supplementary:
         from .retrieval.cache import ResolutionCache
         from .retrieval.http import HttpClient
-        from .retrieval.ratelimit import HostRateLimiter
+        from .retrieval.ratelimit import HostRateLimiter, shared_host_limiter
         from .retrieval.resolve import BatchResolver
         from .retrieval.tiers import load_ladder
 
@@ -4586,13 +5622,24 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             _resolver = shared_resolver
         else:
             _resolver = BatchResolver(
-                HttpClient(HostRateLimiter(_ladder.rate_limits), email=email, verbose=verbose),
+                HttpClient(shared_host_limiter(_ladder.rate_limits), email=email, verbose=verbose),
                 ResolutionCache.for_output_dir(output_dir, verbose),
                 _ladder,
                 verbose,
             )
         print(f"🔎 Resolving identifiers for {len(dois)} record(s)...")
         _resolver.prime([str(d).strip() for d in dois])
+
+    # Titles and page ranges for the identity check, in bulk, before any worker
+    # starts. Every record needs one, so asking per record made verification the
+    # most rate-limit-hungry step in the tool -- and Crossref allows 10/s, which
+    # ten workers reach instantly. Fifty DOIs per request turns a 10,000-record
+    # run's 10,000 metadata calls into 200. Unconditional: the legacy chain needs
+    # this every bit as much as the tiered walk, and it is the legacy chain that
+    # had no rate limiting at all.
+    if len(dois) > 1:
+        print(f"🔎 Fetching titles for {len(dois)} record(s) (identity check)...")
+        prime_record_metadata([str(d).strip() for d in dois], verbose=verbose)
 
     # Thread-local storage for prefix
     _thread_prefix = threading.local()
@@ -4694,6 +5741,9 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                 download_data_artifacts=download_data_artifacts,
                 max_data_artifact_bytes=max_data_artifact_bytes,
                 llm_adjudicate_artifacts=llm_adjudicate_artifacts,
+                llm_agent_retrieval=llm_agent_retrieval,
+                llm_backend=llm_backend,
+                max_llm_records=max_llm_records,
                 llm_model=llm_model,
                 unpack_data_artifacts=unpack_data_artifacts,
                 download_related_unverified=download_related_unverified,
@@ -4741,12 +5791,17 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     def download_one(doi, idx, total):
         """Download one record, registered in-flight so a stall is nameable."""
         _inflight_start(idx, str(doi).strip())
+        # Filled in by the inner call once it knows the record's directory, so
+        # the cleanup below runs even when that call raises.
+        made_dir = []
         try:
-            return _download_one_inner(doi, idx, total)
+            return _download_one_inner(doi, idx, total, made_dir)
         finally:
             _inflight_end(idx)
+            if made_dir:
+                _prune_empty_record_dir(made_dir[0])
 
-    def _download_one_inner(doi, idx, total):
+    def _download_one_inner(doi, idx, total, made_dir=None):
         """Download a single DOI/PMID with progress tracking."""
         # idx is 0-based within the processed list, add start_offset for actual CSV row
         actual_row = start_offset + idx + 1
@@ -4779,6 +5834,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         record_dir = os.path.join(output_dir, safe_doi) if make_subfolder else output_dir
         if make_subfolder:
             os.makedirs(record_dir, exist_ok=True)
+            if made_dir is not None:
+                made_dir.append(record_dir)
         save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
 
         # Always allocated, not just under --tracksource: the success line names
@@ -5281,6 +6338,31 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             for display_id in sorted(set(withheld)):
                 print(f"      {display_id}")
 
+        # What LAYER 2 did, which is not the same question as what it found.
+        # "Never called" and "called and found nothing" are different facts
+        # about different things -- one is about this run's configuration, the
+        # other about the papers -- and on these corpora the second is the
+        # common case, so the first would hide behind it forever.
+        try:
+            from .retrieval.llm_agent_retrieval import run_report
+            agent_outcomes = run_report()
+        except Exception:
+            agent_outcomes = {}
+        if agent_outcomes:
+            rendered = "  ".join(f"{k}:{v}"
+                                 for k, v in sorted(agent_outcomes.items()))
+            print(f"  Retrieval agent: {rendered}")
+            unreached = sum(v for k, v in agent_outcomes.items()
+                            if k in ("backend_unavailable", "unknown_backend",
+                                     "skipped_ceiling", "no_full_text",
+                                     "call_failed"))
+            if unreached:
+                _print_yellow_warning(
+                    f"  ⚠️  {unreached} record(s) were NOT examined by the "
+                    f"retrieval agent. Those are not records where it found "
+                    f"nothing."
+                )
+
     # The SI half of the missing-materials report, written once now that every
     # record's supplementary pass has finished.
     if create_missing_report and _si_statuses and _run_timestamp:
@@ -5676,6 +6758,49 @@ def main():
              "warning, if the CLI is absent or errors. Requires --download-data-artifacts."
     )
     parser.add_argument(
+        "--pull-everything",
+        action="store_true",
+        help="Both retrieval layers at once: every API route (--pull-supplementary "
+             "--download-data-artifacts) plus an AI agent that reads the paper itself "
+             "and goes after the supplementary files and datasets those routes did "
+             "not get. SI lands beside the PDF as numbered siblings; linked deposits "
+             "land in {stem}_data_artifacts/. NOT literally everything -- Wiley, ACS "
+             "and MDPI serve HTTP 403 to plain requests, arXiv ancillary files are "
+             "uncovered, and GEO/SRA/Mendeley/ICPSR have no file enumerator; those "
+             "are recorded in the linked-artifacts sidecar, not fetched. Costs a "
+             "model call per record: see --llm-backend and --max-llm-records."
+    )
+    parser.add_argument(
+        "--llm-agent-retrieval",
+        action="store_true",
+        help="The second layer on its own, without implying the first. Rarely what "
+             "you want -- the agent is told what layer 1 already obtained so it does "
+             "not fetch a second copy, and without layer 1 that list is empty. "
+             "Implies --download-data-artifacts."
+    )
+    parser.add_argument(
+        "--llm-backend",
+        choices=["claude-cli", "openrouter"],
+        default="claude-cli",
+        help="Which model runs the retrieval agent (default: claude-cli). "
+             "'claude-cli' shells out to a locally installed Claude Code CLI and "
+             "reuses whatever auth you already have; it is locked down to WebFetch "
+             "with no file, shell or MCP tools, so it navigates and reports URLs "
+             "and fetchpdf does the transfer. 'openrouter' needs OPENROUTER_API_KEY "
+             "in .env.local and downloads directly through two tools fetchpdf "
+             "implements. Both end with the same files in the same places."
+    )
+    parser.add_argument(
+        "--max-llm-records",
+        type=int,
+        default=0,
+        help="Stop calling the retrieval agent after this many records (0 = no "
+             "limit). A corpus run makes one model call per record, so this is the "
+             "ceiling that stops an overnight batch spending without bound. The "
+             "records past the limit still get every API route; only the agent is "
+             "skipped, and the manifest says so."
+    )
+    parser.add_argument(
         "--llm-model",
         default="haiku",
         help="Model for --llm-adjudicate-artifacts (default: haiku)."
@@ -5689,12 +6814,39 @@ def main():
              "supplementary files) lands inside it; run-level files (failed_dois.csv, "
              "missing_pdfs.html, source_tracking.csv, ...) stay at the output-dir root. "
              "Note a subfolder run cannot see PDFs from an earlier flat run into the same "
-             "directory, so those records are fetched again. Ignored when an explicit output "
+             "directory, so those records are fetched again. A record that comes back with "
+             "nothing leaves no folder behind. Ignored when an explicit output "
              "file path is given for a single download."
+    )
+    parser.add_argument(
+        "--on-existing",
+        choices=[ON_EXISTING_ASK, ON_EXISTING_SKIP, ON_EXISTING_SUPPLEMENT],
+        default=ON_EXISTING_ASK,
+        help="What to do about records already on disk when a batch re-runs over a "
+             "directory it has filled before. 'skip' is the historical behaviour: "
+             "download only what is missing. 'supplement' also skips the download but "
+             "turns on --pull-supplementary, so records already here keep their PDFs "
+             "and gain their supplementary material. 'ask' (the default) puts the same "
+             "choice on screen, and falls back to 'skip' whenever stdin or stdout is "
+             "not a terminal -- pipes, cron and CI never block."
     )
 
     args = parser.parse_args()
 
+
+    # Answered once, here, rather than per record. Every retrieved PDF is
+    # checked against the record it was fetched for, so with no text engine
+    # every PDF would be rejected -- and a 5,000-DOI run would end with zero
+    # PDFs and 5,000 individually reasonable-looking warnings. That failure
+    # mode is indistinguishable from "nothing was available", which is exactly
+    # the confusion this whole change exists to remove.
+    from .retrieval.pdf_text import engine_status as _engine_status
+    if _engine_status()[0] is None:
+        parser.error(
+            "no PDF text engine is installed, so no retrieved PDF can be "
+            "verified as the article it was fetched for -- every PDF would be "
+            "rejected. Install one:  pip install 'fetchpdf[text]'  (or pypdf)"
+        )
 
     # --xml-only and --upgrade-existing are meaningless outside the tier walk.
     if args.xml_only or args.xml_html_only or args.upgrade_existing or args.get_xml_or_html:
@@ -5711,6 +6863,19 @@ def main():
         parser.error("--max-supplementary-mb must be a positive number of megabytes")
     if args.max_data_artifact_mb <= 0:
         parser.error("--max-data-artifact-mb must be a positive number of megabytes")
+    if args.pull_everything:
+        # One flag, both layers. Set before the checks below so it cannot trip
+        # the error its own implications satisfy.
+        args.pull_supplementary = True
+        args.download_data_artifacts = True
+        args.llm_adjudicate_artifacts = True
+        args.llm_agent_retrieval = True
+    if args.llm_agent_retrieval:
+        args.pull_supplementary = True
+        args.download_data_artifacts = True
+    if args.max_llm_records < 0:
+        parser.error("--max-llm-records cannot be negative")
+
     if args.llm_adjudicate_artifacts and not args.download_data_artifacts:
         # Adjudication decides which candidates to DOWNLOAD; with nothing being
         # downloaded it would spend money to change nothing.
@@ -5839,6 +7004,10 @@ def main():
         print(f"⚙️  Workers: {args.workers}")
         print("-" * 60)
 
+        if prompt_on_existing(dois, args) == ON_EXISTING_ABORT:
+            print("Aborted; nothing downloaded.")
+            return 0
+
         results = batch_fetch_pdfs(
             dois=dois,
             output_dir=args.output_dir,
@@ -5870,6 +7039,9 @@ def main():
             download_data_artifacts=args.download_data_artifacts,
             max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
             llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
+            llm_agent_retrieval=args.llm_agent_retrieval,
+            llm_backend=args.llm_backend,
+            max_llm_records=args.max_llm_records,
             llm_model=args.llm_model,
             unpack_data_artifacts=args.unpack_data_artifacts,
             download_related_unverified=args.download_related_unverified,
@@ -5882,6 +7054,7 @@ def main():
 
         print("\n" + "=" * 60)
         print(f"✅ Success: {success_count}/{len(dois)} ({success_count/len(dois)*100:.1f}%)")
+        _report_unverified_keeps()
 
         if failed:
             print(f"\n❌ Failed DOIs ({len(failed)}):")
@@ -5917,6 +7090,14 @@ def main():
         print(f"⚙️  Workers: {args.workers}")
         print("-" * 60)
 
+        # PMIDs resolve to DOIs inside the worker, so the scan behind this
+        # cannot name their folders and will report nothing to skip. Called
+        # anyway: a --pmid-csv row may already be a DOI, and the guards make
+        # a zero count a silent no-op.
+        if prompt_on_existing(identifiers, args) == ON_EXISTING_ABORT:
+            print("Aborted; nothing downloaded.")
+            return 0
+
         results = batch_fetch_pdfs(
             dois=identifiers,
             output_dir=args.output_dir,
@@ -5948,6 +7129,9 @@ def main():
             download_data_artifacts=args.download_data_artifacts,
             max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
             llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
+            llm_agent_retrieval=args.llm_agent_retrieval,
+            llm_backend=args.llm_backend,
+            max_llm_records=args.max_llm_records,
             llm_model=args.llm_model,
             unpack_data_artifacts=args.unpack_data_artifacts,
             download_related_unverified=args.download_related_unverified,
@@ -5960,6 +7144,7 @@ def main():
 
         print("\n" + "=" * 60)
         print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/len(identifiers)*100:.1f}%)")
+        _report_unverified_keeps()
 
         if failed:
             print(f"\n❌ Failed PMIDs ({len(failed)}):")
@@ -5993,9 +7178,14 @@ def main():
                 print(f"\n📄 Abstract saved to {result}")
                 return 0
             else:
+                if args.make_subfolder:
+                    _prune_empty_record_dir(record_dir)
                 print(f"\n❌ No abstract found for {display_id}")
                 return 1
 
+        # Set only when --make-subfolder actually created a directory, so a run
+        # that comes back empty-handed does not leave one behind.
+        made_record_dir = None
         if args.output:
             save_path = args.output
         else:
@@ -6014,6 +7204,7 @@ def main():
                           if args.make_subfolder else args.output_dir)
             if args.make_subfolder:
                 os.makedirs(record_dir, exist_ok=True)
+                made_record_dir = record_dir
             save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
             print(f"💾 No output path provided; using: {save_path}")
 
@@ -6060,10 +7251,12 @@ def main():
                     download_data_artifacts=args.download_data_artifacts,
                     max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
                     llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
+                    llm_agent_retrieval=args.llm_agent_retrieval,
+                    llm_backend=args.llm_backend,
+                    max_llm_records=args.max_llm_records,
                     llm_model=args.llm_model,
                     unpack_data_artifacts=args.unpack_data_artifacts,
-            download_related_unverified=args.download_related_unverified,
-            draft_requests=args.draft_requests,
+                    download_related_unverified=args.download_related_unverified,
                 )
                 print(f"\n📎 {summary.written} supplementary file(s), "
                       f"{summary.skipped} skipped ({summary.status})")
@@ -6097,6 +7290,7 @@ def main():
             print(f"\n✅ Successfully downloaded to {result}")
             return 0
         else:
+            _prune_empty_record_dir(made_record_dir)
             print(f"\n❌ Failed to download PDF for {args.doi}")
             return 1
 

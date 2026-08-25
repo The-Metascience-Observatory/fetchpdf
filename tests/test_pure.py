@@ -196,7 +196,9 @@ class TestLandingPageFanOut:
         monkeypatch.setattr(fpd, "try_download_with_session",
                             lambda *a, **kw: False)
         monkeypatch.setattr(fpd, "_collect_landing_page_candidates",
-                            lambda landing, html: [f"https://x/{i}.pdf" for i in range(60)])
+                            lambda landing, html, doi="", verbose=False: [
+                                fpd._Candidate(f"https://x/{i}.pdf", fpd.ORIGIN_DECLARED, 4.0)
+                                for i in range(60)])
 
         # The function calls requests.get directly, NOT _get_with_retries.
         # Patching the wrong one makes the landing fetch fail, the function return
@@ -216,7 +218,9 @@ class TestLandingPageFanOut:
                             lambda url, path, referer=None, verbose=False:
                             session_calls.append(url) or False)
         monkeypatch.setattr(fpd, "_collect_landing_page_candidates",
-                            lambda landing, html: [f"https://x/{i}.pdf" for i in range(60)])
+                            lambda landing, html, doi="", verbose=False: [
+                                fpd._Candidate(f"https://x/{i}.pdf", fpd.ORIGIN_DECLARED, 4.0)
+                                for i in range(60)])
 
         # The function calls requests.get directly, NOT _get_with_retries.
         # Patching the wrong one makes the landing fetch fail, the function return
@@ -440,7 +444,7 @@ class TestElsevierFirstPagePreviewIsRejected:
         to preempt fallbacks that might hold the full PDF."""
         import inspect
 
-        source = inspect.getsource(fpd.fetch_pdf)
+        source = inspect.getsource(fpd._fetch_pdf_chain)
         elsevier = source.index("Deferred Elsevier fallback")
         # The private last-resort block sits above Elsevier when present; a
         # scrubbed tree has no such block, and Elsevier must still be last.
@@ -457,7 +461,7 @@ def test_semantic_scholar_tls_is_verified():
     """
     import inspect
 
-    source = inspect.getsource(fpd.fetch_pdf)
+    source = inspect.getsource(fpd._fetch_pdf_chain)
     s2 = source[source.index("Semantic Scholar ---"):][:1600]
     # The unconditional keyword must be gone; the guarded retry may remain.
     assert "verify=False,  # S2 cert has expired" not in s2
@@ -644,7 +648,7 @@ class TestJatsXmlFallback:
 
     def test_fetch_pdf_gates_pmc_xml_on_allow_xml_fallback(self):
         import inspect
-        source = inspect.getsource(fpd.fetch_pdf)
+        source = inspect.getsource(fpd._fetch_pdf_chain)
         pmc = source[source.index("PubMed Central"):source.index("eScholarship")]
         assert "allow_xml_fallback" in pmc
         assert "try_pmc_xml_fallback" in pmc
@@ -879,3 +883,473 @@ class TestCoreTimeoutBreaker:
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("CORE was not skipped")),
         )
         assert fpd.try_core_fallback.__wrapped__("10.1/x", "/tmp/x.pdf") is False
+
+
+class TestAWrongPdfDoesNotEndTheSearch:
+    """The reported bug was two failures, and this is the second one.
+
+    Stopping at the first `application/pdf` is what turned a bot-walled article
+    into a cited document: candidate 1 was the paper's own PDF behind a
+    reCAPTCHA, candidate 2 was a dead link, and candidate 3 was the USDA report
+    the paper cites -- a genuine PDF, so the loop ended there. Refusing it at
+    the end of the run would only downgrade "wrong PDF" to "no PDF". The loop
+    has to keep going.
+    """
+
+    def _page(self):
+        class _Resp:
+            status_code = 200
+            url = "https://landing.example/article"
+            headers = {"content-type": "text/html"}
+            text = "<html><body>page</body></html>"
+            content = b"<html><body>page</body></html>"
+        return _Resp()
+
+    def test_the_loop_continues_past_a_pdf_that_is_a_different_article(self, monkeypatch, tmp_path):
+        tried = []
+
+        def fake_download(url, path, verbose=False):
+            tried.append(url)
+            with open(path, "wb") as f:
+                f.write(b"%PDF-1.4 plausible bytes")
+            return True
+
+        monkeypatch.setattr(fpd, "try_download", fake_download)
+        monkeypatch.setattr(fpd, "try_download_with_session", lambda *a, **kw: False)
+        monkeypatch.setattr(
+            fpd, "_collect_landing_page_candidates",
+            lambda landing, html, doi="", verbose=False: [
+                fpd._Candidate(f"https://x/{i}.pdf", fpd.ORIGIN_DECLARED, 4.0)
+                for i in range(5)])
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **kw: self._page())
+        # Every candidate downloads fine and every one is somebody else's paper.
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf",
+                            lambda path, doi, url="", verbose=False: False)
+
+        save = tmp_path / "rec.pdf"
+        won = fpd.try_landing_page_pdf_fallback(
+            "10.1111/all.14949", "https://landing.example/article", str(save))
+
+        assert won is False, "a wrong PDF was accepted as the paper"
+        assert len(tried) == 5, f"the loop stopped after {len(tried)} candidate(s)"
+
+    def test_a_verified_candidate_after_a_wrong_one_still_wins(self, monkeypatch, tmp_path):
+        """The whole point: the right copy is often further down the list."""
+        tried = []
+
+        def fake_download(url, path, verbose=False):
+            tried.append(url)
+            with open(path, "wb") as f:
+                f.write(b"%PDF-1.4 plausible bytes")
+            return True
+
+        monkeypatch.setattr(fpd, "try_download", fake_download)
+        monkeypatch.setattr(fpd, "try_download_with_session", lambda *a, **kw: False)
+        monkeypatch.setattr(
+            fpd, "_collect_landing_page_candidates",
+            lambda landing, html, doi="", verbose=False: [
+                fpd._Candidate(f"https://x/{i}.pdf", fpd.ORIGIN_DECLARED, 4.0)
+                for i in range(5)])
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **kw: self._page())
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf",
+                            lambda path, doi, url="", verbose=False: "2.pdf" in url)
+
+        save = tmp_path / "rec.pdf"
+        won = fpd.try_landing_page_pdf_fallback(
+            "10.1111/all.14949", "https://landing.example/article", str(save))
+
+        assert won is True
+        assert tried[-1].endswith("2.pdf")
+
+    def test_a_file_already_on_disk_is_not_re_judged(self, monkeypatch, tmp_path):
+        """Re-running over a corpus must not delete files this change never
+        fetched. That is a different decision, and not this one's to make."""
+        existing = tmp_path / "10.1234--x.pdf"
+        existing.write_bytes(b"%PDF-1.4 already here, unreadable, and not ours")
+
+        judged = []
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf",
+                            lambda path, doi, url="", verbose=False: judged.append(path) or False)
+
+        assert fpd.fetch_pdf("10.1234/x", str(existing)) == str(existing)
+        assert judged == [], "a pre-existing artifact was put on trial"
+        assert existing.exists()
+
+
+class TestPreviewEndpointsAndRepeatedRefusals:
+    """A publisher preview is refused, and then not fetched again.
+
+    Both halves matter. Human Kinetics and Brill serve two pages of a
+    seventeen- and a thirty-two-page article from URLs containing
+    `/previewpdf/`, and `try_landing_page_pdf_fallback` runs from nine call
+    sites per record: before this, one Brill preview was downloaded, parsed and
+    discarded four times in a single run.
+    """
+
+    def setup_method(self):
+        fpd._REJECTED_URLS.clear()
+
+    @pytest.mark.parametrize("url", [
+        "https://brill.com/previewpdf/view/journals/irme/3/2/article-p243_4.xml",
+        "https://journals.humankinetics.com/previewpdf/view/journals/jcsp/16/2/article-p130.xml",
+    ])
+    def test_preview_endpoints_are_recognised(self, url):
+        assert fpd._looks_like_preview_url(url)
+
+    def test_an_ordinary_pdf_url_is_not_mistaken_for_a_preview(self):
+        assert not fpd._looks_like_preview_url(
+            "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/all.14949")
+
+    def test_a_refused_url_is_not_downloaded_twice_for_the_same_record(self):
+        fpd._note_rejected("10.1/x", "https://p.example/a.pdf")
+        assert fpd._already_rejected("10.1/x", "https://p.example/a.pdf")
+        # ... but the same URL may be right for a DIFFERENT record.
+        assert not fpd._already_rejected("10.1/y", "https://p.example/a.pdf")
+
+    def test_preview_urls_are_skipped_before_any_download(self, monkeypatch, tmp_path):
+        tried = []
+
+        class _Resp:
+            status_code = 200
+            url = "https://landing.example/article"
+            headers = {"content-type": "text/html"}
+            text = content = "<html><body>x</body></html>"
+
+        monkeypatch.setattr(fpd, "try_download",
+                            lambda url, path, verbose=False: tried.append(url) or False)
+        monkeypatch.setattr(fpd, "try_download_with_session", lambda *a, **kw: False)
+        monkeypatch.setattr(
+            fpd, "_collect_landing_page_candidates",
+            lambda landing, html, doi="", verbose=False: [
+                fpd._Candidate("https://brill.com/previewpdf/view/x.xml",
+                               fpd.ORIGIN_DECLARED, 4.0),
+                fpd._Candidate("https://brill.com/doi/pdf/10.1/x", fpd.ORIGIN_DECLARED, 4.0),
+            ])
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **kw: _Resp())
+
+        fpd.try_landing_page_pdf_fallback("10.1/x", "https://landing.example/article",
+                                          str(tmp_path / "r.pdf"))
+        assert tried == ["https://brill.com/doi/pdf/10.1/x"], (
+            "the preview endpoint should never have been requested")
+
+
+class TestStructuredFullTextFallback:
+    """No PDF is not the same answer as no paper.
+
+    Structured full text is tier 1 on the extraction ladder and the PDF is tier
+    5, so a record that cannot yield a PDF should still yield the paper if it
+    exists in markup. Not behind a flag: "no PDF" and "no full text" are
+    different answers and only one of them is worth a human's time.
+    """
+
+    def test_the_fallback_runs_when_the_chain_returns_nothing(self, monkeypatch, tmp_path):
+        called = {}
+
+        def fake_tiered(**kw):
+            called.update(kw)
+            path = tmp_path / "rec.fulltext.html"
+            path.write_bytes(b"<html><body>full text</body></html>")
+            return type("R", (), {"path": str(path)})()
+
+        monkeypatch.setattr(fpd, "_fetch_pdf_chain", lambda *a, **kw: None)
+        monkeypatch.setattr("fetchpdf.retrieval.engine.retrieve_tiered", fake_tiered)
+
+        out = fpd.fetch_pdf("10.1/x", str(tmp_path / "rec.pdf"))
+        assert out and out.endswith(".fulltext.html")
+        assert called["xml_html_only"] is True, "must not descend to the PDF rung again"
+
+    def test_the_fallback_runs_when_the_pdf_was_refused(self, monkeypatch, tmp_path):
+        save = tmp_path / "rec.pdf"
+
+        def fake_chain(*a, **kw):
+            save.write_bytes(b"%PDF-1.4 somebody else's paper")
+            return str(save)
+
+        def fake_tiered(**kw):
+            path = tmp_path / "rec.xml"
+            path.write_bytes(b"<article><body>full text</body></article>")
+            return type("R", (), {"path": str(path)})()
+
+        monkeypatch.setattr(fpd, "_fetch_pdf_chain", fake_chain)
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf", lambda *a, **kw: False)
+        monkeypatch.setattr("fetchpdf.retrieval.engine.retrieve_tiered", fake_tiered)
+
+        assert fpd.fetch_pdf("10.1/x", str(save)).endswith(".xml")
+
+    def test_no_xml_fallback_opts_out(self, monkeypatch, tmp_path):
+        def boom(**kw):
+            raise AssertionError("structured fallback ran despite --no-xml-fallback")
+
+        monkeypatch.setattr(fpd, "_fetch_pdf_chain", lambda *a, **kw: None)
+        monkeypatch.setattr("fetchpdf.retrieval.engine.retrieve_tiered", boom)
+        assert fpd.fetch_pdf("10.1/x", str(tmp_path / "rec.pdf"),
+                             allow_xml_fallback=False) is None
+
+    def test_the_tiered_path_does_not_get_a_second_fallback(self, monkeypatch, tmp_path):
+        """--get-xml-or-html already collects structured text itself."""
+        def boom(**kw):
+            raise AssertionError("fallback ran on the tiered path")
+
+        monkeypatch.setattr(fpd, "_fetch_pdf_chain", lambda *a, **kw: None)
+        monkeypatch.setattr("fetchpdf.retrieval.engine.retrieve_tiered", boom)
+        assert fpd.fetch_pdf("10.1/x", str(tmp_path / "rec.pdf"),
+                             get_xml_or_html=True) is None
+
+
+class TestCrossrefUnderParallelLoad:
+    """Crossref allows 10 requests per second and says so in every response
+    (`x-rate-limit-limit: 10`, `x-rate-limit-interval: 1s`, measured 2026-08-23).
+
+    The tiered engine has always respected that through HostRateLimiter. The
+    legacy chain called requests.get directly from six places, so at
+    --workers 10 there was no ceiling at all, and the identity check made it
+    worse by needing a title for every record.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_bucket(self, monkeypatch):
+        """A throwaway bucket per test.
+
+        The real one is process-wide and shared with the tiered engine -- which
+        is the point -- so a test that exercises the 429 path would otherwise
+        drain the live bucket and make every later test wait out the penalty on
+        the wall clock.
+        """
+        from fetchpdf.retrieval.ratelimit import TokenBucket
+
+        bucket = TokenBucket(rate=10_000, burst=10_000)
+        monkeypatch.setattr(fpd, "_crossref_bucket", lambda: bucket)
+        self.bucket = bucket
+
+    def setup_method(self):
+        fpd._TITLE_MEMO.clear()
+        fpd._PAGES_MEMO.clear()
+        fpd._METADATA_UNAVAILABLE.clear()
+        fpd._UNVERIFIED_KEPT.clear()
+
+    class _Resp:
+        def __init__(self, status, payload=None, retry_after=None):
+            self.status_code = status
+            self._payload = payload or {}
+            self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+        def json(self):
+            return self._payload
+
+    def test_a_429_is_retried_rather_than_treated_as_an_answer(self, monkeypatch):
+        seen = []
+        replies = [self._Resp(429), self._Resp(429),
+                   self._Resp(200, {"message": {"title": ["Real Title"], "page": "1-9"}})]
+
+        def fake_get(url, params=None, timeout=None):
+            seen.append(url)
+            return replies[min(len(seen) - 1, len(replies) - 1)]
+
+        monkeypatch.setattr(fpd.requests, "get", fake_get)
+        monkeypatch.setattr(fpd.time, "sleep", lambda *a: None)
+        assert fpd._title_for("10.1/x") == "Real Title"
+        assert len(seen) == 3
+
+    def test_retry_after_penalises_the_shared_bucket(self, monkeypatch):
+        """The penalty lands on the bucket every worker draws from, not on the
+        one thread that happened to receive the 429."""
+        penalties = []
+        monkeypatch.setattr(self.bucket, "penalize", lambda s: penalties.append(s))
+        monkeypatch.setattr(fpd.requests, "get",
+                            lambda *a, **k: self._Resp(429, retry_after="7"))
+        fpd._title_for("10.1/x")
+        assert 7 in penalties, f"Retry-After ignored; penalties {penalties}"
+
+    def test_a_wild_retry_after_is_clamped(self, monkeypatch):
+        penalties = []
+        monkeypatch.setattr(self.bucket, "penalize", lambda s: penalties.append(s))
+        monkeypatch.setattr(fpd.requests, "get",
+                            lambda *a, **k: self._Resp(429, retry_after="86400"))
+        fpd._title_for("10.1/x")
+        assert penalties and max(penalties) <= 60, "a day-long Retry-After would hang the run"
+
+    def test_an_unreachable_crossref_is_never_cached_as_no_title(self, monkeypatch):
+        """The bug this replaced: one 429 cached "" for the rest of the run, and
+        a record with no title cannot be verified, and an unverifiable PDF was
+        deleted. One rate-limit blip therefore deleted correct files."""
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: self._Resp(429))
+        monkeypatch.setattr(fpd.time, "sleep", lambda *a: None)
+        assert fpd._title_for("10.1/x") == ""
+        assert "10.1/x" not in fpd._TITLE_MEMO, "a failed lookup became a permanent answer"
+        assert fpd._metadata_was_unavailable("10.1/x")
+
+    def test_a_404_is_cached_because_it_is_a_real_answer(self, monkeypatch):
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: self._Resp(404))
+        assert fpd._title_for("10.1/gone") == ""
+        assert fpd._TITLE_MEMO["10.1/gone"] == ""
+        assert not fpd._metadata_was_unavailable("10.1/gone")
+
+    def test_titles_are_fetched_in_bulk(self, monkeypatch):
+        requests_made = []
+
+        def fake_get(url, params=None, timeout=None):
+            requests_made.append(params["filter"])
+            dois = [f.split("doi:", 1)[1] for f in params["filter"].split(",")]
+            return self._Resp(200, {"message": {"items": [
+                {"DOI": d, "title": [f"Title {d}"], "page": "1-9"} for d in dois]}})
+
+        monkeypatch.setattr(fpd.requests, "get", fake_get)
+        dois = [f"10.1/{i}" for i in range(120)]
+        assert fpd.prime_record_metadata(dois) == 120
+        # 120 records, 50 per request.
+        assert len(requests_made) == 3, f"{len(requests_made)} requests for 120 records"
+        assert fpd._title_for("10.1/7") == "Title 10.1/7"
+
+    def test_priming_does_not_re_ask_for_what_it_already_has(self, monkeypatch):
+        fpd._remember_title("10.1/known", "Already Here", "1-4")
+        calls = []
+        monkeypatch.setattr(fpd.requests, "get",
+                            lambda *a, **k: calls.append(1) or self._Resp(
+                                200, {"message": {"items": []}}))
+        fpd.prime_record_metadata(["10.1/known"])
+        assert calls == []
+
+    def test_a_dead_bulk_request_marks_the_batch_unavailable_not_absent(self, monkeypatch):
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: self._Resp(429))
+        monkeypatch.setattr(fpd.time, "sleep", lambda *a: None)
+        fpd.prime_record_metadata(["10.1/a", "10.1/b"])
+        assert fpd._metadata_was_unavailable("10.1/a")
+        assert "10.1/a" not in fpd._TITLE_MEMO
+
+    def test_a_doi_crossref_does_not_have_is_left_for_datacite(self, monkeypatch):
+        """"Not in Crossref" is not "has no title".
+
+        Crossref does not register Zenodo, OSF, figshare or Dryad DOIs.
+        Memoising "" for them here is what deleted every one of their PDFs:
+        no title means nothing to verify against, and an unverifiable PDF used
+        to be unlinked. They are left unmemoised so `_title_for` asks DataCite
+        when the record is actually reached.
+        """
+        monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: self._Resp(
+            200, {"message": {"items": [{"DOI": "10.1/a", "title": ["A"], "page": "1-2"}]}}))
+        fpd.prime_record_metadata(["10.1/a", "10.5281/zenodo.1"])
+        assert fpd._TITLE_MEMO["10.1/a"] == "A"
+        assert "10.5281/zenodo.1" not in fpd._TITLE_MEMO
+        assert not fpd._metadata_was_unavailable("10.5281/zenodo.1")
+
+    def test_datacite_supplies_the_title_crossref_lacks(self, monkeypatch):
+        monkeypatch.setattr(fpd, "_crossref_get", lambda *a, **k: {})
+        monkeypatch.setattr(fpd, "_datacite_title",
+                            lambda doi, verbose=False: ("Zenodo Replication Study", "1-9"))
+        assert fpd._title_for("10.5281/zenodo.1") == "Zenodo Replication Study"
+        assert fpd._PAGES_MEMO["10.5281/zenodo.1"] == "1-9"
+
+    def test_an_unreachable_datacite_is_unavailable_not_absent(self, monkeypatch):
+        """Same rule as Crossref: could-not-ask never becomes a permanent answer."""
+        monkeypatch.setattr(fpd, "_crossref_get", lambda *a, **k: {})
+        monkeypatch.setattr(fpd, "_datacite_title", lambda doi, verbose=False: None)
+        assert fpd._title_for("10.5281/zenodo.1") == ""
+        assert "10.5281/zenodo.1" not in fpd._TITLE_MEMO
+        assert fpd._metadata_was_unavailable("10.5281/zenodo.1")
+
+    def test_a_doi_neither_registry_has_is_recorded_as_absent(self, monkeypatch):
+        monkeypatch.setattr(fpd, "_crossref_get", lambda *a, **k: {})
+        monkeypatch.setattr(fpd, "_datacite_title", lambda doi, verbose=False: ("", ""))
+        assert fpd._title_for("10.1/gone") == ""
+        assert fpd._TITLE_MEMO["10.1/gone"] == ""
+        assert not fpd._metadata_was_unavailable("10.1/gone")
+
+
+
+
+def test_the_legacy_chain_and_the_tiered_engine_share_one_crossref_budget():
+    """Not merely "a process-wide bucket each" -- the SAME bucket.
+
+    The first version of this built its own, so a run touching both paths
+    politely allowed 10/s twice against a published allowance of 10/s. Asserted
+    on object identity because equal rates would have passed the old bug.
+    """
+    from fetchpdf.retrieval.ratelimit import shared_host_limiter
+    from fetchpdf.retrieval.tiers import load_ladder
+
+    legacy = fpd._crossref_bucket()
+    tiered = shared_host_limiter(load_ladder().rate_limits).bucket("api.crossref.org")
+    assert legacy is tiered
+    assert legacy.rate <= 10.0
+
+
+def test_the_shared_limiter_is_the_same_object_for_every_caller():
+    from fetchpdf.retrieval.ratelimit import shared_host_limiter
+
+    assert shared_host_limiter() is shared_host_limiter()
+
+
+class TestOnlyPositiveTrustedEvidenceDeletes:  # noqa: E301
+    """Deleting is the one unrecoverable act available here.
+
+    A wrong file kept can be found again by re-running the audit; a right file
+    deleted cannot. So deletion needs a POSITIVE finding (`wrong_article` or
+    `truncated`) AND metadata we actually obtained. Measured before this rule:
+    re-judging 706 known-good corpus PDFs with metadata unavailable deleted
+    eight of them.
+    """
+
+    def setup_method(self):
+        fpd._METADATA_UNAVAILABLE.clear()
+        fpd._UNVERIFIED_KEPT.clear()
+
+    def _pdf(self, tmp_path):
+        path = tmp_path / "rec.pdf"
+        path.write_bytes(b"%PDF-1.4 " + b"x" * 4000)
+        return str(path)
+
+    @staticmethod
+    def _exists(path):
+        import os
+
+        return os.path.exists(path)
+
+    def _verdict(self, monkeypatch, state):
+        from fetchpdf.retrieval.pdf_identity import IdentityVerdict
+
+        monkeypatch.setattr(fpd, "_title_for", lambda doi, verbose=False: "T")
+        monkeypatch.setattr("fetchpdf.retrieval.pdf_identity.verify_pdf_identity",
+                            lambda *a, **k: IdentityVerdict(state, "because"))
+
+    @pytest.mark.parametrize("state", ["no_reference", "unreadable", "no_engine"])
+    def test_a_non_finding_never_deletes(self, tmp_path, monkeypatch, state):
+        path = self._pdf(tmp_path)
+        self._verdict(monkeypatch, state)
+        assert fpd._accept_downloaded_pdf(path, "10.1/x") is True
+        assert self._exists(path), f"{state} deleted a file nobody had checked"
+        assert "10.1/x" in fpd.unverified_records()
+
+    @pytest.mark.parametrize("state", ["wrong_article", "truncated"])
+    def test_a_positive_finding_does_delete(self, tmp_path, monkeypatch, state):
+        path = self._pdf(tmp_path)
+        self._verdict(monkeypatch, state)
+        assert fpd._accept_downloaded_pdf(path, "10.1/x") is False
+        assert not self._exists(path)
+
+    @pytest.mark.parametrize("state", ["wrong_article", "truncated"])
+    def test_not_even_a_positive_finding_deletes_on_unfetched_metadata(
+            self, tmp_path, monkeypatch, state):
+        """A 429 is a fact about the afternoon, not about the paper."""
+        path = self._pdf(tmp_path)
+        self._verdict(monkeypatch, state)
+        fpd._METADATA_UNAVAILABLE.add("10.1/x")
+        assert fpd._accept_downloaded_pdf(path, "10.1/x") is True
+        assert self._exists(path)
+
+
+def test_the_url_a_pdf_came_from_is_recorded(tmp_path, monkeypatch):
+    """`sources/legacy_pdf.py` used to set `url=""`, so a wrong artifact on disk
+    carried no record of its own origin -- which is why diagnosing the original
+    mis-fetch meant re-running the code instead of reading the sidecar."""
+    save = tmp_path / "rec.pdf"
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "application/pdf"}
+
+        def iter_content(self, n):
+            yield b"%PDF-1.4 " + b"x" * 2000
+
+    monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: _Resp())
+    assert fpd.try_download("https://p.example/real.pdf", str(save))
+    assert fpd.download_url_for(str(save)) == "https://p.example/real.pdf"

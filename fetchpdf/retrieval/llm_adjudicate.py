@@ -95,8 +95,16 @@ def find_cli() -> Optional[str]:
     return shutil.which("claude")
 
 
-def _build_command(cli_path: str, model: str):
-    """argv for a tool-less, single-turn, JSON-output call.
+def _build_command(cli_path: str, model: str, allowed_tools: str = "",
+                   max_turns: int = 1, extra_argv=()):
+    """argv for a JSON-output call. Tool-less and single-turn by default.
+
+    `allowed_tools` and `max_turns` are parameters rather than something a
+    caller appends, because both CLI flags are variadic: passing
+    `--allowed-tools ""` and then `--allowed-tools "WebFetch"` is not a
+    last-one-wins override, it is two values whose combination nobody
+    intended. The retrieval agent needs different values for both, so it sets
+    them here.
 
     Windows: subprocess.run(["claude", ...]) raises WinError 193 when the
     target is a .cmd/.bat shim, because CreateProcess cannot execute a batch
@@ -109,75 +117,47 @@ def _build_command(cli_path: str, model: str):
         "-p",
         "--model", model,
         "--output-format", "json",
-        "--allowed-tools", "",
-        "--max-turns", "1",
+        "--allowed-tools", allowed_tools,
+        "--max-turns", str(max_turns),
     ]
+    argv.extend(extra_argv)
     if os.name == "nt" and cli_path.lower().endswith((".cmd", ".bat")):
         return ["cmd", "/c"] + argv
     return argv
 
 
-_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.I)
+def run_cli(prompt: str, cli_path: str, model: str = DEFAULT_MODEL,
+            timeout: int = None, allowed_tools: str = "", max_turns: int = 1,
+            extra_argv=(), cwd: str = None, log=None) -> Optional[str]:
+    """One CLI call. Returns raw stdout, or None if anything went wrong.
 
-
-def _parse_verdict(stdout: str) -> Optional[dict]:
-    """Pull the model's JSON object out of the CLI's JSON envelope.
-
-    Two layers: the CLI wraps everything in {"result": "..."} , and the model
-    tends to fence its answer in ```json even when told not to. Both observed
-    against the real CLI, so both are handled rather than assumed away.
+    Extracted from `adjudicate_one` so the retrieval agent can reuse the parts
+    that are not about verdicts: the stdin feed, the Windows shim, the
+    tempdir cwd, and the four ways this degrades. Every failure returns None
+    and warns once -- a helper that is absent, slow or broken must never be
+    able to fail a record.
     """
-    try:
-        envelope = json.loads(stdout)
-    except (ValueError, TypeError):
-        return None
-    if envelope.get("is_error"):
-        return None
-    result = envelope.get("result")
-    if not isinstance(result, str):
-        return None
-    body = _FENCE.sub("", result.strip())
-    try:
-        verdict = json.loads(body)
-    except ValueError:
-        # Last resort: the first {...} block in the text.
-        match = re.search(r"\{.*\}", body, re.S)
-        if not match:
-            return None
-        try:
-            verdict = json.loads(match.group(0))
-        except ValueError:
-            return None
-    return verdict if isinstance(verdict, dict) else None
-
-
-def adjudicate_one(candidate: Candidate, cli_path: str,
-                   model: str = DEFAULT_MODEL, log=None) -> Optional[dict]:
-    """One yes/no verdict, or None if anything at all went wrong."""
-    prompt = _PROMPT.format(
-        url=candidate.url, repo=candidate.repo,
-        context=(candidate.context or "")[:600],
-    )
     try:
         # The prompt goes over STDIN, never argv: Windows caps a command line
         # near 8191 chars and applies its own quoting rules, and article prose
         # carries quotes, newlines and non-ASCII punctuation.
         #
-        # cwd is a temp dir so the subprocess cannot pick up an unrelated
-        # project's CLAUDE.md from the corpus directory.
+        # cwd defaults to a temp dir so the subprocess cannot pick up an
+        # unrelated project's CLAUDE.md from the corpus directory.
         with tempfile.TemporaryDirectory() as scratch:
             completed = subprocess.run(
-                _build_command(cli_path, model),
+                _build_command(cli_path, model, allowed_tools,
+                               max_turns, extra_argv),
                 input=prompt,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",       # explicit: Windows defaults to cp1252,
                 errors="replace",       # which mangles curly quotes/en dashes
-                timeout=TIMEOUT_SECONDS,
-                cwd=scratch,
+                timeout=timeout or TIMEOUT_SECONDS,
+                cwd=cwd or scratch,
             )
     except subprocess.TimeoutExpired:
-        _warn_once(f"Claude CLI timed out after {TIMEOUT_SECONDS}s.", log)
+        _warn_once(f"Claude CLI timed out after {timeout or TIMEOUT_SECONDS}s.", log)
         return None
     except OSError as error:
         _warn_once(f"Claude CLI could not be run ({error}).", log)
@@ -190,7 +170,73 @@ def adjudicate_one(candidate: Candidate, cli_path: str,
             log,
         )
         return None
-    return _parse_verdict(completed.stdout)
+    return completed.stdout
+
+
+_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.I)
+
+
+def unwrap_result(stdout: str, expect=dict):
+    """Pull the model's JSON out of the CLI's JSON envelope.
+
+    Two layers: the CLI wraps everything in {"result": "..."} , and the model
+    tends to fence its answer in ```json even when told not to. Both observed
+    against the real CLI, so both are handled rather than assumed away.
+
+    `expect` is the type the caller requires -- a verdict is one object, a
+    retrieval receipt is a list of them -- and anything else returns None
+    rather than a shape the caller then has to re-check.
+    """
+    try:
+        envelope = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    if envelope.get("is_error"):
+        return None
+    result = envelope.get("result")
+    if not isinstance(result, str):
+        return None
+    return parse_json_body(result, expect=expect)
+
+
+def parse_json_body(text: str, expect=dict):
+    """The model's JSON out of its prose, fences and all. None if not `expect`.
+
+    Shared with the OpenRouter backend, which gets the same fenced-JSON habit
+    without the CLI's envelope around it.
+    """
+    body = _FENCE.sub("", (text or "").strip())
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        # Last resort: the first {...} or [...] block in the text.
+        pattern = r"\[.*\]" if expect is list else r"\{.*\}"
+        match = re.search(pattern, body, re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except ValueError:
+            return None
+    return parsed if isinstance(parsed, expect) else None
+
+
+def _parse_verdict(stdout: str) -> Optional[dict]:
+    """The adjudicator's one-object answer. Kept as the name its tests use."""
+    return unwrap_result(stdout, expect=dict)
+
+
+def adjudicate_one(candidate: Candidate, cli_path: str,
+                   model: str = DEFAULT_MODEL, log=None) -> Optional[dict]:
+    """One yes/no verdict, or None if anything at all went wrong."""
+    prompt = _PROMPT.format(
+        url=candidate.url, repo=candidate.repo,
+        context=(candidate.context or "")[:600],
+    )
+    stdout = run_cli(prompt, cli_path, model=model, log=log)
+    if stdout is None:
+        return None
+    return _parse_verdict(stdout)
 
 
 def adjudicate(candidates: List[Candidate], model: str = DEFAULT_MODEL,

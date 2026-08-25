@@ -156,3 +156,9 @@ body.md
 # Playwright
 .playwright/
 playwright-state.json
+
+# One-off corpus-audit artifacts. Written by ad-hoc repair runs, not part of the
+# package; they name specific DOIs on a specific day and go stale immediately.
+/inbox_redownload*.csv
+/inbox_redownload*.txt
+/OVERNIGHT_STATUS.md
