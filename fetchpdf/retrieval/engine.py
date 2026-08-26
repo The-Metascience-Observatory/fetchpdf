@@ -447,13 +447,22 @@ def _validate_for_tier(artifact: Artifact, ctx, ids=None) -> ValidationResult:
         # declares a different article since _citation_doi_mismatch; a PDF got
         # no such question, so a document from the paper's own reference list
         # passed as the paper. See retrieval/pdf_identity.
-        from .pdf_identity import article_pages, article_title, verify_pdf_identity
+        from .pdf_identity import (
+            article_arxiv_id,
+            article_pages,
+            article_title,
+            verify_pdf_identity,
+        )
 
         verdict = verify_pdf_identity(
             artifact.content,
             ids.doi if ids is not None else None,
             article_title(ids) if ids is not None else "",
             pages=article_pages(ids) if ids is not None else "",
+            # The only signal an arXiv record has: its DOI is at DataCite, so
+            # Crossref supplies neither title nor page range, and the PDF prints
+            # the id rather than the DOI.
+            arxiv_id=article_arxiv_id(ids) if ids is not None else "",
             # Left by _accept when a structured copy of THIS record was taken
             # earlier in the same walk. A publisher's first-page preview carries
             # the article's own DOI and title, so no identity signal can see it;

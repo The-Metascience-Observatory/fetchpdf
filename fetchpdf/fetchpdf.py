@@ -584,11 +584,13 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
         return False
 
     from .retrieval.pdf_identity import TRUNCATED, WRONG, verify_pdf_identity
+    from .retrieval.resolve import arxiv_id_from_doi
 
     title = _title_for(doi, verbose=verbose)
     with _TITLE_LOCK:
         page_range = _PAGES_MEMO.get((doi or "").strip().lower(), "")
-    verdict = verify_pdf_identity(save_path, doi, title, pages=page_range)
+    verdict = verify_pdf_identity(save_path, doi, title, pages=page_range,
+                                  arxiv_id=arxiv_id_from_doi(doi))
     if verdict.ok:
         return True
 
@@ -1034,6 +1036,35 @@ def reset_source_timing():
     """Clear the counters. Exists for tests; batches are one process each."""
     with _SOURCE_TIMING_LOCK:
         _SOURCE_TIMING.clear()
+
+
+#: Defaults for a build without the optional source pack. The private block
+#: below overrides all three when the pack is present; without it these stand,
+#: every last-resort site in this module is already a no-op, and
+#: `last_resorts_enabled()` can still answer for the build it is running in.
+LAST_RESORT_SOURCES = ()
+_LAST_RESORTS_ENABLED = False
+_DISABLED_SOURCES = set()
+
+
+def last_resorts_enabled():
+    """Whether any optional last-resort source can still be reached this process.
+
+    Public, and outside the private block, because a caller with a licence
+    posture to defend has to be able to *prove* the answer rather than assume
+    it. A pipeline that stores retrieved bytes and gates egress on how they were
+    acquired needs an assertion it can put in a test; a comment saying the pack
+    is absent is not one, and neither is an import that raises in one build and
+    not the other.
+
+    A build without the pack answers False because there is nothing to reach. A
+    build that has called `disable_last_resorts` answers False because it was
+    turned off. The two are deliberately indistinguishable from outside: what a
+    caller can act on is reachability, not which mechanism delivered it.
+    """
+    return _LAST_RESORTS_ENABLED and any(
+        src.name not in _DISABLED_SOURCES for src in LAST_RESORT_SOURCES
+    )
 
 
 

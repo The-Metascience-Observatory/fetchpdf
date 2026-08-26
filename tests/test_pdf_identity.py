@@ -258,6 +258,66 @@ def test_unpaywall_supplies_the_title_when_crossref_did_not_run():
     assert pdf_identity.article_title(ids) == TITLE
 
 
+class TestAnArxivPaperIsCheckedAgainstTheIdItPrints:
+    """The class of record that had no signal at all until this existed.
+
+    arXiv mints its DOIs at DataCite, so Crossref -- the only place
+    `article_title` and `article_pages` read from -- has no record of one, and
+    the PDF arXiv serves is stamped with `arXiv:2605.04265v1` down the margin
+    and never with `10.48550/arXiv.2605.04265`. Every signal was therefore
+    unavailable, the verdict was NO_REFERENCE, and the engine reads that as a
+    refusal: `--get-xml-or-html 10.48550/arXiv.2605.04265` fetched the PDF,
+    dropped it, and kept only the HTML.
+    """
+
+    ARXIV_DOI = "10.48550/arXiv.2605.04265"
+    ARXIV_ID = "2605.04265"
+    #: How arXiv stamps a served PDF: id, version, category, date.
+    STAMP = "arXiv:2605.04265v1  [q-bio.BM]  6 May 2026"
+
+    def test_the_stamped_id_verifies_the_pdf(self, tmp_path):
+        path = _pdf(tmp_path, "arxiv.pdf", [self.STAMP, "Some Preprint"] + PROSE)
+        verdict = verify_pdf_identity(path, self.ARXIV_DOI, "",
+                                      arxiv_id=self.ARXIV_ID)
+        assert verdict.state == VERIFIED
+        assert verdict.signals == ["arxiv-id-in-text"]
+
+    def test_a_different_version_of_the_same_paper_still_verifies(self, tmp_path):
+        """v1 and v3 are the same paper, so the suffix is not compared."""
+        path = _pdf(tmp_path, "v3.pdf", ["arXiv:2605.04265v3  [q-bio.BM]"] + PROSE)
+        verdict = verify_pdf_identity(path, self.ARXIV_DOI, "",
+                                      arxiv_id=self.ARXIV_ID + "v1")
+        assert verdict.state == VERIFIED
+
+    def test_pre_2007_ids_carry_their_archive_name(self, tmp_path):
+        path = _pdf(tmp_path, "old.pdf", ["arXiv:hep-th/9901001v2"] + PROSE)
+        verdict = verify_pdf_identity(path, "10.48550/arXiv.hep-th/9901001", "",
+                                      arxiv_id="hep-th/9901001")
+        assert verdict.state == VERIFIED
+
+    def test_somebody_elses_arxiv_paper_is_not_accepted(self, tmp_path):
+        path = _pdf(tmp_path, "other.pdf", ["arXiv:2408.01234v1"] + PROSE)
+        verdict = verify_pdf_identity(path, self.ARXIV_DOI, "",
+                                      arxiv_id=self.ARXIV_ID)
+        assert verdict.state != VERIFIED
+
+    def test_the_bare_number_is_not_enough(self, tmp_path):
+        """Squashing strips the dot, so the id alone is nine digits -- the shape
+        of a grant number, an accession or a phone number. Only the `arXiv:`
+        prefix in front of it makes the match mean anything."""
+        path = _pdf(tmp_path, "grant.pdf", ["Funded under award 2605.04265"] + PROSE)
+        verdict = verify_pdf_identity(path, self.ARXIV_DOI, "",
+                                      arxiv_id=self.ARXIV_ID)
+        assert verdict.state != VERIFIED
+
+    def test_the_id_is_derived_from_the_doi_without_a_network_call(self):
+        from fetchpdf.retrieval.identifiers import IdentifierSet
+
+        assert pdf_identity.article_arxiv_id(
+            IdentifierSet(doi=self.ARXIV_DOI)) == self.ARXIV_ID
+        assert pdf_identity.article_arxiv_id(IdentifierSet(doi=DOI)) == ""
+
+
 # --------------------------------------------------------------------------
 # Scans, which can only offer structural evidence
 # --------------------------------------------------------------------------

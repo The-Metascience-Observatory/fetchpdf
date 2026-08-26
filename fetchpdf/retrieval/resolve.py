@@ -78,6 +78,20 @@ _ARXIV_URL_RE = re.compile(
 )
 
 
+def arxiv_id_from_doi(doi: Optional[str]) -> Optional[str]:
+    """The arXiv id inside a 10.48550/arXiv.* DOI. Free -- no network call.
+
+    Public because `pdf_identity` needs it for a caller that holds a DOI string
+    and no IdentifierSet: an arXiv PDF is stamped with its arXiv id and never
+    with its DataCite DOI, so this is the only route from what that caller has
+    to something actually printed on the page.
+    """
+    if not doi:
+        return None
+    matched = _ARXIV_FROM_DOI_RE.search(str(doi).strip())
+    return matched.group(1) if matched else None
+
+
 def arxiv_id_in(*values) -> Optional[str]:
     """The first arXiv id found in any of these strings, version suffix stripped.
 
@@ -212,9 +226,9 @@ class BatchResolver:
         doi = (ids.doi or "").lower()
         if not doi:
             return
-        m = _ARXIV_FROM_DOI_RE.search(doi)
-        if m:
-            ids.learn("doi-shape", note="arXiv DOI", arxiv_id=m.group(1))
+        from_doi = arxiv_id_from_doi(doi)
+        if from_doi:
+            ids.learn("doi-shape", note="arXiv DOI", arxiv_id=from_doi)
         if doi.startswith(_PREPRINT_PREFIX + "/"):
             ids.preprint_server = "unknown"   # biorxiv vs medrxiv; the API decides
 

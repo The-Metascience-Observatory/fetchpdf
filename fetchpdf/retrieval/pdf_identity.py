@@ -179,10 +179,22 @@ def article_pages(ids) -> str:
     return str((memo.get("crossref") or {}).get("page") or "")
 
 
+def article_arxiv_id(ids) -> str:
+    """The record's arXiv id, which resolution derives from the DOI for free."""
+    from .resolve import arxiv_id_from_doi
+
+    return str(
+        getattr(ids, "arxiv_id", None)
+        or arxiv_id_from_doi(getattr(ids, "doi", None))
+        or ""
+    )
+
+
 def verify_pdf_identity(source, doi: Optional[str] = None,
                         title: Optional[str] = None,
                         pages: Optional[str] = None,
-                        reference_chars: Optional[int] = None) -> IdentityVerdict:
+                        reference_chars: Optional[int] = None,
+                        arxiv_id: Optional[str] = None) -> IdentityVerdict:
     """Whether the PDF at `source` (a path, or bytes) is this DOI's paper.
 
     Signals are checked cheapest-first and the first hit wins. Any one of them
@@ -221,6 +233,30 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
         if wanted and wanted in squashed_page:
             return truncated or IdentityVerdict(
                 VERIFIED, "requested DOI found in the PDF text", ["doi-in-text"])
+
+    # S1b: the arXiv id, stamped down the margin of every PDF arXiv serves. It
+    # is S1 for a class of record that S1 cannot reach and neither can S2-S4:
+    # arXiv mints 10.48550/arXiv.* DOIs at DataCite and prints the id, never the
+    # DOI, while Crossref -- the only place `article_title` and `article_pages`
+    # read from -- has no record of a DataCite DOI at all, so no title and no
+    # page range are available either. Every arXiv PDF therefore reached the end
+    # of this function with nothing checked and came back NO_REFERENCE, which the
+    # engine treats as a refusal: `--get-xml-or-html` on 10.48550/arXiv.2605.04265
+    # fetched the PDF, threw it away, and kept only the HTML, contradicting the
+    # flag it was asked for.
+    #
+    # The "arxiv" prefix is required, not decoration. Squashing strips the dot,
+    # so the id alone is nine digits ("260504265") and would match a phone
+    # number, a grant number or an accession in the front matter; "arXiv:" in
+    # front of it is what makes the match mean something. The version suffix is
+    # not compared -- v1 and v3 of a paper are the same paper.
+    if arxiv_id:
+        unversioned = re.sub(r"v\d+$", "", str(arxiv_id).strip())
+        stamped = "arxiv" + squash(unversioned)
+        if stamped != "arxiv" and stamped in squashed_page:
+            return truncated or IdentityVerdict(
+                VERIFIED, "arXiv id {} stamped on the PDF".format(unversioned),
+                ["arxiv-id-in-text"])
 
     # S2/S3: the title, on the page. This is what carries accepted manuscripts
     # (nihms-*.pdf), which print the title and not the publisher's DOI.

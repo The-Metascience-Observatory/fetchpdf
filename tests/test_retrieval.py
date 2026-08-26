@@ -1249,6 +1249,36 @@ def test_collects_both_structured_and_pdf(tmp_path):
     assert result.summary == "structured+pdf"
 
 
+def test_an_arxiv_record_keeps_its_pdf(tmp_path):
+    """The flag promised both and delivered one, for a whole class of record.
+
+    An arXiv PDF prints `arXiv:2605.04265v1` and never its 10.48550 DOI, and
+    that DOI lives at DataCite, so Crossref -- where the identity check reads
+    titles and page ranges -- has no record of it. Nothing was left to check the
+    file against, the verdict was NO_REFERENCE, and the engine reads any
+    non-VERIFIED verdict as a refusal: `--get-xml-or-html
+    10.48550/arXiv.2605.04265` fetched the right PDF and threw it away.
+    """
+    def arxiv_pdf(ids, ctx):
+        return Artifact(
+            content=text_pdf(["arXiv:2605.04265v1  [q-bio.BM]  6 May 2026"]
+                             + ["Full text of the trial report."] * 250),
+            tier=Tier.T5_PDF, source="arxiv", url="https://arxiv.org/pdf/2605.04265",
+            http_status=200,
+        )
+
+    # No arxiv_id and no memo: exactly what resolution has for a bare arXiv DOI
+    # off the command line, so the id has to come from the DOI string itself.
+    ids = IdentifierSet(doi="10.48550/arXiv.2605.04265")
+    result = run_engine(tmp_path, _both(pdf=arxiv_pdf), ids=ids,
+                        get_xml_or_html=True, want_provenance=True)
+
+    assert (tmp_path / "rec.pdf").exists()
+    assert result.summary == "structured+pdf"
+    attempt = next(a for a in result.provenance.attempts if a.tier_attempted == "T5_PDF")
+    assert attempt.accepted, attempt.outcome
+
+
 def test_default_mode_still_stops_at_the_first_hit(tmp_path):
     """Without the flag, the PDF source must never be reached."""
     called = []
