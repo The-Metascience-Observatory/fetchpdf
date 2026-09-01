@@ -1353,3 +1353,48 @@ def test_the_url_a_pdf_came_from_is_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: _Resp())
     assert fpd.try_download("https://p.example/real.pdf", str(save))
     assert fpd.download_url_for(str(save)) == "https://p.example/real.pdf"
+
+
+class TestReadCsvColumn:
+    """The stdlib replacement for what used to be three pandas.read_csv calls.
+
+    The contract the call sites rely on: case-insensitive header match (batch
+    DOI mode), exact match on request (PMID mode), blank cells dropped, values
+    returned as stripped strings, and None -- not an exception -- for a missing
+    column so each caller can keep its own error message.
+    """
+
+    def _csv(self, tmp_path, text, name="ids.csv"):
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_case_insensitive_header(self, tmp_path):
+        path = self._csv(tmp_path, "doi,title\n10.1/a,First\n10.1/b,Second\n")
+        assert fpd._read_csv_column(path, "DOI") == ["10.1/a", "10.1/b"]
+
+    def test_blank_and_whitespace_rows_dropped(self, tmp_path):
+        path = self._csv(tmp_path, "DOI\n10.1/a\n\n   \n 10.1/b \n")
+        assert fpd._read_csv_column(path, "DOI") == ["10.1/a", "10.1/b"]
+
+    def test_missing_column_returns_none(self, tmp_path):
+        path = self._csv(tmp_path, "identifier\n10.1/a\n")
+        assert fpd._read_csv_column(path, "DOI") is None
+
+    def test_exact_match_mode(self, tmp_path):
+        path = self._csv(tmp_path, "pmid\n123\n")
+        assert fpd._read_csv_column(path, "PMID", case_insensitive=False) is None
+        assert fpd._read_csv_column(path, "pmid", case_insensitive=False) == ["123"]
+
+    def test_bom_does_not_hide_the_first_header(self, tmp_path):
+        # Excel exports UTF-8 CSVs with a BOM; read as plain utf-8 the first
+        # header would be '﻿DOI' and never match.
+        path = tmp_path / "bom.csv"
+        path.write_bytes(b"\xef\xbb\xbfDOI\n10.1/a\n")
+        assert fpd._read_csv_column(str(path), "DOI") == ["10.1/a"]
+
+    def test_numeric_pmids_stay_strings(self, tmp_path):
+        # pandas parsed a numeric column as floats ('123.0'); the stdlib
+        # reader must hand back the digits exactly as written.
+        path = self._csv(tmp_path, "PMID\n12345678\n87654321\n")
+        assert fpd._read_csv_column(path, "PMID") == ["12345678", "87654321"]

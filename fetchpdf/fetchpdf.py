@@ -5481,6 +5481,28 @@ def _prune_empty_record_dir(record_dir):
         pass  # non-empty (the normal success case), gone already, or in use
 
 
+def _read_csv_column(path, column, case_insensitive=True):
+    """Read one column from a CSV as a list of stripped, non-empty strings.
+
+    Returns None if the column is missing so callers can raise or print
+    their own error. utf-8-sig so Excel-exported CSVs with a BOM still
+    match on the first header name.
+    """
+    import csv
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        if case_insensitive:
+            col_map = {c.lower(): c for c in fieldnames}
+            actual = col_map.get(column.lower())
+        else:
+            actual = column if column in fieldnames else None
+        if actual is None:
+            return None
+        return [v.strip() for row in reader
+                if (v := row.get(actual)) is not None and v.strip()]
+
+
 def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
@@ -5607,14 +5629,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
 
     # If dois is a string, assume it's a CSV file path
     if isinstance(dois, str):
-        import pandas as pd
-        df = pd.read_csv(dois, encoding='utf-8')
-        # Case-insensitive column lookup for DOI
-        col_map = {c.lower(): c for c in df.columns}
-        doi_col = col_map.get('doi')
-        if doi_col:
-            dois = df[doi_col].dropna().tolist()
-        else:
+        dois = _read_csv_column(dois, 'DOI')
+        if dois is None:
             raise ValueError("CSV must have a 'DOI' column (case-insensitive)")
 
     results = []
@@ -7009,18 +7025,10 @@ def main():
 
     # Batch mode from CSV
     if args.csv:
-        import pandas as pd
-
-        df = pd.read_csv(args.csv)
-
-        # Case-insensitive column lookup
-        col_map = {c.lower(): c for c in df.columns}
-        actual_col = col_map.get(args.doi_column.lower())
-        if not actual_col:
+        dois = _read_csv_column(args.csv, args.doi_column)
+        if dois is None:
             print(f"❌ CSV must have a '{args.doi_column}' column (case-insensitive)")
             return 1
-
-        dois = df[actual_col].dropna().tolist()
 
         # Apply start_from_row skip
         if args.start_from_row > 0:
@@ -7098,15 +7106,11 @@ def main():
 
     # Batch mode from PMID CSV
     elif args.pmid_csv:
-        import pandas as pd
-
-        df = pd.read_csv(args.pmid_csv)
-
-        if args.pmid_column not in df.columns:
+        identifiers = _read_csv_column(args.pmid_csv, args.pmid_column,
+                                       case_insensitive=False)
+        if identifiers is None:
             print(f"❌ CSV must have a '{args.pmid_column}' column")
             return 1
-
-        identifiers = df[args.pmid_column].dropna().astype(str).str.strip().tolist()
 
         # Apply start_from_row skip and end_at_row limit
         if args.start_from_row > 0:
