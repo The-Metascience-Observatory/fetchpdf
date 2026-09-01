@@ -42,7 +42,13 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/fetchpdf.git
+pip install fetchpdf
+```
+
+Or, to work from source:
+
+```bash
+git clone https://github.com/The-Metascience-Observatory/fetchpdf.git
 cd fetchpdf
 pip install -e .
 ```
@@ -52,7 +58,6 @@ pip install -e .
 After installing the package, you need to install Playwright browsers:
 
 ```bash
-pip install playwright
 playwright install chromium
 ```
 
@@ -132,7 +137,7 @@ fetchpdf papers.csv -o ./out --get-xml-or-html --to-markdown
 Artifacts land as suffixed siblings: `{stem}.xml`, `{stem}.fulltext.html`,
 `{stem}.pdf`, `{stem}.md`. `--get-xml-or-html` is also a backfill — pointed at a
 directory of PDFs you already have, it fetches only the missing structured half.
-Publisher HTML needs `pip install -e '.[html]'`; without it that tier is skipped
+Publisher HTML needs `pip install 'fetchpdf[html]'`; without it that tier is skipped
 with a logged reason. Full detail: [Format-Prioritized Retrieval](#format-prioritized-retrieval).
 
 **2. Supplementary material (SI/SM)**
@@ -332,8 +337,11 @@ print(f"Failed: {len(failed_dois)} DOIs")
 
 # Save failed DOIs for retry
 if failed_dois:
-    import pandas as pd
-    pd.DataFrame({"DOI": failed_dois}).to_csv("failed_dois.csv", index=False)
+    import csv
+    with open("failed_dois.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["DOI"])
+        writer.writerows([doi] for doi in failed_dois)
 ```
 
 ### Example 3: Batch Processing with DOI List
@@ -579,22 +587,20 @@ if failed_dois:
 #### 5. Save Results for Tracking
 
 ```python
-import pandas as pd
+import csv
 
 results = batch_fetch_pdfs(dois="papers.csv", output_dir="./papers", workers=4)
 
-# Create results DataFrame
-df = pd.DataFrame([
-    {"DOI": doi, "Success": success, "Path": path}
-    for doi, success, path in results
-])
-
 # Save results
-df.to_csv("download_results.csv", index=False)
+with open("download_results.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["DOI", "Success", "Path"])
+    writer.writerows(results)
 
 # Statistics
-print(f"Success: {df['Success'].sum()}/{len(df)}")
-print(f"Success rate: {df['Success'].mean()*100:.1f}%")
+successes = sum(1 for _, success, _ in results if success)
+print(f"Success: {successes}/{len(results)}")
+print(f"Success rate: {successes/len(results)*100:.1f}%")
 ```
 
 ## Format-Prioritized Retrieval
@@ -904,7 +910,7 @@ serves for records Europe PMC's OA route refuses.
 Publisher HTML needs a forgiving parser:
 
 ```bash
-pip install -e '.[html]'
+pip install 'fetchpdf[html]'
 ```
 
 Without it the T2 rung demotes with a logged reason and the ladder descends
