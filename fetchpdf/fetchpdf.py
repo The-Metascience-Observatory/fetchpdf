@@ -3525,6 +3525,30 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
                 print(f"  CORE: no results for {doi}")
             return False
 
+        # A hit found by DOI is not necessarily the article. CORE files a
+        # grant report or a thesis under the DOI of the paper it produced: for
+        # 10.1111/psyp.14329 the only hit with a downloadUrl was a six-page
+        # Spanish "Informe final del proyecto" by the same authors, while the
+        # work whose title matched had no file at all (2026-09-02). The identity
+        # check refuses such bytes afterwards; refusing the hit by its own
+        # title first spares the download and the misleading "success" line.
+        # A hit with no title, or an article whose title is unknown, is left
+        # for the identity check to judge.
+        wanted_title = _title_for(doi, verbose=verbose)
+        if wanted_title:
+            from .retrieval._util import titles_match
+
+            matching, untitled = [], []
+            for result in results:
+                hit_title = " ".join((result.get("title") or "").split())
+                if not hit_title:
+                    untitled.append(result)
+                elif titles_match(wanted_title, hit_title):
+                    matching.append(result)
+                elif verbose:
+                    print(f'  CORE: skipping "{hit_title[:60]}" -- title does not match')
+            results = matching + untitled
+
         for result in results:
             download_url = result.get("downloadUrl")
             if not download_url:

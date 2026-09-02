@@ -838,6 +838,70 @@ class TestCrossrefPreprintRelations:
         assert len(fpd._crossref_related_dois(message, "10.9/z")) == 2
 
 
+class TestCoreHitTitleFilter:
+    """CORE indexes grant reports and theses under the DOI of the paper they
+    produced. For 10.1111/psyp.14329 the only hit with a file was a Spanish
+    "Informe final del proyecto"; the hit whose title matched had none
+    (2026-09-02). A hit is judged by its own title before anything is fetched."""
+
+    WANTED = "Visuospatial attention revamps cortical processing of sound amid audiovisual uncertainty"
+    REPORT = "Informe final del proyecto: Codificación predictiva en el efecto de fiesta de coctel"
+
+    class _Response:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, results):
+            self._results = results
+
+        def json(self):
+            return {"results": self._results}
+
+    def _arm(self, monkeypatch, results, wanted):
+        monkeypatch.setenv("COREAPIKEY", "test-key")
+        fpd._CORE_SESSION_DISABLED = False
+        fpd._CORE_TIMEOUT_DISABLED = False
+        fpd._CORE_TIMEOUT_COUNT = 0
+        monkeypatch.setattr(fpd, "_core_quota_exhausted", lambda verbose=False: False)
+        monkeypatch.setattr(fpd, "_core_quota_note_headers", lambda headers: None)
+        monkeypatch.setattr(fpd, "_get_with_retries", lambda *a, **k: self._Response(results))
+        monkeypatch.setattr(fpd, "_title_for", lambda doi, verbose=False: wanted)
+        monkeypatch.setattr(fpd, "try_landing_page_pdf_fallback", lambda *a, **k: False)
+        fetched = []
+        monkeypatch.setattr(fpd, "try_download", lambda url, path, verbose=False: fetched.append(url) or True)
+        return fetched
+
+    def test_a_core_hit_whose_title_is_not_the_articles_is_skipped(self, monkeypatch):
+        fetched = self._arm(monkeypatch, [
+            {"title": self.REPORT, "downloadUrl": "https://core.ac.uk/download/671492606.pdf"},
+            {"title": self.WANTED, "downloadUrl": ""},
+        ], self.WANTED)
+        assert fpd.try_core_fallback.__wrapped__("10.1111/psyp.14329", "/tmp/x.pdf") is False
+        assert fetched == []
+
+    def test_a_matching_hit_is_fetched_even_when_a_stranger_is_listed_first(self, monkeypatch):
+        fetched = self._arm(monkeypatch, [
+            {"title": self.REPORT, "downloadUrl": "https://core.ac.uk/download/report.pdf"},
+            {"title": self.WANTED, "downloadUrl": "https://core.ac.uk/download/paper.pdf"},
+        ], self.WANTED)
+        assert fpd.try_core_fallback.__wrapped__("10.1111/psyp.14329", "/tmp/x.pdf") is True
+        assert fetched == ["https://core.ac.uk/download/paper.pdf"]
+
+    def test_hits_are_not_filtered_when_the_articles_title_is_unknown(self, monkeypatch):
+        fetched = self._arm(monkeypatch, [
+            {"title": self.REPORT, "downloadUrl": "https://core.ac.uk/download/report.pdf"},
+        ], "")
+        assert fpd.try_core_fallback.__wrapped__("10.1111/psyp.14329", "/tmp/x.pdf") is True
+        assert fetched == ["https://core.ac.uk/download/report.pdf"]
+
+    def test_a_hit_without_a_title_is_left_for_the_identity_check(self, monkeypatch):
+        fetched = self._arm(monkeypatch, [
+            {"downloadUrl": "https://core.ac.uk/download/untitled.pdf"},
+        ], self.WANTED)
+        assert fpd.try_core_fallback.__wrapped__("10.1111/psyp.14329", "/tmp/x.pdf") is True
+        assert fetched == ["https://core.ac.uk/download/untitled.pdf"]
+
+
 class TestCoreTimeoutBreaker:
     def setup_method(self):
         fpd._CORE_TIMEOUT_COUNT = 0
