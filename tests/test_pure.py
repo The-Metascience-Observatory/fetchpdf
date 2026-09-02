@@ -838,6 +838,38 @@ class TestCrossrefPreprintRelations:
         assert len(fpd._crossref_related_dois(message, "10.9/z")) == 2
 
 
+class TestIssuedYearMemo:
+    """The grey last resorts skip Sci-Hub for papers it cannot have (issued
+    2023 or later hit 2 times in 93 attempts, 2026-09-02). The year comes from
+    the Crossref answers the batch already fetches for titles."""
+
+    def setup_method(self):
+        fpd._TITLE_MEMO.clear()
+        fpd._PAGES_MEMO.clear()
+        fpd._YEAR_MEMO.clear()
+
+    def test_priming_remembers_the_year_beside_the_title(self, monkeypatch):
+        def fake_get(url, params=None, timeout=45, verbose=False):
+            assert "issued" in params["select"]
+            return {"items": [{"DOI": "10.1/a", "title": ["A"], "page": "1-9",
+                               "issued": {"date-parts": [[2019, 5, 1]]}}]}
+        monkeypatch.setattr(fpd, "_crossref_get", fake_get)
+        assert fpd.prime_record_metadata(["10.1/a"]) == 1
+        assert fpd._YEAR_MEMO["10.1/a"] == 2019
+        assert fpd._year_for("10.1/a") == 2019
+
+    def test_year_for_answers_from_the_memo_without_a_network_call(self, monkeypatch):
+        fpd._remember_title("10.1/b", "B", None, 2024)
+        monkeypatch.setattr(fpd, "_crossref_get",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network")))
+        assert fpd._year_for("10.1/B") == 2024
+
+    def test_a_record_without_a_date_has_no_year_and_no_cached_answer(self, monkeypatch):
+        monkeypatch.setattr(fpd, "_crossref_get", lambda *a, **k: {"title": ["C"]})
+        assert fpd._year_for("10.1/c") is None
+        assert "10.1/c" not in fpd._YEAR_MEMO
+
+
 class TestCoreHitTitleFilter:
     """CORE indexes grant reports and theses under the DOI of the paper they
     produced. For 10.1111/psyp.14329 the only hit with a file was a Spanish

@@ -1,4 +1,5 @@
 import functools
+from typing import Optional
 import os
 import re
 import time
@@ -223,6 +224,10 @@ def _note_news_item(doi: str) -> bool:
 #: only as a last resort by asking for one DOI on its own.
 _TITLE_MEMO = {}
 _PAGES_MEMO = {}
+#: The year a record was issued, per DOI, from the same Crossref answers. Read
+#: by the grey last resorts to skip Sci-Hub for papers it cannot have: measured
+#: 2026-09-02 over ~550 attempts, papers issued 2023 or later hit 2 times in 93.
+_YEAR_MEMO = {}
 _TITLE_LOCK = threading.Lock()
 
 #: DOIs whose metadata we could not ASK for -- a 429, a timeout, a DNS blip --
@@ -329,6 +334,29 @@ def _retry_after_seconds(response):
         return None
 
 
+def _year_for(doi: str, verbose=False) -> Optional[int]:
+    """The year this DOI was issued: from the memo, else one Crossref call, else None.
+
+    Same discipline as `_title_for`: a lookup that fails is not cached, so a
+    429 cannot become a permanent "year unknown". Only Crossref is asked --
+    DataCite records (OSF, Zenodo) are refused by the grey sources on their
+    prefix before the year is ever a question.
+    """
+    if not doi:
+        return None
+    key = doi.strip().lower()
+    with _TITLE_LOCK:
+        if key in _YEAR_MEMO:
+            return _YEAR_MEMO[key]
+    message = _crossref_get(f"https://api.crossref.org/works/{key}", verbose=verbose)
+    if not message:
+        return None
+    titles = message.get("title") or []
+    year = _issued_year(message)
+    _remember_title(key, titles[0] if titles else "", message.get("page"), year)
+    return year
+
+
 def _datacite_title(doi: str, verbose=False):
     """(title, page_range) from DataCite, or None when it could not be asked.
 
@@ -368,7 +396,19 @@ def _datacite_title(doi: str, verbose=False):
     return title, page_range
 
 
-def _remember_title(doi: str, title, page_range=None) -> None:
+def _issued_year(message) -> Optional[int]:
+    """The year from a Crossref work's `issued` (else `published`) date-parts."""
+    for field in ("issued", "published", "published-print", "published-online"):
+        parts = ((message or {}).get(field) or {}).get("date-parts") or []
+        if parts and parts[0] and parts[0][0]:
+            try:
+                return int(parts[0][0])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _remember_title(doi: str, title, page_range=None, year=None) -> None:
     if not doi:
         return
     key = doi.strip().lower()
@@ -380,6 +420,8 @@ def _remember_title(doi: str, title, page_range=None) -> None:
             _TITLE_MEMO.setdefault(key, title)
         if page_range:
             _PAGES_MEMO.setdefault(key, str(page_range).strip())
+        if year:
+            _YEAR_MEMO.setdefault(key, int(year))
     if title:
         _METADATA_UNAVAILABLE.discard(key)
 
@@ -412,7 +454,7 @@ def prime_record_metadata(dois, verbose=False) -> int:
         message = _crossref_get(
             "https://api.crossref.org/works",
             params={"filter": ",".join("doi:" + d for d in chunk),
-                    "select": "DOI,title,page", "rows": len(chunk)},
+                    "select": "DOI,title,page,issued", "rows": len(chunk)},
             timeout=45, verbose=verbose,
         )
         if message is None:
@@ -426,7 +468,7 @@ def prime_record_metadata(dois, verbose=False) -> int:
             answered.add(doi)
             titles = item.get("title") or []
             if titles:
-                _remember_title(doi, titles[0], item.get("page"))
+                _remember_title(doi, titles[0], item.get("page"), _issued_year(item))
                 filled += 1
         # Crossref answered, but "not in Crossref" is not "has no title" -- it
         # is most often a DataCite DOI. Left unmemoised so `_title_for` asks
@@ -462,7 +504,7 @@ def _title_for(doi: str, verbose=False) -> str:
         return ""
     titles = message.get("title") or []
     if titles:
-        _remember_title(key, titles[0], message.get("page"))
+        _remember_title(key, titles[0], message.get("page"), _issued_year(message))
         return str(titles[0])
 
     # Crossref answered and has no such record. That is not the end of the
@@ -1107,11 +1149,21 @@ def format_label(path):
 _HEADLINE_FORMATS = ("xml", "html", "pdf")
 
 
-def running_tally(counter):
-    """'xml 4 | html 0 | pdf 5 | landing 1' -- counts, headline formats always present."""
-    parts = [f"{label} {counter.get(label, 0)}" for label in _HEADLINE_FORMATS]
+def _tally_cell(label, count):
+    """`xml  4`: counts right-aligned in two columns, so the tallies line up
+    down a log; a column widens on its own once a count needs three digits."""
+    return f"{label} {count:>{max(2, len(str(count)))}}"
+
+
+def running_tally(counter, missing=None):
+    """'xml  4 | html  0 | pdf  5 | missing  2 | landing  1' -- headline formats
+    always present, `missing` (records that produced nothing) when given, the
+    rarer formats trailing once seen."""
+    parts = [_tally_cell(label, counter.get(label, 0)) for label in _HEADLINE_FORMATS]
+    if missing is not None:
+        parts.append(_tally_cell("missing", missing))
     parts += [
-        f"{label} {count}"
+        _tally_cell(label, count)
         for label, count in sorted(counter.items())
         if label not in _HEADLINE_FORMATS and count
     ]
@@ -5725,18 +5777,18 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     # updated once per record, so contention is not the concern.
     _format_counter = _Counter()
 
-    def _tally(path):
-        """Count one artifact and return the running tally as a string.
+    def _tally(path=None):
+        """Count one artifact (none for a failed record) and return the running
+        tally as a string, missing column included.
 
         Snapshotted inside the lock so a parallel worker cannot print a tally
         that never existed (two increments landing between read and format).
         """
-        label = format_label(path)
-        if not label:
-            return ""
+        label = format_label(path) if path else None
         with _missing_report_lock:
-            _format_counter[label] += 1
-            return running_tally(_format_counter)
+            if label:
+                _format_counter[label] += 1
+            return running_tally(_format_counter, missing=sum(_failure_counter.values()))
 
     # One HttpClient per worker thread, all sharing the batch's single
     # HostRateLimiter. The limiter is lock-guarded but not a singleton, so a
@@ -5957,8 +6009,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                     existing_file = candidate
                     break
         if existing_file:
-            print(f"⏭️  Skipping {display_id} (already exists: "
-                  f"{os.path.basename(existing_file)})   [{_tally(existing_file)}]")
+            print(f"[{_tally(existing_file)}] ⏭️  Skipping {display_id} (already exists: "
+                  f"{os.path.basename(existing_file)})")
             # "I already have 5,000 PDFs, now go and get the supplements" is the
             # main reason this flag exists, and this return is the one that would
             # otherwise swallow it: fetch_pdf is never called on this
@@ -6028,25 +6080,32 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             # source_tracking.csv afterwards.
             src = source_out[0] if source_out and source_out[0] else None
             src_str = f" [{SOURCE_DISPLAY_NAMES.get(src, src)}]" if src else ""
+            # The tally leads the line, right after the [i/n] prefix, so the
+            # columns line up down a log and the state of the run is readable
+            # at a glance without scanning to the end of each line.
             print(
-                f"✅ {display_id}{src_str} [{label or format_label(result)}]"
-                f"   [{_tally(result)}]"
+                f"[{_tally(result)}] ✅ {display_id}{src_str} "
+                f"[{label or format_label(result)}]"
             )
         else:
+            # Counted before the line prints, so the record is already in the
+            # missing column of its own line.
+            with _missing_report_lock:
+                _failure_counter["all_sources_failed"] += 1
             if abstract_if_no_pdf:
                 try:
                     from .fetch_abstract_from_doi import save_abstract_markdown
                     ab_path = save_abstract_markdown(display_id, record_dir, email=email, verbose=verbose)
                     if ab_path:
-                        print(f"📄 {display_id} - no PDF, abstract saved: {os.path.basename(ab_path)}")
+                        print(f"[{_tally()}] 📄 {display_id} - no PDF, abstract saved: {os.path.basename(ab_path)}")
                     else:
-                        print(f"❌ {display_id} - Nothing worked 🙃🙃🙃")
+                        print(f"[{_tally()}] ❌ {display_id} - Nothing worked 🙃🙃🙃")
                 except Exception as e:
                     if verbose:
                         print(f"  Abstract fallback error: {e}")
-                    print(f"❌ {display_id} - Nothing worked 🙃🙃🙃")
+                    print(f"[{_tally()}] ❌ {display_id} - Nothing worked 🙃🙃🙃")
             else:
-                print(f"❌ {display_id} - Nothing worked 🙃🙃🙃")
+                print(f"[{_tally()}] ❌ {display_id} - Nothing worked 🙃🙃🙃")
             if create_missing_report and _run_timestamp:
                 _append_missing_to_report(output_dir, display_id, _run_timestamp, _missing_report_lock)
             # Always write machine-readable retry CSV (even without HTML report)
@@ -6057,9 +6116,6 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                     detail="",
                     lock=_missing_report_lock,
                 )
-                # Track for running failure summary (Fix #7)
-                with _missing_report_lock:
-                    _failure_counter["all_sources_failed"] += 1
             except Exception as _e:
                 if verbose:
                     print(f"  failed_dois.csv append error: {_e}")
@@ -6084,26 +6140,12 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         pct = (success_count / done_count * 100) if done_count else 0
         remaining = total_count - done_count
         eta_seconds = (remaining / done_count) * elapsed if done_count else 0
-        # Fix #7: append top failure categories if any failures seen
-        failures_str = ""
-        formats_str = ""
-        with _missing_report_lock:
-            if _failure_counter:
-                top = _failure_counter.most_common(3)
-                parts = [f"{cat}={cnt}" for cat, cnt in top]
-                failures_str = f" | failures: {', '.join(parts)}"
-            # Percentages are of successful records, not of records attempted:
-            # the question this answers is "what am I actually getting", and
-            # mixing failures into the denominator makes every share look worse
-            # than it is without saying anything about format.
-            tally = _format_tally(_format_counter)
-            if tally:
-                formats_str = f" | formats: {tally}"
+        # Formats and failures are on every record line already (the running
+        # tally); repeating them here said nothing the previous line had not.
         print(
             f"⏱️  processing {rate_per_hour:.1f} / hour  "
             f"({done_count}/{total_count}, elapsed {_format_elapsed(elapsed)}, "
             f"ETA {_format_elapsed(eta_seconds)}, success {success_count}/{done_count} = {pct:.0f}%)"
-            f"{formats_str}{failures_str}"
         )
 
     # ---------------- Slow-record visibility -----------------------------

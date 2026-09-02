@@ -1121,8 +1121,8 @@ def test_running_tally_always_shows_xml_html_pdf():
 
     from fetchpdf.fetchpdf import running_tally
 
-    assert running_tally(Counter()) == "xml 0 | html 0 | pdf 0"
-    assert running_tally(Counter({"pdf": 2})) == "xml 0 | html 0 | pdf 2"
+    assert running_tally(Counter()) == "xml  0 | html  0 | pdf  0"
+    assert running_tally(Counter({"pdf": 2})) == "xml  0 | html  0 | pdf  2"
 
 
 def test_running_tally_appends_other_formats_once_seen():
@@ -1131,7 +1131,29 @@ def test_running_tally_appends_other_formats_once_seen():
     from fetchpdf.fetchpdf import running_tally
 
     tally = running_tally(Counter({"xml": 4, "pdf": 5, "landing": 1}))
-    assert tally == "xml 4 | html 0 | pdf 5 | landing 1"
+    assert tally == "xml  4 | html  0 | pdf  5 | landing  1"
+
+
+def test_running_tally_columns_are_two_wide_and_widen_on_their_own():
+    """Counts are right-aligned in two columns so the tallies line up down a
+    log; once a count needs three digits that column widens and the others
+    keep their width (requested 2026-09-02)."""
+    from collections import Counter
+
+    from fetchpdf.fetchpdf import running_tally
+
+    assert running_tally(Counter({"xml": 206, "html": 38, "pdf": 202})) == (
+        "xml 206 | html 38 | pdf 202"
+    )
+
+
+def test_running_tally_shows_missing_after_the_headline_formats_when_given():
+    from collections import Counter
+
+    from fetchpdf.fetchpdf import running_tally
+
+    tally = running_tally(Counter({"xml": 4, "pdf": 5, "landing": 1}), missing=12)
+    assert tally == "xml  4 | html  0 | pdf  5 | missing 12 | landing  1"
 
 
 def test_zero_tables_is_surfaced_as_a_finding(tmp_path):

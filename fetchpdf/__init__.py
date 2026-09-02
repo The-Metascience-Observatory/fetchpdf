@@ -15,7 +15,7 @@ from .fetch_metadata_from_doi import fetch_metadata_from_doi
 # behavioural difference, it is the same object.
 fetch_pdf_from_doi = fetch_pdf
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = [
     "fetch_pdf",
     "fetch_pdf_from_doi",  # deprecated alias for fetch_pdf
