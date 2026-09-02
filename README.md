@@ -688,6 +688,9 @@ value to its right shifts one column — silently, in a way that still parses as
 valid table. Prose becomes Markdown; every table stays canonical minimal HTML at
 its position in the document, with its caption and footnotes attached. Inline
 HTML is part of the CommonMark spec, so this is ordinary Markdown, not a hybrid.
+Elsevier full-text XML (`ce:` prose, CALS `tgroup`/`entry` tables with
+`namest`/`nameend`/`morerows`) goes through the same walker, so its tables
+arrive as the same canonical HTML with the spans resolved.
 
 Every table is HTML, including simple ones with no spans. Mixing pipes and HTML
 would make a three-column header ambiguous — no spans, or spans lost in

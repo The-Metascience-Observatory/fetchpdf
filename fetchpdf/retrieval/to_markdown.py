@@ -39,6 +39,19 @@ from .normalize import html_table_to_canonical, jats_table_to_canonical, token_c
 
 _WS_RE = re.compile(r"\s+")
 
+#: Elsevier's Dublin Core title, matched on the full tag: `localname` alone would
+#: make every `<title>` in the document a candidate.
+_DC_TITLE = "{http://purl.org/dc/elements/1.1/}title"
+
+#: Block children an Elsevier `ce:para` mixes into its running text. They are
+#: excluded from the paragraph's inline text and dispatched right after it, so
+#: a table lands after the sentence that introduces it and a footnote's body is
+#: never spliced into the middle of the sentence that cites it.
+_PARA_BLOCKS = (
+    "display", "list", "table", "figure", "e-component", "footnote",
+    "float-anchor", "textbox", "enunciation",
+)
+
 #: Emitted above every table so a reader (human or model) knows the format is
 #: deliberate and that the span attributes carry meaning.
 TABLE_FORMAT_NOTE = (
@@ -80,7 +93,12 @@ def convert_file(path: str) -> Optional[Conversion]:
 
 
 def jats_to_markdown(content: bytes, name: str = "") -> Conversion:
-    """JATS/TEI XML -> Markdown, walking the body in document order."""
+    """JATS/TEI/Elsevier XML -> Markdown, walking the body in document order.
+
+    Elsevier's `full-text-retrieval-response` shares no tag names with JATS
+    (`ce:section`/`ce:para`/`ce:table` against `sec`/`p`/`table-wrap`), so one
+    walker carries both vocabularies without either branch shadowing the other.
+    """
     result = Conversion(markdown="")
     try:
         root = ET.fromstring(content)
@@ -89,7 +107,7 @@ def jats_to_markdown(content: bytes, name: str = "") -> Conversion:
         return result
 
     parts: List[str] = []
-    title = _first_text(root, "article-title")
+    title = _document_title(root)
     if title:
         parts.append(f"# {title}\n")
 
@@ -99,93 +117,258 @@ def jats_to_markdown(content: bytes, name: str = "") -> Conversion:
     body = _find_one(root, "body")
     if body is None:
         body = _find_one(root, "text")
+        # A TEI <text> holds divisions. Elsevier's scanned-legacy envelopes
+        # (`xocs:rawtext` only, no body) carry a childless <ce:text> topic label
+        # under <doctopics>, which used to pass here and yield a title-only file
+        # with no warning (43 of 428 corpus files, 2026-09-02).
+        if body is not None and not len(body):
+            body = None
     if body is None:
         result.failures.append("no <body> or TEI <text>; nothing to convert")
         return result
 
-    _walk_jats(body, parts, result, depth=2)
+    floats = _FloatMap(root)
+    _walk_jats(body, parts, result, depth=2, floats=floats)
+    _emit_leftover_floats(floats, parts, result, depth=2)
     return _finish(parts, result)
 
 
-def _walk_jats(element, parts: List[str], result: Conversion, depth: int) -> None:
+def _document_title(root) -> str:
+    """JATS <article-title>, else Elsevier's Dublin Core title, else <head>/<title>."""
+    title = _first_text(root, "article-title")
+    if title:
+        return title
+    for el in root.iter():
+        if el.tag == _DC_TITLE:
+            title = _clean(" ".join(el.itertext()))
+            if title:
+                return title
+    for el in root.iter():
+        if localname(el.tag) in ("head", "simple-head"):
+            title = _first_text(el, "title", direct_only=True)
+            if title:
+                return title
+    return ""
+
+
+class _FloatMap:
+    """Elsevier floats, keyed by id, each emitted once.
+
+    `ce:floats` sits outside `ja:body` and holds nearly every table and figure
+    (715/764 tables and 705/748 figures across 240 inbox files, 2026-09-02);
+    the body only carries a `<ce:float-anchor refid>` where each belongs. A
+    body-only walk therefore sees almost no tables at all.
+    """
+
+    def __init__(self, root):
+        self.by_id = {}
+        self.in_order = []
+        self.emitted = set()
+        for container in root.iter():
+            if localname(container.tag) != "floats":
+                continue
+            for el in container:
+                self.in_order.append(el)
+                if el.get("id"):
+                    self.by_id[el.get("id")] = el
+
+    def take(self, refid: str):
+        """The float for an anchor, or None if unknown or already emitted."""
+        el = self.by_id.get(refid or "")
+        if el is None or el in self.emitted:
+            return None
+        self.emitted.add(el)
+        return el
+
+    def leftovers(self):
+        return [el for el in self.in_order if el not in self.emitted]
+
+
+def _emit_leftover_floats(floats, parts: List[str], result: Conversion, depth: int) -> None:
+    """Floats nothing anchored still belong to the paper; better late than lost."""
+    for el in floats.leftovers():
+        floats.emitted.add(el)
+        _emit_one(el, None, parts, result, depth, floats)
+
+
+def _walk_jats(element, parts: List[str], result: Conversion, depth: int,
+               floats=None) -> None:
     """Emit prose and tables in the order they appear.
 
     Order matters: a table extracted out of position loses the sentence that
     introduces it, which is often where the units and the sample live.
     """
     for child in element:
-        tag = localname(child.tag)
+        _emit_one(child, element, parts, result, depth, floats)
 
-        if tag == "sec":
-            heading = _first_text(child, "title", direct_only=True)
-            if heading:
-                parts.append("\n{} {}\n".format("#" * min(depth, 6), heading))
-            _walk_jats(child, parts, result, depth + 1)
 
-        elif tag == "title":
-            continue  # already consumed by the enclosing <sec>
+def _emit_one(child, parent, parts: List[str], result: Conversion, depth: int,
+              floats) -> None:
+    """Dispatch one element. JATS branches first, then Elsevier's `ce:` names."""
+    tag = localname(child.tag)
+    parent_tag = localname(parent.tag) if parent is not None else ""
 
-        elif tag == "p":
+    if tag == "sec":
+        heading = _first_text(child, "title", direct_only=True)
+        if heading:
+            parts.append("\n{} {}\n".format("#" * min(depth, 6), heading))
+        _walk_jats(child, parts, result, depth + 1, floats)
+
+    elif tag == "title":
+        return  # already consumed by the enclosing <sec>
+
+    elif tag == "p":
+        text = _inline_text(child)
+        if text:
+            parts.append(text + "\n")
+
+    elif tag == "table-wrap":
+        parts.append(_table_block(child, result))
+
+    elif tag == "fig":
+        label = _first_text(child, "label") or "Figure"
+        caption = _first_text(child, "caption")
+        graphic = _graphic_href(child)
+        result.n_figures += 1
+        # Named, never inlined -- JATS references images and never holds them.
+        parts.append(
+            f"\n> **[{label} — image not included]** {caption}"
+            f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
+        )
+
+    elif tag in ("list",):
+        for item in child:
+            if localname(item.tag) == "list-item":
+                # Elsevier numbers items through a <label>; "(1)" or "a" is worth
+                # keeping (the prose says "see point (1)"), a bullet glyph is not.
+                label = _first_text(item, "label", direct_only=True)
+                if not any(ch.isalnum() for ch in label):
+                    label = ""
+                text = _inline_text(item, skip=("label",))
+                line = " ".join(filter(None, [label, text]))
+                if line:
+                    parts.append(f"- {line}")
+        parts.append("")
+
+    elif tag in ("disp-quote", "boxed-text"):
+        text = _inline_text(child)
+        if text:
+            parts.append(f"> {text}\n")
+
+    elif tag in ("disp-formula", "inline-formula", "formula"):
+        formula = _formula_text(child)
+        if formula:
+            parts.append(f"\n$$ {formula} $$\n")
+
+    # -- Elsevier (`ce:`) vocabulary ----------------------------------------
+
+    elif tag == "section":
+        heading = _first_text(child, "section-title", direct_only=True)
+        if heading:
+            parts.append("\n{} {}\n".format("#" * min(depth, 6), heading))
+        _walk_jats(child, parts, result, depth + 1, floats)
+
+    elif tag in ("section-title", "label") and parent_tag == "section":
+        # The title is the heading above; the label is the section number,
+        # which Markdown headings do not carry ("see Section 2.1" no longer
+        # maps to a number -- a one-line change if that ever matters).
+        return
+
+    elif tag == "section-title":
+        # Under <acknowledgment>, <appendices>, <textbox-head>: still a heading.
+        heading = _clean(" ".join(child.itertext()))
+        if heading:
+            parts.append("\n{} {}\n".format("#" * min(depth, 6), heading))
+
+    elif tag in ("para", "simple-para", "note-para"):
+        _emit_paragraph(child, parts, result, depth, floats)
+
+    elif tag == "table":
+        parts.append(_table_block(child, result))
+
+    elif tag in ("figure", "e-component"):
+        default = "Figure" if tag == "figure" else "Supplementary material"
+        label = _first_text(child, "label", direct_only=True) or default
+        caption = _first_text(child, "caption")
+        graphic = _graphic_href(child)
+        result.n_figures += 1
+        parts.append(
+            f"\n> **[{label} — image not included]** {caption}"
+            f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
+        )
+
+    elif tag == "float-anchor":
+        if floats is not None:
+            el = floats.take(child.get("refid"))
+            if el is not None:
+                _emit_one(el, None, parts, result, depth, floats)
+
+    elif tag == "floats":
+        return  # emitted at their anchors, leftovers at the end
+
+    elif tag == "footnote":
+        label = _first_text(child, "label", direct_only=True)
+        marker = f"footnote {label}" if label else "footnote"
+        # A note-para can itself embed a display table (1 of 428 corpus files,
+        # 2026-09-02); it is emitted after the note, never flattened into it.
+        texts, blocks = [], []
+        for part in child:
+            if localname(part.tag) == "label":
+                continue
+            texts.append(_inline_text(part, skip=_PARA_BLOCKS))
+            blocks.extend(b for b in part if localname(b.tag) in _PARA_BLOCKS)
+        text = " ".join(t for t in texts if t)
+        if text:
+            parts.append(f"> **[{marker}]** {text}\n")
+        for block in blocks:
+            _emit_one(block, child, parts, result, depth, floats)
+
+    else:
+        # Unknown wrapper: descend rather than drop. Losing a whole section
+        # because of an unrecognised container is the failure mode to avoid.
+        if len(child):
+            _walk_jats(child, parts, result, depth, floats)
+        else:
             text = _inline_text(child)
             if text:
                 parts.append(text + "\n")
 
-        elif tag == "table-wrap":
-            parts.append(_jats_table_block(child, result))
 
-        elif tag == "fig":
-            label = _first_text(child, "label") or "Figure"
-            caption = _first_text(child, "caption")
-            graphic = _graphic_href(child)
-            result.n_figures += 1
-            # Named, never inlined -- JATS references images and never holds them.
-            parts.append(
-                f"\n> **[{label} — image not included]** {caption}"
-                f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
-            )
+def _emit_paragraph(para, parts: List[str], result: Conversion, depth: int,
+                    floats) -> None:
+    """An Elsevier paragraph: its running text, then the blocks it embeds.
 
-        elif tag in ("list",):
-            for item in child:
-                if localname(item.tag) == "list-item":
-                    text = _inline_text(item)
-                    if text:
-                        parts.append(f"- {text}")
-            parts.append("")
-
-        elif tag in ("disp-quote", "boxed-text"):
-            text = _inline_text(child)
-            if text:
-                parts.append(f"> {text}\n")
-
-        elif tag in ("disp-formula", "inline-formula"):
-            formula = _formula_text(child)
-            if formula:
-                parts.append(f"\n$$ {formula} $$\n")
-
-        else:
-            # Unknown wrapper: descend rather than drop. Losing a whole section
-            # because of an unrecognised container is the failure mode to avoid.
-            if len(child):
-                _walk_jats(child, parts, result, depth)
-            else:
-                text = _inline_text(child)
-                if text:
-                    parts.append(text + "\n")
+    Recursing into a <ce:para> as a wrapper (what the else-branch does) drops
+    `para.text` and every child's tail, leaving only the citation labels -- the
+    husk that made Elsevier renditions unusable (median prose line 11
+    characters, measured 2026-09-02).
+    """
+    text = _inline_text(para, skip=_PARA_BLOCKS)
+    if text:
+        parts.append(text + "\n")
+    for block in para:
+        if localname(block.tag) in _PARA_BLOCKS:
+            _emit_one(block, para, parts, result, depth, floats)
 
 
-def _jats_table_block(wrap, result: Conversion) -> str:
+def _table_block(wrap, result: Conversion) -> str:
     """One table, as canonical HTML, with caption and footnotes attached.
 
     Kept together deliberately: JATS <table-wrap-foot> carries the semantics of
     the values above it ("mean +/- SD unless stated", per-column denominators).
     Separate them and every number in the table becomes misinterpretable.
+
+    `wrap` is a JATS <table-wrap> or a bare Elsevier <ce:table>, whose label,
+    caption and footnotes are its own children.
     """
     failures: List[str] = []
     table_el = _find_one(wrap, "table")
     html = jats_table_to_canonical(table_el, failures)
     result.failures.extend(failures)
 
-    label = _first_text(wrap, "label") or "Table"
+    # Direct child only: a footnote's own <label> ("a", "*") must never title
+    # the table.
+    label = _first_text(wrap, "label", direct_only=True) or "Table"
     caption = _first_text(wrap, "caption")
     lines = ["", f"**{label}.** {caption}".rstrip(".").rstrip() + ""]
 
@@ -217,7 +400,7 @@ def _jats_table_block(wrap, result: Conversion) -> str:
 def _jats_footnotes(wrap) -> List[str]:
     notes, seen = [], set()
     for el in wrap.iter():
-        if localname(el.tag) in ("table-wrap-foot", "fn"):
+        if localname(el.tag) in ("table-wrap-foot", "fn", "table-footnote", "legend"):
             text = _clean(" ".join(el.itertext()))
             if text and text not in seen:
                 seen.add(text)
@@ -227,10 +410,15 @@ def _jats_footnotes(wrap) -> List[str]:
 
 def _graphic_href(element) -> str:
     for el in element.iter():
-        if localname(el.tag) in ("graphic", "inline-graphic"):
+        name = localname(el.tag)
+        if name in ("graphic", "inline-graphic"):
             for key, value in el.attrib.items():
                 if key.endswith("href"):
                     return value
+        # Elsevier: <ce:link locator="gr1" xlink:href="pii:S.../gr1">. The
+        # locator is the name a reader can match against the PDF's figures.
+        elif name == "link" and el.get("locator"):
+            return el.get("locator")
     return ""
 
 
@@ -424,38 +612,50 @@ def _first_text(element, name: str, direct_only: bool = False) -> str:
     return ""
 
 
-def _inline_text(element) -> str:
+def _inline_text(element, skip=()) -> str:
     """Paragraph text with superscript markers kept as literal characters.
 
     A superscript 'a' is the link between a value and the footnote defining it,
     so it is bracketed to survive as visible text. <xref> is NOT bracketed: JATS
     prose almost always supplies its own delimiters around a citation, and adding
-    ours turned every reference into "[[1]]".
+    ours turned every reference into "[[1]]". Elsevier's <cross-ref> is left
+    alone for the same reason: its text is the citation as typeset ("Gombrich
+    (1963)", "Bullough, 1907" inside the prose's own parentheses, sometimes
+    "[1]"), so the verbatim text is already right (measured 2026-09-02).
+
+    `skip` names direct children whose subtree is left out -- the blocks an
+    Elsevier paragraph embeds, emitted separately -- while their tail, the prose
+    that continues after the block, is kept.
     """
     parts = []
-    for node in element.iter():
-        tag = localname(node.tag)
-        if node is not element and tag == "sup":
-            if node.text:
-                parts.append(f"[{node.text.strip()}]")
-            if node.tail:
-                parts.append(node.tail)
-            continue
-        if node is not element and tag == "xref":
-            if node.text:
-                parts.append(node.text.strip())
-            if node.tail:
-                parts.append(node.tail)
-            continue
-        if node is element:
-            if node.text:
-                parts.append(node.text)
-        else:
-            if node.text:
-                parts.append(node.text)
-            if node.tail:
-                parts.append(node.tail)
+    if element.text:
+        parts.append(element.text)
+    for child in element:
+        _inline_node(child, parts, skip)
     return _clean("".join(parts))
+
+
+def _inline_node(node, parts: List[str], skip) -> None:
+    tag = localname(node.tag)
+    if tag in skip:
+        pass
+    elif tag == "sup":
+        if node.text:
+            parts.append(f"[{node.text.strip()}]")
+        for child in node:
+            _inline_node(child, parts, ())
+    elif tag == "xref":
+        if node.text:
+            parts.append(node.text.strip())
+        for child in node:
+            _inline_node(child, parts, ())
+    else:
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            _inline_node(child, parts, ())
+    if node.tail:
+        parts.append(node.tail)
 
 
 def _clean(text: str) -> str:

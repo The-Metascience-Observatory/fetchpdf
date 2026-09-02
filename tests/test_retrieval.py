@@ -1680,3 +1680,322 @@ def test_one_markdown_per_record_even_with_two_sources(tmp_path):
     assert summary["converted"] == 1 and summary["skipped"] == 1
     assert (tmp_path / "rec_from_xml.md").exists()
     assert not (tmp_path / "rec_from_html.md").exists()
+
+
+# --------------------------------------------------------------------------
+# 12. Elsevier full-text XML: `ce:` prose and CALS tables
+# --------------------------------------------------------------------------
+
+
+def test_jats_conversion_is_byte_identical_to_its_golden_rendition():
+    """Pins JATS output while the walker grows an Elsevier vocabulary.
+
+    The golden file is DERIVED, not captured: it is the converter's own output
+    for `epmc_fulltext_valid.xml` as of 2026-09-02, written before the Elsevier
+    branches were added. It is regenerated only when a change to JATS output is
+    intended -- any other difference is a regression in the shared walker.
+    """
+    from fetchpdf.retrieval.to_markdown import jats_to_markdown
+
+    c = jats_to_markdown(fixture("epmc_fulltext_valid.xml"))
+    assert c.n_tables == 3
+    assert c.n_figures == 2
+    assert c.failures == []
+    assert c.markdown == fixture("epmc_fulltext_valid_from_xml.md").decode("utf-8")
+
+
+# Namespaced exactly like the real `full-text-retrieval-response` documents:
+# floats outside the body, a CALS table redeclaring the default namespace, and
+# <entry> back in the `ce:` namespace inside it.
+ELSEVIER_DOC = b"""<full-text-retrieval-response xmlns="http://www.elsevier.com/xml/svapi/article/dtd" xmlns:ce="http://www.elsevier.com/xml/common/dtd" xmlns:ja="http://www.elsevier.com/xml/ja/dtd" xmlns:tb="http://www.elsevier.com/xml/common/table/dtd" xmlns:cals="http://www.elsevier.com/xml/common/cals/dtd" xmlns:mml="http://www.w3.org/1998/Math/MathML" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xocs="http://www.elsevier.com/xml/xocs/dtd" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<coredata><dc:identifier>doi:10.1016/j.test.2018.04.007</dc:identifier>
+<dc:title>The universal and automatic association between brightness and positivity </dc:title></coredata>
+<originalText><xocs:doc><xocs:serial-item><ja:article>
+<ja:item-info><ce:pii>S0001-6918(17)30229-9</ce:pii></ja:item-info>
+<ce:floats>
+  <ce:figure id="f0005"><ce:label>Fig. 1</ce:label>
+    <ce:caption><ce:simple-para>Scatterplot of the correlation between explicit and implicit ratings.</ce:simple-para></ce:caption>
+    <ce:link locator="gr1" xlink:href="pii:S0001691817302299/gr1"/></ce:figure>
+  <ce:table xmlns="http://www.elsevier.com/xml/common/cals/dtd" id="t0005" frame="topbot">
+    <ce:label>Table 1</ce:label>
+    <ce:caption><ce:simple-para>Implicit association test scores by colour and block.</ce:simple-para></ce:caption>
+    <ce:alt-text role="short">Table 1</ce:alt-text>
+    <tgroup cols="7">
+      <colspec colname="col1"/><colspec colname="col2"/><colspec colname="col3"/><colspec colname="col4"/>
+      <colspec colname="col5"/><colspec colname="col6"/><colspec colname="col7"/>
+      <thead>
+        <row><entry xmlns="http://www.elsevier.com/xml/common/dtd" morerows="2" colname="col1">Block</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" namest="col2" nameend="col5">Blue</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" namest="col6" nameend="col7">Yellow</entry></row>
+        <row><entry xmlns="http://www.elsevier.com/xml/common/dtd">n</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">M</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">SD</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">d</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">n</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">M</entry></row>
+        <row><entry xmlns="http://www.elsevier.com/xml/common/dtd">(a)</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">(b)</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">(c)</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">(d)</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">(e)</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd">(f)</entry></row>
+      </thead>
+      <tbody>
+        <row><entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col1" role="rowhead">Practice</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col2">20</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col3">12.1<cross-ref refid="tf0005"><sup loc="post">a</sup></cross-ref></entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col4">3.2</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col5">0.41</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col6">20</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col7">11.8</entry></row>
+        <row><entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col1" role="rowhead">Test</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col3">14.0</entry>
+             <entry xmlns="http://www.elsevier.com/xml/common/dtd" colname="col4">2.9</entry></row>
+      </tbody>
+    </tgroup>
+    <ce:table-footnote id="tf0005"><ce:label>a</ce:label>
+      <ce:note-para>Mean of the two practice blocks.</ce:note-para></ce:table-footnote>
+    <ce:legend><ce:simple-para>Note: numbers in brackets indicate counterbalanced block order.</ce:simple-para></ce:legend>
+  </ce:table>
+  <ce:figure id="f0010"><ce:label>Fig. 2</ce:label>
+    <ce:caption><ce:simple-para>Reaction times by block.</ce:simple-para></ce:caption>
+    <ce:link locator="gr2" xlink:href="pii:S0001691817302299/gr2"/></ce:figure>
+</ce:floats>
+<ce:head><ce:title>The universal and automatic association between brightness and positivity</ce:title>
+  <ce:abstract><ce:abstract-sec><ce:simple-para>Not rendered; parity with JATS.</ce:simple-para></ce:abstract-sec></ce:abstract></ce:head>
+<body>
+<ce:sections>
+  <ce:section id="s0005"><ce:label>1</ce:label><ce:section-title>Introduction</ce:section-title>
+    <ce:para>The notion that brightness is positive and darkness is negative can be traced back to mythical time. As the art historian <ce:cross-ref refid="bb0110">Gombrich (1963)</ce:cross-ref> mentions, black rather than white was the sign agreed upon for failure, and the correlation makes sense in terms of expressiveness.</ce:para>
+    <ce:para>Historically there has been great interest in studying the aesthetic effects of colour in art as well as in psychology (<ce:cross-ref refid="bb0035">Bullough, 1907</ce:cross-ref>; <ce:cross-ref refid="bb0055">De Camp, 1917</ce:cross-ref>), and the <ce:italic>effect</ce:italic> of a colour is treated as a property of the colour itself rather than of the observer.</ce:para>
+  </ce:section>
+  <ce:section id="s0010"><ce:label>2</ce:label><ce:section-title>Method</ce:section-title>
+    <ce:section id="s0015"><ce:label>2.1</ce:label><ce:section-title>Participants</ce:section-title>
+      <ce:para>Sixty-four undergraduate students took part in exchange for course credit. After completing the task participants reported demographic information, which concluded the experiment.<ce:cross-ref refid="fn0005"><ce:sup loc="post">1</ce:sup></ce:cross-ref><ce:footnote id="fn0005"><ce:label>1</ce:label><ce:note-para>Participants also completed an explicit rating task, but due to logging problems that data was not stored correctly.</ce:note-para></ce:footnote> The block order of the implicit association test was counterbalanced across participants, as designated in <ce:cross-ref refid="t0005">Table 1</ce:cross-ref><ce:float-anchor refid="t0005"/>. The test is widely used and has good reliability compared to other implicit measures (<ce:cross-ref refid="bb0065">Fazio &amp; Olson, 2003</ce:cross-ref>).</ce:para>
+      <ce:para>The procedure had three requirements:<ce:list><ce:list-item><ce:label>(1)</ce:label><ce:para>Participants completed every block in a single session.</ce:para></ce:list-item><ce:list-item><ce:label>\xe2\x80\xa2</ce:label><ce:para>Reaction times below 300 ms were discarded before analysis.</ce:para></ce:list-item></ce:list></ce:para>
+      <ce:para>The effect size was computed as<ce:display><ce:formula id="fo0005"><mml:math altimg="si1.svg"><mml:mi>d</mml:mi><mml:mo>=</mml:mo><mml:mn>0.42</mml:mn></mml:math></ce:formula></ce:display>for each participant, following the standard scoring algorithm described in the literature.</ce:para>
+    </ce:section>
+  </ce:section>
+  <ce:section id="s0020"><ce:label>3</ce:label><ce:section-title>Results</ce:section-title>
+    <ce:para>The correlation between the explicit and the implicit measure is shown in <ce:cross-ref refid="f0005">Fig. 1</ce:cross-ref><ce:float-anchor refid="f0005"/>, and it was positive and significant across all counterbalancing orders.</ce:para>
+  </ce:section>
+</ce:sections>
+<ce:acknowledgment><ce:section-title>Acknowledgments</ce:section-title>
+  <ce:para>We thank all the participants and volunteers who helped deliver the online questionnaires.</ce:para></ce:acknowledgment>
+</body>
+<tail><ce:bibliography><ce:section-title>References</ce:section-title></ce:bibliography></tail>
+</ja:article></xocs:serial-item></xocs:doc></originalText></full-text-retrieval-response>"""
+
+
+def _elsevier_md():
+    from fetchpdf.retrieval.to_markdown import jats_to_markdown
+    return jats_to_markdown(ELSEVIER_DOC)
+
+
+def _prose_lines(markdown):
+    """Body prose only: no headings, tables, placeholders, list items or formulas."""
+    return [
+        line for line in markdown.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "<", ">", "-", "$$", "**", "*Table"))
+    ]
+
+
+def test_elsevier_prose_between_citations_stays_on_one_line():
+    """The husk: recursing into <ce:para> as a wrapper kept only the citations."""
+    md = _elsevier_md().markdown
+    assert "As the art historian Gombrich (1963) mentions, black rather than white" in md
+    assert "in psychology (Bullough, 1907; De Camp, 1917), and the effect of a colour" in md
+
+
+def test_elsevier_section_titles_become_headings_and_numbers_are_dropped():
+    md = _elsevier_md().markdown
+    for heading in ("## Introduction", "## Method", "### Participants", "## Results", "## Acknowledgments"):
+        assert heading in md
+    assert "## 1 Introduction" not in md
+    assert not any(line.strip() in ("1", "2", "2.1", "3") for line in md.splitlines())
+
+
+def test_elsevier_title_comes_from_dublin_core():
+    md = _elsevier_md().markdown
+    assert md.startswith("# The universal and automatic association between brightness and positivity\n")
+
+
+def test_elsevier_table_is_emitted_at_its_anchor():
+    """The float lives outside the body; the anchor says where it belongs."""
+    from fetchpdf.retrieval.to_markdown import front_matter
+
+    c = _elsevier_md()
+    md = c.markdown
+    assert c.n_tables == 1
+    assert md.index("### Participants") < md.index("as designated in Table 1") < md.index("<table>") < md.index("## Results")
+    assert "tables: 1" in front_matter("/o/10.1016--x.xml", c)
+
+
+def test_elsevier_table_caption_and_footnotes_travel_with_it():
+    md = _elsevier_md().markdown
+    assert "**Table 1.** Implicit association test scores by colour and block" in md
+    table_at, next_heading = md.index("<table>"), md.index("## Results")
+    assert table_at < md.index("Mean of the two practice blocks") < next_heading
+    assert table_at < md.index("counterbalanced block order") < next_heading
+
+
+def test_elsevier_figure_is_a_placeholder_naming_its_locator():
+    c = _elsevier_md()
+    md = c.markdown
+    assert "**[Fig. 1 — image not included]** Scatterplot of the correlation" in md
+    assert "`gr1`" in md
+    assert md.index("shown in Fig. 1") < md.index("gr1") < md.index("## Acknowledgments")
+
+
+def test_elsevier_unanchored_float_is_still_emitted():
+    """Fig. 2 has no anchor in the body; it is appended rather than lost."""
+    c = _elsevier_md()
+    md = c.markdown
+    assert c.n_figures == 2
+    assert "`gr2`" in md
+    assert md.index("gr2") > md.index("## Acknowledgments")
+
+
+def test_elsevier_list_labels_are_kept_and_bullets_dropped():
+    md = _elsevier_md().markdown
+    assert "- (1) Participants completed every block in a single session." in md
+    assert "- Reaction times below 300 ms were discarded before analysis." in md
+    assert "•" not in md
+
+
+def test_elsevier_footnote_body_is_not_spliced_into_the_sentence():
+    md = _elsevier_md().markdown
+    assert "which concluded the experiment.[1] The block order of the implicit association test" in md
+    assert "> **[footnote 1]** Participants also completed an explicit rating task" in md
+    assert "$$ d = 0.42 $$" in md
+
+
+def test_elsevier_median_prose_line_is_paragraph_length():
+    """The husk measured a median of 11 characters per prose line (2026-09-02)."""
+    import statistics
+
+    lines = _prose_lines(_elsevier_md().markdown)
+    assert lines
+    assert statistics.median(len(line) for line in lines) >= 60
+
+
+def _elsevier_table_html():
+    from fetchpdf.retrieval.chunk import chunks_from_jats
+    return chunks_from_jats(ELSEVIER_DOC, "elsevier_xml")[0].table_html
+
+
+def test_cals_named_spans_become_colspan_and_rowspan():
+    """namest/nameend and morerows are the CALS spellings of the spans Markdown
+    cannot express; they must arrive as colspan/rowspan or the header shifts."""
+    html = _elsevier_table_html()
+    assert '<tr><th rowspan="3">Block</th><th colspan="4">Blue</th><th colspan="2">Yellow</th></tr>' in html
+    assert "<td>" in html
+    assert 'colspan="1"' not in html and 'rowspan="1"' not in html
+
+
+def test_cals_positional_entries_skip_rowspan_held_columns():
+    """Six positional header entries under a three-row "Block" cell start in
+    column 2, not column 1 -- otherwise every value shifts one column left."""
+    html = _elsevier_table_html()
+    assert "<tr><th>n</th><th>M</th><th>SD</th><th>d</th><th>n</th><th>M</th></tr>" in html
+
+
+def test_cals_omitted_cells_become_empty_cells():
+    html = _elsevier_table_html()
+    assert "<tr><td>Test</td><td></td><td>14.0</td><td>2.9</td></tr>" in html
+
+
+def test_cals_footnote_markers_survive_as_brackets():
+    assert "12.1[a]" in _elsevier_table_html()
+
+
+def test_cals_table_without_colspec_still_renders_and_reports_the_failure():
+    from fetchpdf.retrieval.chunk import chunks_from_jats
+
+    doc = (b'<article xmlns:ce="http://www.elsevier.com/xml/common/dtd"><body>'
+           b'<ce:table><ce:label>Table 2</ce:label><tgroup cols="3"><thead>'
+           b'<row><entry namest="col1" nameend="col2">Arm</entry><entry>n</entry></row></thead>'
+           b'<tbody><row><entry>Drug</entry><entry>Placebo</entry><entry>12</entry></row></tbody>'
+           b'</tgroup></ce:table></body></article>')
+    chunk = chunks_from_jats(doc, "t")[0]
+    assert chunk.table_html == (
+        "<table><tr><th>Arm</th><th>n</th></tr>"
+        "<tr><td>Drug</td><td>Placebo</td><td>12</td></tr></table>"
+    )
+    assert any("no colspec" in f for f in chunk.normalization_failures)
+
+
+def test_cals_two_tgroups_become_one_table():
+    from fetchpdf.retrieval.chunk import chunks_from_jats
+
+    doc = (b'<article xmlns:ce="http://www.elsevier.com/xml/common/dtd"><body><ce:table>'
+           b'<tgroup cols="2"><colspec colname="c1"/><colspec colname="c2"/>'
+           b'<tbody><row><entry colname="c1">Panel A</entry><entry colname="c2">1</entry></row></tbody></tgroup>'
+           b'<tgroup cols="2"><colspec colname="c1"/><colspec colname="c2"/>'
+           b'<tbody><row><entry colname="c1">Panel B</entry><entry colname="c2">2</entry></row></tbody></tgroup>'
+           b'</ce:table></body></article>')
+    chunks = chunks_from_jats(doc, "t")
+    assert len(chunks) == 1
+    assert chunks[0].table_html == (
+        "<table><tr><td>Panel A</td><td>1</td></tr><tr><td>Panel B</td><td>2</td></tr></table>"
+    )
+
+
+def test_elsevier_tables_become_chunks_with_stable_ids():
+    """A bare <ce:table> is its own wrapper: label, caption and footnotes included."""
+    from fetchpdf.retrieval.chunk import chunks_from_jats
+
+    chunks = chunks_from_jats(ELSEVIER_DOC, "elsevier_xml")
+    assert [c.chunk_id for c in chunks] == ["elsevier_xml:T1_XML:t1"]
+    chunk = chunks[0]
+    assert chunk.label == "Table 1"
+    assert chunk.caption == "Implicit association test scores by colour and block."
+    assert any("Mean of the two practice blocks" in note for note in chunk.footnotes)
+    assert any("counterbalanced block order" in note for note in chunk.footnotes)
+    assert chunk.normalization_failures == []
+
+
+def test_jats_table_wrap_table_is_chunked_once():
+    """Collecting bare <table> too must not count the one inside a <table-wrap> again."""
+    from fetchpdf.retrieval.chunk import chunks_from_jats
+
+    assert len(chunks_from_jats(JATS_TABLE, "t")) == 1
+    assert len(chunks_from_jats(JATS_DOC, "t")) == 1
+
+
+def test_elsevier_table_inside_a_footnote_is_still_a_table():
+    """One corpus file (2026-09-02) puts a display table inside a note-para;
+    flattening it into the footnote line would lose every span."""
+    from fetchpdf.retrieval.to_markdown import jats_to_markdown
+
+    doc = (b'<article xmlns:ce="http://www.elsevier.com/xml/common/dtd"><body><ce:sections>'
+           b'<ce:section><ce:section-title>Method</ce:section-title>'
+           b'<ce:para>Scores were rescaled.<ce:cross-ref refid="fn1"><ce:sup>2</ce:sup></ce:cross-ref>'
+           b'<ce:footnote id="fn1"><ce:label>2</ce:label><ce:note-para>Rescaling used the norms below.'
+           b'<ce:display><ce:table id="t1"><ce:label>Table 1</ce:label><tgroup cols="2">'
+           b'<colspec colname="c1"/><colspec colname="c2"/><tbody>'
+           b'<row><entry colname="c1">Norm</entry><entry colname="c2">12</entry></row>'
+           b'</tbody></tgroup></ce:table></ce:display></ce:note-para></ce:footnote> Then analysed.</ce:para>'
+           b'</ce:section></ce:sections></body></article>')
+    c = jats_to_markdown(doc)
+    assert c.n_tables == 1
+    assert "Scores were rescaled.[2] Then analysed." in c.markdown
+    assert "> **[footnote 2]** Rescaling used the norms below.\n" in c.markdown
+    assert c.markdown.index("[footnote 2]") < c.markdown.index("<table><tr><td>Norm</td><td>12</td></tr></table>")
+
+
+def test_elsevier_rawtext_only_envelope_reports_no_body_instead_of_a_title_only_file():
+    """Scanned-legacy Elsevier records ship `xocs:rawtext` and no body; the only
+    <text> in them is a childless topic label, which is not a TEI <text>."""
+    from fetchpdf.retrieval.to_markdown import jats_to_markdown
+
+    doc = (b'<full-text-retrieval-response xmlns:ce="http://www.elsevier.com/xml/common/dtd" '
+           b'xmlns:xocs="http://www.elsevier.com/xml/xocs/dtd" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+           b'<coredata><dc:title>Four anxiety measures</dc:title></coredata>'
+           b'<originalText><xocs:doc><xocs:serial-item><converted-article><item-info><doctopics>'
+           b'<doctopic><ce:text>Psychology</ce:text></doctopic></doctopics></item-info></converted-article>'
+           b'</xocs:serial-item><xocs:rawtext>Scanned page text ...</xocs:rawtext></xocs:doc></originalText>'
+           b'</full-text-retrieval-response>')
+    c = jats_to_markdown(doc)
+    assert not c.ok
+    assert any("no <body>" in f for f in c.failures)

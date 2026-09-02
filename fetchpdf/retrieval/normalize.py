@@ -16,7 +16,7 @@ would reintroduce exactly the generation channel this design exists to close.
 
 import re
 from typing import List, Optional, Tuple
-from ._util import localname as _localname
+from ._util import as_int, localname as _localname
 
 #: The only attributes that survive into canonical form.
 _KEPT_ATTRS = ("colspan", "rowspan")
@@ -51,17 +51,17 @@ def jats_table_to_canonical(table_el, failures: Optional[List[str]] = None) -> s
     """JATS <table> (XHTML table model) -> canonical minimal HTML.
 
     JATS also permits the CALS model (<entry> with namest/nameend rather than
-    <td colspan>). CALS spans are recorded as a normalization failure rather
-    than silently flattened, because flattening a span is precisely the
-    corruption this pipeline exists to prevent.
+    <td colspan>), and Elsevier's `ce:table` uses nothing else. Those go
+    through `_cals_to_canonical`, which resolves the named spans; a CALS span
+    is never flattened, because flattening a span is precisely the corruption
+    this pipeline exists to prevent.
     """
     failures = failures if failures is not None else []
     if table_el is None:
         return ""
 
     if any(_localname(el.tag) == "entry" for el in table_el.iter()):
-        failures.append("CALS table model (entry/namest) not converted")
-        return ""
+        return _cals_to_canonical(table_el, failures)
 
     rows = []
     for tr in table_el.iter():
@@ -79,6 +79,94 @@ def jats_table_to_canonical(table_el, failures: Optional[List[str]] = None) -> s
     if not rows:
         return ""
     return "<table>{}</table>".format("".join(rows))
+
+
+def _cals_to_canonical(table_el, failures: List[str]) -> str:
+    """CALS table model (Elsevier `ce:table`) -> canonical minimal HTML.
+
+    CALS names columns rather than counting them: <colspec colname="col2"/>
+    declares a column, an <entry> sits in it by `colname`, spans it by
+    `namest`/`nameend`, and reaches down with `morerows`. Most entries carry no
+    column at all and are positional (2,929 of them across 240 Elsevier inbox
+    files, 2026-09-02), so a cursor walks each row and steps over columns a
+    `morerows` cell above still occupies -- otherwise a positional cell under a
+    rowspan lands one column to the left, and every value in the row with it.
+    Columns the source omits become empty cells for the same reason: the
+    canonical form has no other way to keep the ones after them aligned.
+
+    Failures are notes, not refusals: the table still renders and the note
+    says what could not be resolved.
+    """
+
+    def note(message: str) -> None:
+        if message not in failures:
+            failures.append(message)
+
+    rows_html = []
+    groups = [g for g in table_el.iter() if _localname(g.tag) == "tgroup"] or [table_el]
+    for group in groups:
+        # Direct children in source order: their position is the column index.
+        colnames = [c.get("colname") for c in group if _localname(c.tag) == "colspec"]
+        col_index = {name: i for i, name in enumerate(colnames) if name}
+        if any(e.get("spanname") for e in group.iter() if _localname(e.tag) == "entry"):
+            note("CALS spanspec/spanname not supported; those spans dropped")
+
+        covered_until = {}   # column -> last row index a morerows cell above covers
+        row_no = 0
+
+        def next_free(col: int) -> int:
+            while covered_until.get(col, -1) >= row_no:
+                col += 1
+            return col
+
+        order = ("thead", "tbody", "tfoot")
+        sections = sorted(
+            (s for s in group if _localname(s.tag) in order),
+            key=lambda s: order.index(_localname(s.tag)),
+        )
+        for section in sections:
+            cell_tag = "th" if _localname(section.tag) == "thead" else "td"
+            for row in (r for r in section if _localname(r.tag) == "row"):
+                cells, cursor = [], 0
+                for entry in (e for e in row if _localname(e.tag) == "entry"):
+                    start_name = entry.get("namest") or entry.get("colname")
+                    start = col_index.get(start_name) if start_name else None
+                    if start is None:
+                        if start_name and colnames:
+                            note(f"CALS column {start_name!r} not in colspec; cell placed positionally")
+                        start = next_free(cursor)
+
+                    colspan = 1
+                    if entry.get("nameend"):
+                        end = col_index.get(entry.get("nameend"))
+                        if not colnames:
+                            note("CALS tgroup has no colspec; namest/nameend spans cannot be resolved")
+                        elif end is None or end < start:
+                            note("CALS nameend not in colspec; span dropped")
+                        else:
+                            colspan = end - start + 1
+
+                    for col in range(next_free(cursor), start):
+                        if covered_until.get(col, -1) < row_no:
+                            cells.append("<{0}></{0}>".format(cell_tag))
+
+                    more = as_int(entry.get("morerows"), 0)
+                    rowspan = more + 1
+                    attrs = (
+                        (' colspan="{}"'.format(colspan) if colspan > 1 else "")
+                        + (' rowspan="{}"'.format(rowspan) if rowspan > 1 else "")
+                    )
+                    cells.append("<{0}{1}>{2}</{0}>".format(cell_tag, attrs, _cell_text(entry)))
+                    for col in range(start, start + colspan):
+                        covered_until[col] = row_no + more
+                    cursor = start + colspan
+                if cells:
+                    rows_html.append("<tr>{}</tr>".format("".join(cells)))
+                row_no += 1
+
+    if not rows_html:
+        return ""
+    return "<table>{}</table>".format("".join(rows_html))
 
 
 def _span_attrs(cell) -> str:

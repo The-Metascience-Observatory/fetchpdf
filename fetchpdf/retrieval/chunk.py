@@ -82,14 +82,27 @@ def make_chunk_id(source: str, tier: Tier, ordinal: int) -> str:
 
 
 def chunks_from_jats(content: bytes, source: str, tier: Tier = Tier.T1_XML) -> List[TableChunk]:
-    """Every <table-wrap> in a JATS document, as atomic chunks."""
+    """Every table in a JATS or Elsevier document, as atomic chunks.
+
+    JATS wraps each table in <table-wrap>; Elsevier's <ce:table> is its own
+    wrapper, carrying label, caption and footnotes itself. Both are collected
+    in document order, a <table> inside a <table-wrap> only once.
+    """
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
         return []
 
     chunks = []
-    wraps = [el for el in root.iter() if _localname(el.tag) == "table-wrap"]
+    wrapped = set()
+    for el in root.iter():
+        if _localname(el.tag) == "table-wrap":
+            wrapped.update(t for t in el.iter() if _localname(t.tag) == "table")
+    wraps = [
+        el for el in root.iter()
+        if _localname(el.tag) == "table-wrap"
+        or (_localname(el.tag) == "table" and el not in wrapped)
+    ]
     for ordinal, wrap in enumerate(wraps, start=1):
         failures: List[str] = []
         table_el = next((el for el in wrap.iter() if _localname(el.tag) == "table"), None)
@@ -117,7 +130,7 @@ def chunks_from_jats(content: bytes, source: str, tier: Tier = Tier.T1_XML) -> L
 def _jats_footnotes(wrap) -> List[str]:
     notes = []
     for el in wrap.iter():
-        if _localname(el.tag) in ("table-wrap-foot", "fn"):
+        if _localname(el.tag) in ("table-wrap-foot", "fn", "table-footnote", "legend"):
             text = _WS_RE.sub(" ", "".join(el.itertext())).strip()
             if text and text not in notes:
                 notes.append(text)
