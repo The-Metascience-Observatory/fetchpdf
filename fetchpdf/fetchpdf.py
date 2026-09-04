@@ -24,7 +24,8 @@ from ._env import (
     ENTREZ_API_KEY as _ENTREZ_API_KEY,
     S2_API_KEY as _S2_API_KEY,
 )
-from ._http import USER_AGENT, elsevier_first_page_only
+from ._http import (USER_AGENT, POLITE_USER_AGENT, headers_for,
+                    elsevier_first_page_only)
 
 # The ID Converter moved: www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ now 301s
 # here. requests follows the redirect, so the old URL still worked -- it just
@@ -2154,7 +2155,10 @@ def try_download(url, save_path, verbose=False):
     if not url:
         return False
 
-    request_headers = {**headers, "Referer": url}
+    # Per-host UA: Springer/OUP answer a browser-like UA on their direct
+    # /content/pdf routes with an HTML interstitial, and the real file with
+    # anything else. headers_for() swaps only for those hosts.
+    request_headers = {**headers_for(url, headers), "Referer": url}
 
     from requests.exceptions import ConnectionError as _ReqConnErr, Timeout as _ReqTimeout
     try:
@@ -2216,6 +2220,40 @@ def try_download(url, save_path, verbose=False):
                     if verbose:
                         print("PDF downloaded OK (octet-stream).")
                     return True
+            # 200 + HTML on a URL we asked for a PDF is the inverted bot check:
+            # the host served an interstitial because the client looked like a
+            # browser. Retry once with the polite UA. This generalizes the
+            # POLITE_UA_HOSTS allow-list to publishers not yet catalogued, and
+            # costs a request only in the case that was already a failure.
+            if ("html" in content_type
+                    and request_headers.get("User-Agent") != POLITE_USER_AGENT):
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                retry_headers = {**request_headers,
+                                 "User-Agent": POLITE_USER_AGENT}
+                try:
+                    r2 = requests.get(url, headers=retry_headers, timeout=20,
+                                      allow_redirects=True, stream=True)
+                    ctype2 = r2.headers.get("content-type", "").lower()
+                    if r2.status_code == 200 and ("pdf" in ctype2
+                                                  or "octet-stream" in ctype2):
+                        chunks = list(r2.iter_content(8192))
+                        if chunks and chunks[0][:4] == b"%PDF":
+                            with open(save_path, "wb") as f:
+                                for chunk in chunks:
+                                    if chunk:
+                                        f.write(chunk)
+                            _note_download_url(save_path, url)
+                            if verbose:
+                                print("PDF downloaded OK (polite-UA retry after "
+                                      "HTML interstitial).")
+                            return True
+                except Exception as e:
+                    if verbose:
+                        print(f"Polite-UA retry failed for {url[:60]}: "
+                              f"{str(e)[:80]}")
         # Silently fail for non-200 or non-PDF responses (normal during fallback attempts)
     except Exception as e:
         if verbose:
