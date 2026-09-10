@@ -44,6 +44,7 @@
     ],
     "T2_HTML": [
       "unpaywall_html",
+      "pmc_html",
       "publisher_html",
       "arxiv_html"
     ],
@@ -109,6 +110,10 @@
         "doi"
       ],
       "notes": "oa_locations[].url is sometimes XML or HTML full text rather than a PDF. publishedVersion preferred over acceptedVersion."
+    },
+    "pmc_html": {
+      "callable": "pmc_html:fetch_pmc_article_page",
+      "notes": "The PMC article page, reached only after both PMC XML routes came up empty -- measured 2026-09-06, the six records a 105-paper corpus had settled on a PDF for all had a PMCID and all served this page. No 'requires': the PMCID can also be read off a JATS already on disk, and a requires gate would skip the source before it could look. Retried on a widening pause because PMC intermittently serves a 200 page with no article body."
     },
     "publisher_html": {
       "callable": "publisher_html:fetch_publisher_html",
@@ -285,6 +290,17 @@
     "pmc-oa-opendata.s3.amazonaws.com": {
       "rps": 10,
       "burst": 10
+    },
+    "_figures_comment": [
+      "--pull-figures talks to one host the routes above do not: the PMC blob",
+      "CDN that serves figure renders. Entered explicitly rather than left to",
+      "_default so the rate is a decision -- it is the same NCBI property as",
+      "the endpoints above, and unlike them it takes no API key, so there is no",
+      "keyed tier to earn."
+    ],
+    "cdn.ncbi.nlm.nih.gov": {
+      "rps": 2,
+      "burst": 2
     },
     "ndownloader.figshare.com": {
       "rps": 2,

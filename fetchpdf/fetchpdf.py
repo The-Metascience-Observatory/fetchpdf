@@ -5617,7 +5617,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5705,6 +5705,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             xml_html_only=xml_html_only, get_xml_or_html=get_xml_or_html,
             to_markdown=to_markdown,
             extract_images=extract_images,
+            pull_figures=pull_figures,
             target_task=target_task, upgrade_existing=upgrade_existing,
             want_provenance=want_provenance, pull_supplementary=pull_supplementary,
             refresh_supplementary=refresh_supplementary,
@@ -5727,7 +5728,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -5873,6 +5874,39 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         except Exception as e:
             if verbose:
                 print(f"  images: {os.path.basename(pdf)} failed ({e})")
+
+    def _pull_figures(display_id, raw_id, canonical, save_path):
+        """Published figure images for one record. Never changes the verdict.
+
+        Wrapped whole for the same reason as _pull_si, and run on the
+        already-exists branch for the same reason as _pull_images: a corpus
+        fetched before this flag existed is the main thing anyone points it at,
+        and fetch_pdf is never called there.
+        """
+        if not pull_figures or not save_path:
+            return
+        try:
+            from .retrieval.figures import pull_for_record as pull_figures_for_record
+
+            summary = pull_figures_for_record(
+                raw_identifier=raw_id,
+                doi=canonical,
+                save_path=save_path,
+                resolver=_resolver,
+                http=_si_http(),
+                ladder=_ladder,
+                verbose=verbose,
+                email=email,
+                delay=delay,
+            )
+            if summary.written and summary.status != "skipped":
+                print(f"   🖼️  {display_id}: {summary.written} figure(s)"
+                      + (f", {summary.failed} not obtained" if summary.failed else ""))
+            elif verbose:
+                print(f"   🖼️  {display_id}: {summary.status} "
+                      f"({summary.refusal or summary.detail or 'no detail'})")
+        except Exception as e:
+            print(f"   🖼️  {display_id}: figure pass failed ({str(e)[:120]})")
 
     def _pull_si(display_id, raw_id, canonical, save_path):
         """Supplementary pass for one record. Never changes the verdict.
@@ -6054,6 +6088,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             # otherwise swallow it: fetch_pdf is never called on this
             # branch, so a hook inside it would do nothing here.
             _pull_si(display_id, raw_identifier, canonical_doi, save_path)
+            _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
             _pull_images(existing_file)
             if track_source:
                 return (display_id, True, existing_file, "existing")
@@ -6102,6 +6137,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # path, or a record with four supplementary PDFs would report "pdf 5" and
         # corrupt the format composition tally.
         _pull_si(display_id, raw_identifier, canonical_doi, save_path)
+        _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
         _pull_images(result or save_path)
 
         if success:
@@ -6807,6 +6843,17 @@ def main():
              "fetchpdf-images on a directory."
     )
     parser.add_argument(
+        "--pull-figures",
+        action="store_true",
+        help="Also fetch the article's published figure images into {stem}_figures/ "
+             "with a {stem}_figures.json manifest recording each figure's label, "
+             "caption, source URL and sha256. PMC only: the Open Data mirror when "
+             "the package holds the files, else the article page's blob CDN. These "
+             "are the publisher's image files, not the bitstreams embedded in a PDF "
+             "-- see --extract-images for those. Also runs for records already on "
+             "disk, and a figure failure never fails the record."
+    )
+    parser.add_argument(
         "--target-task",
         choices=["extraction", "screening"],
         default="extraction",
@@ -7171,6 +7218,7 @@ def main():
             get_xml_or_html=args.get_xml_or_html,
             to_markdown=args.to_markdown,
             extract_images=args.extract_images,
+            pull_figures=args.pull_figures,
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
@@ -7257,6 +7305,7 @@ def main():
             get_xml_or_html=args.get_xml_or_html,
             to_markdown=args.to_markdown,
             extract_images=args.extract_images,
+            pull_figures=args.pull_figures,
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
@@ -7403,6 +7452,31 @@ def main():
                     print(f"   manifest: {summary.manifest_path}")
             except Exception as e:
                 print(f"\n📎 supplementary pass failed: {str(e)[:200]}")
+
+        if args.pull_figures:
+            # A separate call above fetch_pdf, for the same reason the
+            # supplementary pass is one: the tiered engine re-enters the chain
+            # at T5 with a temporary save_path, and a flag threaded through
+            # fetch_pdf would fire on that re-entry and scatter a figure
+            # directory next to a file that is unlinked seconds later.
+            try:
+                from .retrieval.figures import pull_for_record as pull_figures_for_record
+
+                summary = pull_figures_for_record(
+                    raw_identifier=args.doi,
+                    doi=resolved_identifier,
+                    save_path=save_path,
+                    verbose=args.verbose,
+                    email=args.email,
+                    delay=args.delay,
+                )
+                print(f"\n🖼️  {summary.written} figure(s), {summary.failed} not "
+                      f"obtained ({summary.status}"
+                      + (f": {summary.refusal}" if summary.refusal else "") + ")")
+                if summary.manifest_path:
+                    print(f"   manifest: {summary.manifest_path}")
+            except Exception as e:
+                print(f"\n🖼️  figure pass failed: {str(e)[:200]}")
 
         if args.extract_images:
             pdf = None

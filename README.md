@@ -14,6 +14,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Format-Prioritized Retrieval](#format-prioritized-retrieval)
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
+- [Figure Images](#figure-images)
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
 - [Troubleshooting](#troubleshooting)
@@ -33,6 +34,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🔄 **Smart Fallback**: If one source fails, automatically tries the next
 - 🧬 **Format Prioritization**: `--prioritize-xml` prefers structured full text (JATS/TEI) over PDF — see [below](#format-prioritized-retrieval)
 - 📎 **Supplementary Material**: `--pull-supplementary` fetches every supplementary file alongside the paper — see [below](#supplementary-material)
+- 🖼️ **Figure Images**: `--pull-figures` fetches the article's published figures from PMC with a manifest of labels, captions and hashes — see [below](#figure-images)
 - 🔗 **Linked Datasets & Code**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar — see [below](#linked-datasets-and-code-stem_linked_artifactsjson)
 - 🤖 **LLM-assisted retrieval**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed — see [below](#--pull-everything-the-second-layer)
 - 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
@@ -733,7 +735,7 @@ plot should look incomplete rather than complete.
 | Tier | Format | Why it sits here |
 |------|--------|------------------|
 | T1 | JATS/TEI XML | Cells, spans, headers and footnotes are markup. The only lossless tier. |
-| T2 | Publisher HTML | Real `<table>` with `<th>` and spans; at most OA publishers generated from the same JATS. |
+| T2 | Publisher HTML | Real `<table>` with `<th>` and spans; at most OA publishers generated from the same JATS. Includes the PMC article page, tried when both PMC XML routes come up empty — measured over a 105-paper corpus, all six records the ladder had settled on a PDF for had a PMCID and a complete PMC page waiting. |
 | T3 | LaTeX / e-print source | Lossless in principle, macro-hostile in practice. |
 | T4 | Structured supplements | Often the underlying data; coverage is partial. |
 | T5 | PDF | Structure must be reconstructed; introduces undetectable numeric corruption. |
@@ -1162,6 +1164,63 @@ GitHub URL is broken across a line by PDF layout — invisible to any regex —
 `haiku` recovered it on two runs out of four and returned nothing on the other
 two. Treat the agent as a second pass that sometimes finds what layer 1 missed,
 not as a guarantee.
+## Figure Images
+
+`--pull-figures` fetches the article's own figure images — the files the
+publisher deposited, one per `<fig>` — into `{stem}_figures/`, with a
+`{stem}_figures.json` manifest.
+
+```bash
+fetchpdf papers.csv -o ./out --pull-figures
+fetchpdf "10.1371/journal.pone.0000308" -o ./out --pull-figures
+```
+
+```
+out/
+  10.1371--journal.pone.0000308.pdf
+  10.1371--journal.pone.0000308_figures/pone.0000308.g001.jpg
+  10.1371--journal.pone.0000308_figures/pone.0000308.g002.jpg
+  10.1371--journal.pone.0000308_figures.json      <- the manifest
+```
+
+**This is not `--extract-images`.** That flag dumps the bitstreams embedded
+*inside a PDF*, for byte-identity work that any re-encoding destroys. This one
+fetches the publisher's image files, which is the only route available when
+there is no PDF at all. Neither substitutes for the other, and they write to
+separate directories.
+
+**PMC only, and it says so.** The two routes are PMC's AWS Open Data mirror —
+preferred, because the package holds the figure files themselves and declares
+each object's size and md5 before a byte moves — and the PMC blob CDN, whose
+per-file paths are listed nowhere but the article page. A file from the mirror
+is recorded `"provenance": "original"`; one from the CDN is `"render"`, because
+it is a re-encoded copy and calling it original would invite byte-identity
+conclusions about PMC's pipeline dressed up as conclusions about the authors'.
+A `{stem}.fulltext.html` already on disk is read instead of re-requesting the
+page.
+
+**Every refusal is named, per figure and per record**, and a manifest with zero
+figures is still written — "we asked and PMC listed nothing" and "we never
+asked" are different facts, and a missing file cannot tell them apart:
+
+```json
+{"id": "pone-0000308-g001", "figure_label": "Figure 1",
+ "caption": "The 41 clinical trial publications which publicly shared…",
+ "href": "pone.0000308.g001.jpg", "provenance": "original",
+ "url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC1817752.1/pone.0000308.g001.jpg",
+ "file": "pone.0000308.g001.jpg", "sha256": "…", "bytes": 84120,
+ "content_type": "image/jpeg", "status": "ok"}
+```
+
+Record-level refusals are `no_pmcid`, `no_jats_or_page` and
+`page_without_figure_links`; per-figure ones are `figure_not_on_page`,
+`download_failed:<status>` and `blocked:<status>` — a publisher or CDN that
+refuses this client while serving a person has not said the figure does not
+exist, it has said to send a person.
+
+Like the supplementary pass, this runs beside retrieval and never changes
+whether a record succeeded, it runs for records already on disk, and a manifest
+that fetched something makes a re-run free.
 
 ## API Reference
 

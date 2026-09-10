@@ -48,6 +48,31 @@ def test_every_call_site_matches_the_signature():
             f"pull_for_record, which does not accept it")
 
 
+def test_the_figure_pass_call_sites_match_its_signature():
+    """Same check, same swallowing handler, a different function.
+
+    The figure pass is imported under an alias precisely so the two are not
+    confused here: `figures.pull_for_record` accepts a narrower set of keywords
+    than the supplementary one, and checking a call to the first against the
+    second's signature would let a typo through.
+    """
+    from fetchpdf.retrieval.figures import pull_for_record as pull_figures_for_record
+
+    accepted = set(inspect.signature(pull_figures_for_record).parameters)
+    with open(_SOURCE, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+
+    sites = list(_call_sites(tree, "pull_figures_for_record"))
+    assert sites, "no figure-pass call sites found -- has the CLI moved?"
+
+    for call in sites:
+        passed = {kw.arg for kw in call.keywords if kw.arg is not None}
+        unknown = passed - accepted
+        assert not unknown, (
+            f"fetchpdf.py:{call.lineno} passes {sorted(unknown)} to "
+            f"figures.pull_for_record, which does not accept it")
+
+
 def test_the_batch_helper_matches_its_own_signature_too():
     """batch_fetch_pdfs DOES take draft_requests -- the asymmetry is the trap."""
     import fetchpdf.fetchpdf as cli
