@@ -48,6 +48,13 @@ SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY")
 # reports itself unavailable and the run falls back to the Claude Code CLI, or
 # to the deterministic rules alone. A missing key is never a failed record.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# PubPeer developer key. Unlike the keys above this one is NOT a rate-limit
+# lift -- the API rejects a keyless request outright with HTTP 422, so without
+# it no PubPeer question can be asked at all. Absence is therefore reported as
+# an error by fetchpdf.retrieval.pubpeer rather than as "no comments found":
+# "we could not ask" and "there was nothing to find" are different facts, and
+# only one of them is about the paper.
+PUBPEER_DEVKEY = os.getenv("PUBPEER_DEVKEY")
 
 # Elsevier full-text (TDM) retrieval.
 ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")

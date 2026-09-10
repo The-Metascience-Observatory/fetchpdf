@@ -85,6 +85,10 @@ fetchpdf-images = "fetchpdf.retrieval.extract_images:main"
 # Reads back the integrity metadata every manifest already carries. Offline:
 # answers "is what I have what I fetched", not "is there more to fetch".
 fetchpdf-verify = "fetchpdf.retrieval.verify:main"
+# Captures a DATED record of a paper's PubPeer comments. Writes the same shape
+# whether or not any exist, because a missing file is indistinguishable from a
+# paper nobody checked.
+fetchpdf-pubpeer = "fetchpdf.retrieval.pubpeer:main"
 
 [tool.setuptools.dynamic]
 # fetchpdf/__init__.py is the single source of truth for the version.
