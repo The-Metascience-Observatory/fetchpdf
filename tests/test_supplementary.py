@@ -21,6 +21,7 @@ import os
 
 import pytest
 
+from fetchpdf.retrieval import blocked
 from fetchpdf.retrieval.context import RetrievalContext
 from fetchpdf.retrieval.http import HttpClient
 from fetchpdf.retrieval.identifiers import IdentifierSet
@@ -253,16 +254,32 @@ def test_a_body_exactly_at_the_cap_is_kept(tmp_path):
     assert result.bytes_written == CAP
 
 
-def test_http_error_reports_the_status_and_writes_nothing(tmp_path):
+def test_a_403_is_blocked_rather_than_a_download_failure(tmp_path):
+    """403 says nothing about whether the file exists.
+
+    This test previously asserted "http-error", which is what let Atypon's
+    refusal of `/doi/suppl/10.1161/STROKEAHA.111.628537` -- a file a browser
+    fetches in seconds -- come out of the run as "nothing published".
+    """
     dest = str(tmp_path / "gone.pdf")
     result = client(FakeSession(default=FakeStreamResponse(status=403, body=b"denied"))).download(
         "https://example.org/f.pdf", dest, CAP
     )
 
     assert not result.ok
-    assert result.outcome == "http-error"
+    assert result.outcome == "blocked"
     assert result.status == 403
     assert not os.path.exists(dest)
+
+
+def test_a_404_is_still_a_download_failure(tmp_path):
+    """The other half of the distinction: 404 IS an answer about the file."""
+    dest = str(tmp_path / "gone.pdf")
+    result = client(FakeSession(default=FakeStreamResponse(status=404, body=b"no"))).download(
+        "https://example.org/f.pdf", dest, CAP
+    )
+
+    assert result.outcome == "http-error"
 
 
 def test_empty_body_is_not_written_as_a_file(tmp_path):
@@ -605,8 +622,12 @@ class FakeDownloader:
         if body is None:
             return Download(url=url, request_url=url, status=404, outcome="http-error")
         if status != 200:
+            # Asked of the real classifier, not restated: the double has to
+            # keep up with the contract, and a 403 that this stand-in still
+            # called "http-error" would test the behaviour we just replaced.
             return Download(url=url, request_url=url, status=status,
-                            outcome="http-error", content_type=content_type)
+                            outcome=blocked.classify(status) or "http-error",
+                            content_type=content_type)
         declared = self._match(url, self.declared, len(body))
         if declared is not None and declared > max_bytes:
             return Download(url=url, request_url=url, status=200, outcome="too-large",
@@ -839,16 +860,23 @@ def test_html_error_page_is_not_saved_as_a_spreadsheet(tmp_path):
     assert not any("_supplementary_info_1" in n for n in os.listdir(tmp_path))
 
 
-def test_a_bot_challenge_page_is_rejected(tmp_path):
-    """NCBI serves exactly this, with a 200, for /bin/ blob URLs."""
+def test_a_bot_challenge_page_is_rejected_as_blocked(tmp_path):
+    """NCBI serves exactly this, with a 200, for /bin/ blob URLs.
+
+    Recorded as `blocked`, not `not-a-document`: both refuse the bytes, and
+    only the second reads as a statement about the file. A person opening the
+    URL gets the supplement, so the manifest has to carry the URL and say so.
+    """
     challenge = (b'<html><head><base href="https://www.google.com/recaptcha/challengepage/">'
                  + b"x" * 200 + b"</html>")
     http = FakeDownloader(bodies={"/bin": challenge})
     summary = pull(tmp_path, http, provider_of(sf("pone.s001.doc", "https://x/bin")))
 
     assert summary.written == 0
+    assert summary.status == "partial"
     skipped = manifest_of(tmp_path)["skipped"][0]
-    assert skipped["reason"] == "not-a-document" and "challenge" in skipped["detail"]
+    assert skipped["reason"] == "blocked" and "challenge" in skipped["detail"]
+    assert summary.blocked_urls == ["https://x/bin"]
 
 
 def test_filenames_never_escape_the_output_directory(tmp_path):
@@ -2193,7 +2221,7 @@ class FlakyDownloader(FakeDownloader):
         if n <= self.fail_times:
             self.downloads.append((url, dest, max_bytes))
             return Download(url=url, request_url=url, status=self.fail_status,
-                            outcome="http-error")
+                            outcome=blocked.classify(self.fail_status) or "http-error")
         return super().download(url, dest, max_bytes, **kwargs)
 
 
@@ -2874,3 +2902,91 @@ class TestABinaryDocumentNeverBeginsWithMarkup:
         ok, why = _looks_like_a_document(name, head + b"y" * 200,
                                          "text/plain", 250)
         assert ok, why
+
+
+# --------------------------------------------------------------------------
+# Blocked is not none_found
+#
+# Two measured cases, both recorded as absences that were nothing of the kind:
+# Atypon's /doi/suppl/10.1161/STROKEAHA.111.628537 returns 403 to this client
+# and the file to a browser, and www.pnas.org/doi/suppl/10.1073/pnas.1118373109
+# returns 403 while the manifest said "nothing_listed".
+# --------------------------------------------------------------------------
+
+
+def test_a_403_makes_the_record_partial_not_none_found(tmp_path):
+    """The whole point: a refusal is a shortfall, never a clean negative."""
+    http = FakeDownloader(statuses={"/a": 403}, bodies={"/a": BODY_A})
+    summary = pull(tmp_path, http, provider_of(sf("s1.pdf", "https://x/a")))
+
+    assert summary.status == "partial"
+    (skip,) = manifest_of(tmp_path)["skipped"]
+    assert skip["reason"] == "blocked"
+    assert skip["status"] == 403
+    assert summary.blocked_urls == ["https://x/a"]
+
+
+def test_a_429_is_blocked_and_still_earns_the_slow_rounds(tmp_path, monkeypatch):
+    """Renaming the reason must not cost 429 its retries: transience is read
+    off the STATUS, which is what "later" is actually written in."""
+    from fetchpdf.retrieval import supplementary
+
+    slept = []
+    monkeypatch.setattr(supplementary.time, "sleep", slept.append)
+    monkeypatch.setattr(supplementary, "_RETRY_WAITS", (1, 2))
+
+    http = FlakyDownloader(fail_times=99, fail_status=429)
+    summary = pull(tmp_path, http, provider_of(sf("s1.pdf", "https://x/a")))
+
+    assert slept == [1, 2]
+    assert http.attempts["https://x/a"] == 3
+    assert manifest_of(tmp_path)["skipped"][0]["reason"] == "blocked"
+    assert summary.status == "partial"
+
+
+def test_a_404_is_not_blocked(tmp_path):
+    """The distinction has to cut both ways or it says nothing."""
+    http = FakeDownloader(statuses={"/a": 404}, bodies={"/a": BODY_A})
+    summary = pull(tmp_path, http, provider_of(sf("s1.pdf", "https://x/a")))
+
+    assert manifest_of(tmp_path)["skipped"][0]["reason"] == "http-error"
+    assert summary.blocked_urls == []
+
+
+def test_a_redacted_url_is_not_offered_to_a_person(tmp_path):
+    """"Fetch this by hand" is useless when the hand cannot have the key, and
+    printing the URL would be printing the credential."""
+    from fetchpdf.retrieval.supplementary import _blocked_urls
+
+    assert _blocked_urls([
+        {"reason": "blocked", "url": "https://x/a?apikey=REDACTED"},
+        {"reason": "blocked", "url": "https://x/b"},
+        {"reason": "blocked", "url": "https://x/b"},
+        {"reason": "http-error", "url": "https://x/c"},
+    ]) == ["https://x/b"]
+
+
+def test_repair_heals_an_old_403_into_a_blocked_record(tmp_path):
+    """A corpus fetched before this distinction existed carries its refusals as
+    http-error, so they are invisible to the report that exists to surface
+    them. The repair pass, which runs on every re-run, brings them forward."""
+    from fetchpdf.retrieval.supplementary import _repair, read_manifest
+
+    manifest = {
+        "status": "partial",
+        "files": [],
+        "skipped": [{"provider": "atypon_suppl", "reason": "http-error",
+                     "status": 403, "original_name": "supplement.pdf",
+                     "url": "https://www.ahajournals.org/doi/suppl/10.1161/x"}],
+    }
+    path = tmp_path / "rec_supplementary_info.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    summary = _repair(str(path), str(tmp_path / "rec"), None, None, None, None,
+                      verbose=False, max_file_bytes=CAP)
+
+    healed = read_manifest(str(path))
+    assert healed["skipped"][0]["reason"] == "blocked"
+    assert healed["skipped"][0]["was"] == "http-error"
+    assert healed["status"] == "partial"
+    assert summary.blocked_urls == ["https://www.ahajournals.org/doi/suppl/10.1161/x"]

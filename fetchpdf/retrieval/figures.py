@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from xml.etree import ElementTree
 
+from . import blocked
 from ._util import iso as _iso
 from .http import redact
 
@@ -64,11 +65,6 @@ _SCHEMA_VERSION = 1
 #: under 4 MB -- so this is not a budget, it is a guard against a mislabelled
 #: link handing back a multi-gigabyte video.
 DEFAULT_MAX_FIGURE_BYTES = 100 * 1024 * 1024
-
-#: HTTP answers that mean "a person could fetch this and we could not", as
-#: opposed to "there is nothing here". Recorded per figure so the manifest
-#: never presents a refusal as an absence.
-_BLOCKED_STATUSES = frozenset({401, 403, 429})
 
 #: The extensions PMC actually serves figures under, used only to match one
 #: name against another -- never to decide what a file IS.
@@ -518,8 +514,8 @@ def _failure_status(outcome) -> str:
     belongs in the manifest as its own status, not folded into a download
     failure that reads as absence.
     """
-    if outcome.status in _BLOCKED_STATUSES:
-        return f"blocked:{outcome.status}"
+    if blocked.classify(outcome.status):
+        return f"{blocked.BLOCKED}:{outcome.status}"
     return f"download_failed:{outcome.status}"
 
 

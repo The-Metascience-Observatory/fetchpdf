@@ -41,6 +41,8 @@ import json
 import time
 from typing import Optional
 
+from . import blocked
+
 #: Hosts observed to serve a JS bot-challenge in front of their API. Keyed by
 #: host so a repository that later drops the challenge can simply be removed.
 #: The landing template gives the browser a page to solve the challenge on
@@ -51,8 +53,10 @@ WAF_HOSTS = {
 }
 
 #: Markers of an AWS WAF interstitial. Present in the 202 body; absent once the
-#: challenge is solved, which is how the wait knows it is done.
-_CHALLENGE_MARKERS = ("gokuProps", "awsWafCookieDomainList")
+#: challenge is solved, which is how the wait knows it is done. Imported rather
+#: than restated: blocked.py holds every "is this a challenge" definition, so a
+#: page one module learns to recognise is not invisible to the others.
+_CHALLENGE_MARKERS = blocked.WAF_CHALLENGE_MARKERS
 
 #: A challenge that has not cleared in this long is not going to.
 _CHALLENGE_TIMEOUT_S = 25

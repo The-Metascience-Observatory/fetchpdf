@@ -38,6 +38,7 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from . import blocked
 from .http import apply_default_mode, redact
 from .linked_artifacts import write_linked_sidecar
 from .supplement_index import (
@@ -101,16 +102,10 @@ DEFAULT_MAX_FILES = 200
 _RATIO_GUARD_MULTIPLE = 20
 
 #: Bodies that are a challenge page rather than the file that was asked for.
-#: Every one of these is served with HTTP 200 (or, at ACS, a 404 with 57 KB of
-#: HTML), which is why the status code cannot be the check.
-_CHALLENGE_MARKERS = (
-    b"recaptcha/challengepage",
-    b"cf-browser-verification",
-    b"Just a moment...",
-    b"Attention Required! | Cloudflare",
-    b"_Incapsula_Resource",
-    b"px-captcha",
-)
+#: Imported rather than restated: this list used to live here, a second one in
+#: repository_waf.py and a title regex in request_drafts.py, so a page one of
+#: them recognised was invisible to the other two.
+_CHALLENGE_MARKERS = blocked.CHALLENGE_BODY_MARKERS
 
 _TEXTUAL_EXTENSIONS = (".html", ".htm", ".txt", ".csv", ".tsv", ".xml", ".json", ".md")
 
@@ -172,6 +167,9 @@ _CONTENT_TYPE_EXTENSIONS = {
 _LOST_REASONS = frozenset({
     "too-large", "http-error", "unreachable", "empty", "not-a-document",
     "not-an-archive", "decompression-ratio", "unreadable-member", "unwritable",
+    # A refusal of this client is a shortfall like any other -- more so, since
+    # the file demonstrably exists at the other end of a URL a person can open.
+    blocked.BLOCKED,
     # The files exist and were withheld -- that is a shortfall, unlike
     # "no-bundle", which means there was nothing to fetch in the first place.
     "epmc_not_open_access",
@@ -260,6 +258,10 @@ class SupplementarySummary:
     detail: str = ""
     #: Declared-but-not-obtained original filenames, when status == "incomplete".
     missing_declared: List[str] = field(default_factory=list)
+    #: URLs a publisher or CDN refused to this client but serves to a person.
+    #: Carried on the summary rather than left in the manifest because the
+    #: missing-materials report is where somebody will actually see them.
+    blocked_urls: List[str] = field(default_factory=list)
 
     def __bool__(self):
         return self.written > 0
@@ -766,7 +768,13 @@ class _Run:
         plausible, why = _looks_like_a_document(entry.basename, head, content_type, size)
         if not plausible:
             _unlink(staged)
-            self._refuse(entry, "not-a-document", detail=why, url=url,
+            # "not-a-document" and "blocked" are both refusals of these bytes,
+            # and only the second says a person could get the file. Asked of
+            # the same marker list _looks_like_a_document uses, so the two
+            # cannot disagree about what a challenge page is.
+            reason = (blocked.BLOCKED if blocked.looks_like_challenge_body(head)
+                      else "not-a-document")
+            self._refuse(entry, reason, detail=why, url=url,
                          container=container)
             return
 
@@ -1040,6 +1048,7 @@ class _Run:
             paths=[os.path.join(self.directory, f["filename"])
                    for f in self.kept if f.get("filename")],
             missing_declared=list(declared.get("missing") or []),
+            blocked_urls=_blocked_urls(self.skipped),
         )
 
 
@@ -1049,13 +1058,18 @@ class _Run:
 def _is_transient(reason: str, status) -> bool:
     """Whether a refusal deserves the record-level slow rounds.
 
-    "unreachable" and "empty" are connection weather. An http-error earns a
-    retry only for statuses that mean "later" -- 403/404/410 are answers, and
+    "unreachable" and "empty" are connection weather. A refusal earns a retry
+    only for statuses that mean "later" -- 403/404/410 are answers, and
     retrying an answer is how a run spins forever against a correct "no".
+
+    Both refusal reasons are read, not just one: 429 now records as `blocked`
+    rather than `http-error`, and it is the status and not the label that says
+    whether waiting can help.
     """
     if reason in ("unreachable", "empty"):
         return True
-    return reason == "http-error" and status in _TRANSIENT_STATUSES
+    return (reason in ("http-error", blocked.BLOCKED)
+            and status in _TRANSIENT_STATUSES)
 
 
 def _retry_transients(run: "_Run", stem: str, waits=None) -> None:
@@ -1142,9 +1156,19 @@ def _heal_manifest(manifest: dict, manifest_path: str, stem: str,
     """
     changed = False
     for skip in manifest.get("skipped") or []:
+        reason = skip.get("reason")
+        # Every provider, not just EPMC: the refusals worth reclassifying here
+        # are Atypon's and PNAS's, and gating this on the provider below would
+        # heal the one publisher that never sends a 403.
+        if reason == "http-error" and skip.get("status") in blocked.BLOCKED_STATUSES:
+            # Written before `blocked` existed. Healing it here is what puts an
+            # old corpus's 403s into the missing-materials report, where the
+            # answer is a person with a browser rather than another run.
+            skip["reason"], skip["was"] = blocked.BLOCKED, reason
+            changed = True
+            continue
         if skip.get("provider") != "europepmc_supplements":
             continue
-        reason = skip.get("reason")
         if reason == "http-error" and skip.get("status") in (404, 410):
             skip["reason"], skip["was"] = "no-bundle", reason
             changed = True
@@ -1187,6 +1211,22 @@ def _heal_manifest(manifest: dict, manifest_path: str, stem: str,
             missing_declared)
 
 
+def _blocked_urls(records) -> List[str]:
+    """The URLs of everything a publisher or CDN refused this client.
+
+    Deduplicated in order: one Atypon supplement page refusing four files is
+    one thing for a person to open, not four.
+    """
+    urls = []
+    for record in records or []:
+        if (record or {}).get("reason") != blocked.BLOCKED:
+            continue
+        url = record.get("url")
+        if url and "REDACTED" not in str(url) and url not in urls:
+            urls.append(url)
+    return urls
+
+
 def _declared_from_disk(stem: str) -> Optional[Dict[str, str]]:
     """The declared-supplement map from {stem}.xml, or None if unverifiable."""
     from .supplement_pmc import declared_from_xml
@@ -1227,6 +1267,10 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
     # to bring old accounting up to current truth without re-downloading.
     status, missing_declared = _heal_manifest(manifest, manifest_path, stem,
                                               verbose)
+    # Read after healing, so an old manifest's 403s -- reclassified a moment
+    # ago -- reach the report on the re-run that heals them rather than the one
+    # after it.
+    blocked_urls = _blocked_urls(manifest.get("skipped") or [])
 
     directory = os.path.dirname(os.path.abspath(stem)) or "."
     files = manifest.get("files") or []
@@ -1267,6 +1311,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
                    if f.get("filename")],
             detail="manifest present; nothing missing",
             missing_declared=missing_declared,
+            blocked_urls=blocked_urls,
         )
 
     if http is None:
@@ -1274,6 +1319,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
             status=status, written=present, manifest_path=manifest_path,
             detail=f"{len(missing)} file(s) missing, no client to refetch with",
             missing_declared=missing_declared,
+            blocked_urls=blocked_urls,
         )
 
     repaired = 0
@@ -1312,6 +1358,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
         status=status, written=present + repaired, manifest_path=manifest_path,
         detail=detail,
         missing_declared=missing_declared,
+        blocked_urls=blocked_urls,
     )
 
 

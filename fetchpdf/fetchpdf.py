@@ -5338,8 +5338,8 @@ def _fetch_pdf_chain(doi,
 
 
 def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
-                                 drafts_by_doi=None):
-    """Add a "missing supplementary material" section to missing_pdfs.html.
+                                 drafts_by_doi=None, figure_statuses=None):
+    """Add a "missing materials" section to missing_pdfs.html.
 
     The report was PDF-only, so a record whose paper arrived but whose data did
     not never appeared -- the one artifact a user opens after a run was silent
@@ -5351,18 +5351,38 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
 
     Click-through cases lead the table. A record the publisher will serve to a
     human but refused our client is worth one click in a browser, which beats
-    an email and a wait -- so those sort first and carry a badge.
+    an email and a wait -- so those sort first and carry a badge. Where the
+    refusal was recorded with the URL that produced it, that URL is printed:
+    "fetch by hand" is only actionable if it says WHAT to fetch, and sending
+    somebody to the DOI to hunt for a supplement they cannot name is most of
+    the work still undone.
+
+    Figures share the table rather than getting a second report. A figure PMC
+    refused and a supplement Atypon refused are the same problem with the same
+    answer, and splitting them would mean a person had two lists to read.
     """
     rows = []
     for display_id, summary in (si_statuses or {}).items():
         status = getattr(summary, "status", "")
+        blocked_urls = list(getattr(summary, "blocked_urls", None) or [])
         if status not in ("partial", "incomplete"):
             continue
         missing = ", ".join(getattr(summary, "missing_declared", None) or []) or "—"
         # A withheld-but-existing supplement is the click-through candidate:
-        # the publisher has it and serves humans.
-        manual = status == "partial" and not getattr(summary, "missing_declared", None)
-        rows.append((manual, display_id, status, missing))
+        # the publisher has it and serves humans. A recorded 403 says so
+        # outright rather than by inference.
+        manual = bool(blocked_urls) or (
+            status == "partial" and not getattr(summary, "missing_declared", None))
+        rows.append((manual, display_id, status, missing, blocked_urls))
+
+    for display_id, summary in (figure_statuses or {}).items():
+        blocked_urls = list(getattr(summary, "blocked_urls", None) or [])
+        if not blocked_urls:
+            # A figure that simply is not in PMC is not a click-through case,
+            # and listing it here would send a person after something no
+            # browser will produce either.
+            continue
+        rows.append((True, display_id, "figures blocked", "—", blocked_urls))
     if not rows:
         return None
 
@@ -5370,7 +5390,7 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
     manual_count = sum(1 for r in rows if r[0])
 
     body = []
-    for manual, display_id, status, missing in rows:
+    for manual, display_id, status, missing, blocked_urls in rows:
         badge = ('<span style="background:#b45309;color:#fff;padding:2px 6px;'
                  'border-radius:3px;font-size:11px">CLICK-THROUGH</span>'
                  if manual else "")
@@ -5378,6 +5398,10 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
         draft = (drafts_by_doi or {}).get(display_id)
         draft_cell = (f'<a href="{html.escape(draft)}">draft email</a>'
                       if draft else "—")
+        by_hand = "<br>".join(
+            f'<a href="{html.escape(url)}" target="_blank" '
+            f'rel="noopener noreferrer">fetch by hand</a>'
+            for url in blocked_urls[:5]) or "—"
         body.append(
             f"            <tr>\n"
             f"                <td>{badge}</td>\n"
@@ -5385,6 +5409,7 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
             f'rel="noopener noreferrer">{html.escape(str(display_id))}</a></td>\n'
             f"                <td>{html.escape(status)}</td>\n"
             f"                <td>{html.escape(missing)}</td>\n"
+            f"                <td>{by_hand}</td>\n"
             f"                <td>{draft_cell}</td>\n"
             f"            </tr>\n")
 
@@ -5394,12 +5419,13 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
             if manual_count else "")
     section = f"""
     <section class="run">
-        <h2>Missing supplementary material — {run_timestamp}</h2>
+        <h2>Missing supplementary material and figures — {run_timestamp}</h2>
         {lead}
         <table>
             <thead>
                 <tr><th></th><th>Identifier</th><th>Status</th>
-                    <th>Declared but not obtained</th><th>Request</th></tr>
+                    <th>Declared but not obtained</th><th>Refused to us</th>
+                    <th>Request</th></tr>
             </thead>
             <tbody>
 {''.join(body)}            </tbody>
@@ -5843,6 +5869,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     #: assignment is atomic under the GIL.
     _si_statuses = {}
 
+    #: display_id -> FiguresSummary, for the same report. Kept separate rather
+    #: than merged into _si_statuses: the two carry different fields, and a
+    #: reader of either dict should not have to ask which pass wrote a row.
+    _figure_statuses = {}
+
     def _si_http():
         client = getattr(_si_local, "client", None)
         if client is None:
@@ -5899,6 +5930,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                 email=email,
                 delay=delay,
             )
+            _figure_statuses[display_id] = summary
             if summary.written and summary.status != "skipped":
                 print(f"   🖼️  {display_id}: {summary.written} figure(s)"
                       + (f", {summary.failed} not obtained" if summary.failed else ""))
@@ -6552,10 +6584,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
 
     # The SI half of the missing-materials report, written once now that every
     # record's supplementary pass has finished.
-    if create_missing_report and _si_statuses and _run_timestamp:
+    if create_missing_report and (_si_statuses or _figure_statuses) and _run_timestamp:
         try:
             _append_missing_si_to_report(output_dir, _si_statuses,
-                                         _run_timestamp, _missing_report_lock)
+                                         _run_timestamp, _missing_report_lock,
+                                         figure_statuses=_figure_statuses)
         except Exception as e:
             if verbose:
                 print(f"  missing-SI report failed: {str(e)[:120]}")

@@ -995,6 +995,29 @@ requests and are not yet covered; arXiv ancillary files are not yet covered
 either. Dryad (`10.5061`) and Harvard Dataverse (`10.7910/DVN`) deposits are
 reached through the link services rather than as top-level providers.
 
+### Refused is not absent
+
+A 401, 403 or 429, or a bot-challenge page served with a 200, says **nothing**
+about whether the file exists. Those are recorded as `"reason": "blocked"` with
+the URL that produced them, never as a download failure and never left to fall
+through to `none_found` — Atypon returns 403 for
+`/doi/suppl/10.1161/STROKEAHA.111.628537` while a browser fetches the file in
+seconds, and that record used to come out of a run as "nothing published".
+
+Blocked records appear in `missing_pdfs.html` with the URL to open, because the
+fix is a person and not a retry:
+
+```
+Missing supplementary material and figures — 2026-09-07 12:00
+[CLICK-THROUGH]  10.1161/strokeaha.111.628537  partial  —  fetch by hand
+```
+
+429 keeps its retries — transience is read off the status, which is where
+"later" is actually written — and 404 stays a plain download failure, because
+that one *is* an answer about the file. Old manifests are healed on the next
+run: a 403 recorded before this distinction existed is reclassified in place,
+with the original reason kept under `"was"`.
+
 ### Size cap
 
 `--max-supplementary-mb` defaults to 300, per file. A file whose `Content-Length`
@@ -1284,7 +1307,7 @@ print(summary.status, summary.written, summary.manifest_path)
 - `resolver` / `http` (optional): reuse a batch's `BatchResolver` / `HttpClient` so the per-host rate budget stays shared
 
 **Returns:**
-- `SupplementarySummary`: `.status` (`ok` | `none_found` | `partial` | `error` | `skipped`), `.written`, `.skipped`, `.bytes_written`, `.manifest_path`, `.paths`
+- `SupplementarySummary`: `.status` (`ok` | `none_found` | `partial` | `incomplete` | `error` | `skipped`), `.written`, `.skipped`, `.bytes_written`, `.manifest_path`, `.paths`, `.missing_declared`, `.blocked_urls` (URLs a publisher refused this client but serves to a person)
 
 Never raises for a network or provider failure, and its result must not be used to
 decide whether the record succeeded.

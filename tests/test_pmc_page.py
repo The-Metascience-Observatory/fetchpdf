@@ -13,9 +13,6 @@ The load-bearing tests here:
   test_a_non_200_is_not_retried                    -- 404 is an answer, not a blip
 """
 
-import json
-import os
-
 import pytest
 
 from fetchpdf.retrieval.context import RetrievalContext

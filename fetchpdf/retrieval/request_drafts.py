@@ -37,6 +37,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from . import blocked
 from .corresponding import Contact
 
 #: Written to the directory fetchpdf was RUN FROM, not the output dir: these
@@ -94,8 +95,7 @@ def classify_block(status: Optional[int], title: str, links_found: int) -> str:
     VPN: PNAS 200 with an SI link, Wiley 200 with an SI link, SAGE 403 titled
     "Just a moment...". Only the last is a wall.
     """
-    blocked_title = bool(re.match(r"\s*(just a moment|attention required|"
-                                  r"access denied|are you a robot)", title or "", re.I))
+    blocked_title = bool(blocked.CHALLENGE_TITLE_RE.match(title or ""))
     if status == 403 or blocked_title:
         return MANUAL_LIKELY if not blocked_title else BLOCKED_HARD
     if links_found:

@@ -27,6 +27,7 @@ from requests.exceptions import (
     Timeout,
 )
 
+from . import blocked as _blocked
 from .._env import EMAIL as _DEFAULT_EMAIL
 from .._http import USER_AGENT
 from .ratelimit import HostRateLimiter
@@ -144,7 +145,7 @@ class Download:
     bytes_written: int = 0
     sha256: str = ""                      # of the bytes actually written
     path: Optional[str] = None
-    outcome: str = "ok"                   # ok | too-large | http-error | empty | unreachable
+    outcome: str = "ok"                   # ok | too-large | blocked | http-error | empty | unreachable
     declared_length: Optional[int] = None  # Content-Length as served, when sent
     elapsed: float = 0.0
     detail: str = ""
@@ -451,7 +452,15 @@ class HttpClient:
 
                     outcome = _Outcome(r, declared, url)
                     if not (200 <= r.status_code < 300):
-                        return outcome.failure("http-error", f"HTTP {r.status_code}")
+                        # 403 from a publisher and 404 from a repository are
+                        # different facts. The first says nothing about whether
+                        # the file exists -- it says a person could have it and
+                        # this client could not -- and folding it into
+                        # "http-error" is how a bot protection ends up recorded
+                        # as a claim about what the authors published.
+                        return outcome.failure(
+                            _blocked.classify(r.status_code) or "http-error",
+                            f"HTTP {r.status_code}")
 
                     # The cheap refusal: a declared length over the cap costs no
                     # bandwidth at all. Deliberately read off the streaming
