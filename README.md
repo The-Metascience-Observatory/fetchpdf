@@ -31,6 +31,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
   - SSRN (Social Science Research Network)
 
 - 🔄 **Smart Fallback**: If one source fails, automatically tries the next
+- 🎓 **Google Scholar** (optional, `SERPAPI_API_KEY`): a title search that reaches author-hosted copies no DOI-keyed index records — every hit is checked against the requested paper before it is kept. SerpAPI is a paid third-party service with a small free tier; without the key this step never runs
 - 🧬 **Format Prioritization**: `--prioritize-xml` prefers structured full text (JATS/TEI) over PDF — see [below](#format-prioritized-retrieval)
 - 📎 **Supplementary Material**: `--pull-supplementary` fetches every supplementary file alongside the paper — see [below](#supplementary-material)
 - 🔗 **Linked Datasets & Code**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar — see [below](#linked-datasets-and-code-stem_linked_artifactsjson)
@@ -78,6 +79,9 @@ COREAPIKEY=your_core_key                   # CORE: 40M+ OA papers from core.ac.u
 # Optional — publisher-specific
 ELSEVIER_TDM_API_KEY=your_elsevier_key      # Elsevier text/data-mining access
 
+# Optional — paid, turns on the Google Scholar step
+SERPAPI_API_KEY=your_serpapi_key            # serpapi.com: one search per record that gets there
+
 # Optional — only for --pull-everything --llm-backend openrouter
 OPENROUTER_API_KEY=your_openrouter_key      # the retrieval agent's second backend
 ```
@@ -91,6 +95,7 @@ OPENROUTER_API_KEY=your_openrouter_key      # the retrieval agent's second backe
 | Semantic Scholar | 1 req/s | 100 req/s | [semanticscholar.org/product/api](https://www.semanticscholar.org/product/api) |
 | NCBI E-utilities | 3 req/s | 10 req/s | [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/) |
 | CORE | Unavailable | 1,000 tokens/day | [core.ac.uk/services/api](https://core.ac.uk/services/api) |
+| SerpAPI (Google Scholar) | Step never runs | Paid per search, small free tier | [serpapi.com](https://serpapi.com/) |
 
 ## Quick Start
 
@@ -1307,21 +1312,27 @@ These run first if the DOI matches specific patterns:
     - DuckDuckGo search: `title + site:researchgate.net`
     - Landing page PDF extraction
 
-11. **DOI → PMID Fallback**
+11. **Google Scholar** (via SerpAPI) — off unless `SERPAPI_API_KEY` is set
+    - One search per record: the article's title, widened with its Crossref subtitle (and, failing that, two author surnames) when the title alone is too short to name the paper
+    - Every `[PDF]` link in the top five results is downloaded and checked against the requested paper; a wrong or blocked one moves on to the next
+    - Reaches author-hosted copies (OSF project files, lab pages, ResearchGate, Academia.edu, working-paper series) that DOI-keyed OA indexes do not record
+    - Paid third-party service with a small free tier, so every DOI-keyed route runs before it
+
+12. **DOI → PMID Fallback**
     - Convert DOI to PMID when DOI sources fail
     - Try PMID-native sources (PubMed landing page `citation_pdf_url`)
 
 
 ### Final Fallback
 
-12. **Elsevier XML API**
+13. **Elsevier XML API**
     - Text/data-mining API for Elsevier articles
     - Returns XML instead of PDF (last resort)
     - Requires `ELSEVIER_TDM_API_KEY`
 
 ---
 
-**Total: 12 standard sources + 4 special handlers** = 16 different download strategies
+**Total: 13 standard sources + 4 special handlers** = 17 different download strategies
 
 ## Requirements
 
