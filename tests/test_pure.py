@@ -1494,3 +1494,152 @@ class TestReadCsvColumn:
         # reader must hand back the digits exactly as written.
         path = self._csv(tmp_path, "PMID\n12345678\n87654321\n")
         assert fpd._read_csv_column(path, "PMID") == ["12345678", "87654321"]
+
+
+class TestGoogleScholarFallback:
+    """The Scholar step is a title search, so its whole safety is the loop.
+
+    The source exists because Scholar finds copies no DOI-keyed index records
+    (measured on 10.1177/1948550616659120, whose accepted manuscript is a file
+    in an OSF project). It is safe because a title search also finds other
+    people's papers: on 6 paywalled DOIs a "first PDF link that downloads" rule
+    produced 4 hits, 3 of them the wrong article. These tests pin the three
+    behaviours that difference rests on.
+    """
+
+    DOI = "10.1177/1948550616659120"
+    TITLE = "Social Class and Prosocial Behavior: The Moderating Role of Public Versus Private Contexts"
+
+    #: One SerpAPI answer: a wrong paper first, a blocked host second, the
+    #: article third, and one non-PDF resource that must never be a candidate.
+    PAYLOAD = {
+        "organic_results": [
+            {"title": "Some other paper",
+             "resources": [{"link": "https://example.org/other.pdf", "file_format": "PDF"}]},
+            {"title": "Blocked host",
+             "resources": [{"link": "https://econstor.eu/blocked.pdf", "file_format": "PDF"}]},
+            {"title": "Landing page only",
+             "resources": [{"link": "https://example.org/landing.html", "file_format": "HTML"}]},
+            {"title": "Social Class and Prosocial Behavior",
+             "resources": [{"link": "https://osf.io/download/8u5vt", "file_format": "PDF"}]},
+        ]
+    }
+
+    @pytest.fixture(autouse=True)
+    def _clean_session(self, monkeypatch):
+        monkeypatch.setattr(fpd, "_SERPAPI_DISABLED", False)
+        monkeypatch.setattr(fpd, "_title_for", lambda doi, verbose=False: self.TITLE)
+
+    def _serp(self, monkeypatch, calls):
+        class R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return TestGoogleScholarFallback.PAYLOAD
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return R()
+
+        monkeypatch.setattr(fpd.requests, "get", fake_get)
+
+    def test_no_key_means_no_request(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
+
+        def explode(*a, **kw):
+            raise AssertionError("SerpAPI must not be called without a key")
+
+        monkeypatch.setattr(fpd.requests, "get", explode)
+        assert fpd.try_google_scholar_fallback(
+            self.DOI, str(tmp_path / "rec.pdf")) is False
+
+    def test_wrong_paper_is_refused_and_the_next_candidate_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+        calls = []
+        self._serp(monkeypatch, calls)
+
+        downloaded, judged = [], []
+
+        def fake_download(url, save_path, verbose=False):
+            downloaded.append(url)
+            # econstor answers a plain request with a bot check: no bytes.
+            if "econstor" in url:
+                return False
+            with open(save_path, "wb") as f:
+                f.write(b"%PDF-1.4 stub")
+            return True
+
+        def fake_accept(save_path, doi, url="", verbose=False):
+            judged.append(url)
+            return "osf.io" in url
+
+        monkeypatch.setattr(fpd, "try_download", fake_download)
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf", fake_accept)
+
+        assert fpd.try_google_scholar_fallback(
+            self.DOI, str(tmp_path / "rec.pdf")) is True
+        # One search, and the HTML resource was never a candidate.
+        assert len(calls) == 1
+        assert downloaded == ["https://example.org/other.pdf",
+                              "https://econstor.eu/blocked.pdf",
+                              "https://osf.io/download/8u5vt"]
+        # The blocked host is not judged -- there were no bytes to judge.
+        assert judged == ["https://example.org/other.pdf",
+                          "https://osf.io/download/8u5vt"]
+
+    def test_every_candidate_refused_is_a_clean_miss(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+        self._serp(monkeypatch, [])
+        monkeypatch.setattr(fpd, "try_download",
+                            lambda url, save_path, verbose=False: False)
+        monkeypatch.setattr(fpd, "_accept_downloaded_pdf",
+                            lambda *a, **kw: pytest.fail("nothing downloaded"))
+        assert fpd.try_google_scholar_fallback(
+            self.DOI, str(tmp_path / "rec.pdf")) is False
+
+    def test_a_spent_plan_stops_the_source_for_the_run(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+        calls = []
+
+        class R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"error": "Your account has run out of searches."}
+
+        monkeypatch.setattr(fpd.requests, "get",
+                            lambda url, **kw: (calls.append(url), R())[1])
+        assert fpd.try_google_scholar_fallback(
+            self.DOI, str(tmp_path / "rec.pdf")) is False
+        # The second record does not buy the same answer again.
+        assert fpd.try_google_scholar_fallback(
+            "10.1037/emo0000432", str(tmp_path / "rec2.pdf")) is False
+        assert len(calls) == 1
+
+    def test_short_title_regains_its_subtitle(self, monkeypatch):
+        """Crossref's `title` for this record stops before the colon.
+
+        Searched as it stands, Scholar returns four other papers' PDFs and not
+        this one; with the subtitle it returns the article's own [PDF] link
+        first (measured 2026-09-20).
+        """
+        monkeypatch.setattr(
+            fpd, "_crossref_get",
+            lambda url, **kw: {"subtitle": ["The Moderating Role of Public Versus Private Contexts"],
+                               "author": [{"family": "Kraus"}]})
+        assert fpd._scholar_query(self.DOI, "Social Class and Prosocial Behavior") == self.TITLE
+
+    def test_short_title_without_a_subtitle_carries_surnames(self, monkeypatch):
+        monkeypatch.setattr(
+            fpd, "_crossref_get",
+            lambda url, **kw: {"author": [{"family": "Kraus"}, {"family": "Callaghan"},
+                                          {"family": "Third"}]})
+        assert fpd._scholar_query(self.DOI, "Social class and compassion") == (
+            "Social class and compassion Kraus Callaghan")
+
+    def test_a_title_long_enough_costs_no_lookup(self, monkeypatch):
+        monkeypatch.setattr(fpd, "_crossref_get",
+                            lambda *a, **kw: pytest.fail("no lookup needed"))
+        assert fpd._scholar_query(self.DOI, self.TITLE) == self.TITLE

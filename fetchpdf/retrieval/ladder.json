@@ -243,6 +243,10 @@
       "rps": 2,
       "burst": 2
     },
+    "serpapi.com": {
+      "rps": 1,
+      "burst": 1
+    },
     "api.biorxiv.org": {
       "rps": 2,
       "burst": 2

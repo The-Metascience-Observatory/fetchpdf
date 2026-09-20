@@ -44,6 +44,10 @@ OPENALEX_API_KEY = os.getenv("OPENALEXAPIKEY")
 CORE_API_KEY = os.getenv("COREAPIKEY")
 SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY")
 
+# Google Scholar results, billed per search by SerpAPI. Without it the Scholar
+# step never runs and the chain behaves as it always has.
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+
 # The retrieval agent's OpenRouter backend. Optional: without it that backend
 # reports itself unavailable and the run falls back to the Claude Code CLI, or
 # to the deterministic rules alone. A missing key is never a failed record.

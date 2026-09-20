@@ -179,6 +179,7 @@ SOURCE_DISPLAY_NAMES = {
     "europepmc": "EuropePMC",
     "existing": "on-disk",
     "figshare": "figshare",
+    "google_scholar": "GoogleScholar",
     "openalex": "OpenAlex",
     "osf": "OSF",
     "pmc": "PMC",
@@ -3626,6 +3627,177 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
         return False
 
 
+# ---------------------------------------------------------------------------
+# Google Scholar, via SerpAPI
+#
+# Scholar indexes copies the author put somewhere, which no DOI-keyed index
+# records. Measured 2026-09-19 on 10.1177/1948550616659120 (Kraus & Callaghan,
+# SPPS): Unpaywall answers is_oa false, OpenAlex oa_status closed with
+# any_repository_has_fulltext false, Semantic Scholar openAccessPdf CLOSED, and
+# every step above this one finds nothing -- while the accepted manuscript sits
+# as a file inside an OSF *project* (osf.io/download/8u5vt, node 6zbf3, not a
+# registered preprint), which Scholar lists as a [PDF] link. Personal and lab
+# pages, ResearchGate, Academia.edu and working-paper series behave the same
+# way.
+#
+# It is a TITLE search, so it is only safe behind the identity check. Measured
+# over 6 paywalled or blocked DOIs with a naive "take the first PDF link that
+# downloads" rule: 4 reported successes, 3 of them a different paper --
+# 10.2139/ssrn.3442797 produced a Nature Energy article, 10.1037/emo0000432 a
+# Journal of Youth and Adolescence paper, 10.1111/ajsp.12006 an undergraduate
+# thesis. In 2 of those 3 the correct link WAS among the results, but its host
+# (econstor.eu, cepr.org, psycnet.apa.org) answered a plain HTTP request with a
+# bot check or a 403 while an unrelated open host served its bytes happily. So
+# every candidate is judged, and a refused or blocked one moves the loop on
+# instead of ending the search.
+# ---------------------------------------------------------------------------
+
+#: Results to ask SerpAPI for, and to walk. One search costs the same whatever
+#: this is, and a copy Scholar ranks below fifth is not this paper.
+_SERPAPI_RESULTS = 5
+
+#: Set once SerpAPI has said the key is bad or the plan is spent, so a long
+#: batch buys that answer once rather than once per record.
+_SERPAPI_DISABLED = False
+_SERPAPI_LOCK = threading.Lock()
+
+
+#: A query shorter than this is a phrase, not an identifier, and Scholar ranks
+#: somebody else's paper first. Measured 2026-09-20: "Social class and
+#: prosocial behavior" -- which is the whole of what `title` holds for
+#: 10.1177/1948550616659120 -- returns four other papers' PDFs in the top five
+#: and not the requested one. The same search carrying the subtitle returns the
+#: article's own [PDF] link first.
+_SCHOLAR_QUERY_MIN = 60
+
+
+def _scholar_query(doi: str, title: str, verbose=False) -> str:
+    """The Scholar query: the title, widened when the title alone is too short.
+
+    Crossref files a subtitle in its own field, so `title` for a SAGE or APA
+    record is routinely the first half of what the paper is called. That half
+    is added back first; author surnames only follow if the record is still
+    short. One extra Crossref call (free, rate-limited) on that minority.
+    """
+    if len(title) >= _SCHOLAR_QUERY_MIN:
+        return title
+    message = _crossref_get(f"https://api.crossref.org/works/{(doi or '').strip().lower()}",
+                            verbose=verbose) or {}
+    subtitles = message.get("subtitle") or []
+    if subtitles and str(subtitles[0]).strip():
+        title = f"{title}: {str(subtitles[0]).strip()}"
+        if len(title) >= _SCHOLAR_QUERY_MIN:
+            return title
+    surnames = [str(a.get("family") or "").strip()
+                for a in (message.get("author") or []) if a.get("family")][:2]
+    return f"{title} {' '.join(surnames)}" if surnames else title
+
+
+@_timed("google_scholar")
+def try_google_scholar_fallback(doi: str, save_path: str, verbose=False):
+    """Try Google Scholar (via SerpAPI) for an author-hosted copy of the paper.
+
+    Off unless SERPAPI_API_KEY is set: SerpAPI is a paid service, so nobody
+    gets a bill for installing fetchpdf.
+    """
+    global _SERPAPI_DISABLED
+
+    if _SERPAPI_DISABLED:
+        return False
+
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        if verbose:
+            print("  Google Scholar: no SERPAPI_API_KEY in .env.local, skipping")
+        return False
+
+    # No title means nothing to search for, and nothing for the identity check
+    # to judge the answer against. Either one alone rules this source out.
+    title = _title_for(doi, verbose=verbose)
+    if not title:
+        if verbose:
+            print(f"  Google Scholar: no known title for {doi}, skipping")
+        return False
+
+    try:
+        from .retrieval.ratelimit import shared_host_limiter
+
+        shared_host_limiter().bucket("serpapi.com").acquire()
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_scholar",
+                "q": _scholar_query(doi, title, verbose=verbose),
+                "num": _SERPAPI_RESULTS,
+                "api_key": api_key,
+            },
+            timeout=30,
+        )
+        if r.status_code in (401, 403, 429):
+            _serpapi_disable(f"SerpAPI HTTP {r.status_code}")
+            return False
+        if r.status_code != 200:
+            if verbose:
+                print(f"  Google Scholar: SerpAPI HTTP {r.status_code}")
+            return False
+
+        data = r.json() or {}
+        # SerpAPI reports both "your plan is finished" and "Google returned
+        # nothing for this query" as `error` on a 200. Only the first is a
+        # reason to stop asking for the rest of the run.
+        error = str(data.get("error") or "")
+        if error:
+            if "api key" in error.lower() or "run out" in error.lower():
+                _serpapi_disable(error[:120])
+            elif verbose:
+                print(f"  Google Scholar: {error[:120]}")
+            return False
+
+        candidates = []
+        for result in (data.get("organic_results") or [])[:_SERPAPI_RESULTS]:
+            for resource in result.get("resources") or []:
+                link = resource.get("link")
+                if link and str(resource.get("file_format") or "").upper() == "PDF":
+                    candidates.append(link)
+        candidates = list(dict.fromkeys(candidates))     # Scholar's own order
+        if verbose:
+            print(f'  Google Scholar: {len(candidates)} PDF link(s) for "{title[:60]}"')
+
+        for url in candidates:
+            if _already_rejected(doi, url):
+                continue
+            if not try_download(url, save_path, verbose):
+                if verbose:
+                    print(f"  Google Scholar: no PDF bytes from {url[:90]}")
+                continue
+            if not _accept_downloaded_pdf(save_path, doi, url, verbose):
+                continue
+            if verbose:
+                print(f"✅ Google Scholar success for {doi}")
+            return True
+        return False
+    except Exception as e:
+        # SerpAPI takes its key as a query parameter, so a requests exception
+        # carries the key in its message. Print the kind of failure, never the
+        # text.
+        if verbose:
+            print(f"  Google Scholar error: {type(e).__name__}")
+        return False
+
+
+def _serpapi_disable(reason: str) -> None:
+    """Stop asking SerpAPI for the rest of this run, warning once."""
+    global _SERPAPI_DISABLED
+    with _SERPAPI_LOCK:
+        if _SERPAPI_DISABLED:
+            return
+        _SERPAPI_DISABLED = True
+    _print_yellow_warning(
+        f"⚠️  Google Scholar disabled for session: {reason}. Check "
+        f"SERPAPI_API_KEY in .env.local and the plan's remaining searches."
+    )
+
+
 @_timed("doaj")
 def try_doaj_fallback(doi: str, save_path: str, verbose=False):
     """Try DOAJ API for OA full-text links."""
@@ -4046,8 +4218,9 @@ def _fetch_pdf_chain(doi,
       8. Direct DOI resolver (html scraping, Crossref chooser)
       9. DataCite related identifiers
      10. ResearchGate
-     11. DOI→PMID fallback
-     12. Elsevier XML API (last resort)
+     11. Google Scholar via SerpAPI (only with SERPAPI_API_KEY)
+     12. DOI→PMID fallback
+     13. Elsevier XML API (last resort)
 
     Saves PDF to save_dir as: doi.replace('/', '--') + '.pdf'
     Returns the path if successful, else None.
@@ -5260,6 +5433,22 @@ def _fetch_pdf_chain(doi,
         if verbose:
             print(f"Error with DataCite related identifiers fallback: {e}")
 
+
+    # ---------------- Google Scholar (SerpAPI) ----------------
+    # Beside the other title search, after every DOI-keyed route has failed:
+    # it is the only step that costs the user money, so nothing free that
+    # applies to all records runs behind it. The two steps that do follow are
+    # narrow -- one needs a PMID, the other an Elsevier DOI -- and a broad
+    # title search belongs in front of both. Runs only for records whose title
+    # is known, and is silently absent without SERPAPI_API_KEY.
+    if not os.path.exists(save_path):
+        try:
+            if try_google_scholar_fallback(doi, save_path, verbose):
+                _record_source(_source_out, "google_scholar")
+                return save_path
+        except Exception as e:
+            if verbose:
+                print(f"Error with Google Scholar fallback: {type(e).__name__}")
 
     # ---------------- DOI→PMID fallback (before last resorts) ----------------
     # When DOI flow fails, try PMID-native sources (PubMed page citation_pdf_url, etc.)
