@@ -157,6 +157,14 @@ body.md
 .playwright/
 playwright-state.json
 
+# Institutional access (--cookies / --ebsco). A cookie export is a live
+# credential for every site the browser was signed into, and the Chrome
+# profile the Playwright driver keeps is the same thing in directory form.
+cookies.txt
+*cookies*.json
+storage_state*.json
+.fetchpdf-chrome-profile/
+
 # One-off corpus-audit artifacts. Written by ad-hoc repair runs, not part of the
 # package; they name specific DOIs on a specific day and go stale immediately.
 /inbox_redownload*.csv

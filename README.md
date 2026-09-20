@@ -14,6 +14,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Format-Prioritized Retrieval](#format-prioritized-retrieval)
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
+- [Institutional access (opt-in)](#institutional-access-opt-in) — papers your library subscribes to
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
 - [Troubleshooting](#troubleshooting)
@@ -35,6 +36,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 📎 **Supplementary Material**: `--pull-supplementary` fetches every supplementary file alongside the paper — see [below](#supplementary-material)
 - 🔗 **Linked Datasets & Code**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar — see [below](#linked-datasets-and-code-stem_linked_artifactsjson)
 - 🤖 **LLM-assisted retrieval**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed — see [below](#--pull-everything-the-second-layer)
+- 🔐 **Institutional access** (opt-in): `--cookies` and `--ebsco` fetch papers your library subscribes to, using your own signed-in browser — off by default, see [below](#institutional-access-opt-in)
 - 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
@@ -1162,6 +1164,128 @@ GitHub URL is broken across a line by PDF layout — invisible to any regex —
 `haiku` recovered it on two runs out of four and returned nothing on the other
 two. Treat the agent as a second pass that sometimes finds what layer 1 missed,
 not as a guarantee.
+
+## Institutional access (opt-in)
+
+Everything above retrieves open access. A paper your library subscribes to but
+nobody has deposited anywhere is invisible to all of it. These two routes use
+the subscription you already have, from the browser you are already signed into.
+Both are off unless you ask for them, and both run only after the whole
+open-access chain has returned nothing.
+
+```bash
+# Publisher PDF, using cookies exported from your own signed-in browser
+fetchpdf papers.csv -o ./out --cookies ~/private/cookies.txt
+
+# EBSCOhost, searched by DOI in a signed-in Chrome
+fetchpdf papers.csv -o ./out --ebsco --ebsco-db psyh
+
+# Both: the publisher first, EBSCO for what the publisher would not give up
+fetchpdf papers.csv -o ./out --cookies ~/private/cookies.txt --ebsco
+```
+
+Every PDF either route produces goes through the same identity check as every
+other source, so a subscription buys access, not trust.
+
+### Requirements
+
+| | `--cookies` | `--ebsco` |
+|---|---|---|
+| Subscription | A current institutional subscription to the journal | A current EBSCOhost subscription through your library |
+| Signed in | At **each publisher**, through your institution / OpenAthens | At EBSCO, through your institution / OpenAthens |
+| Browser | Any — the route only reads its cookies | Chrome, visible on screen |
+| Credential | A cookie export, re-made after each publisher login | `EBSCO_PROFILE` in `.env.local` |
+| Platform | Any | `playwright` driver: any, needs a display (or `xvfb` on a headless Linux box). `chrome-osascript` driver: macOS only |
+
+### Setting up `--cookies`
+
+1. Sign in at the publisher through your institution or OpenAthens, in your
+   normal browser. Confirm you can open one of the paper PDFs by hand.
+2. Export the cookies. Either works:
+   - a **cookies.txt** browser extension (Netscape format), or
+   - Playwright's `storage_state`, or any JSON export that is a list of
+     `{name, value, domain, path}` objects.
+3. `fetchpdf ... --cookies /path/to/that/file`.
+
+The route derives the PDF URL from the DOI prefix, so it covers the publishers
+whose PDF path is derivable: Springer (`10.1007`, `10.1057`), Wiley (`10.1002`,
+`10.1111`), Taylor & Francis (`10.1080`), SAGE (`10.1177`) and the Royal Society
+(`10.1098`). APA (`10.1037`) has no derivable path — use `--ebsco` for those.
+
+**Re-export after every new publisher login.** A sign-in at Wiley does not
+authenticate SAGE; each publisher needs its own "Access through your
+institution" once, and the export you took before that login does not contain
+the cookie it produced.
+
+### Setting up `--ebsco`
+
+1. Find your cluster id: sign in to EBSCO through your library and look at the
+   URL, `research.ebsco.com/c/<cluster>/...`. Put it in `.env.local` as
+   `EBSCO_PROFILE=<cluster>`.
+2. Choose a driver.
+   - **`--ebsco-driver playwright`** (the default) uses a Chrome profile that
+     belongs to fetchpdf alone. Run `fetchpdf --institutional-login` once: it
+     opens that profile, waits while you sign in, and prints the cluster id it
+     ends up on. The profile keeps the session for later runs. Set
+     `FETCHPDF_CHROME_PROFILE` to move it off its default,
+     `~/.fetchpdf/chrome-profile`.
+   - **`--ebsco-driver chrome-osascript`** drives the Chrome you already have
+     open, so there is no second profile and no second sign-in. macOS only, and
+     it needs Chrome's *View ▸ Developer ▸ Allow JavaScript from Apple Events*
+     switched on once. It opens a tab in your front window while it works.
+3. `--ebsco-db psyh` restricts the search to one database — `psyh` is APA
+   PsycInfo. The default searches everything your subscription covers; a named
+   database is tried first and the full set second.
+
+The flow is: search by DOI, read the record id from the results page, open
+`viewer/pdf/<record id>`, and take the signed `content.ebscohost.com/cds/retrieve`
+URL out of the viewer's resource timings. That URL authenticates itself, so the
+download is a plain HTTP GET with no cookies. It is also a bearer credential:
+fetchpdf strips its query string before anything logs or records it.
+
+The EBSCO step holds a lock, because one browser has one front tab. With
+`-w 4`, the four workers still search EBSCO one at a time.
+
+### What the failures mean
+
+| Message | Meaning |
+|---|---|
+| `EBSCO has no record for this DOI` | Not indexed in the databases searched. Try without `--ebsco-db`, then give up on this route. |
+| `only 'Linked Full Text', not a hosted PDF` | EBSCO has the record but links out to the publisher. `--cookies` is the route that can follow that link. |
+| `no publisher PDF for this DOI with these cookies` | Either the prefix has no derivable PDF URL, or the publisher did not accept the cookies — usually a stale export or a login that never happened. |
+| `EBSCO returned a content URL but the download was not a PDF` | The viewer served something else; re-check that the session is still signed in. |
+| PDF fetched, then `failed the identity check` | The bytes are not this DOI's paper. The file is discarded, as with any other source. |
+
+### What to expect
+
+These are the contributor's field observations from running the original of this
+code against a paywalled psychology corpus, not a benchmark:
+
+- **Expect a low yield.** One batch of 62 paywalled papers produced 8 PDFs.
+  Plan around partial coverage.
+- **Off-campus IP gating is real.** SAGE, Wiley, Taylor & Francis, OUP, Springer
+  and BMJ frequently gate the direct PDF on a campus IP even inside a
+  signed-in browser. EBSCO does not. A VPN or an on-campus batch is a more
+  reliable fix than retrying.
+- **Headless browsers get blocked.** Cloudflare flags them at most publishers,
+  which is why the EBSCO driver runs a visible browser and there is no
+  automated tier here.
+- **One OpenAthens handshake per publisher**, as above.
+
+### What this is, and what it is not
+
+This automates access the user already has: it signs in as nobody, bypasses
+nothing, and fetches only what the browser beside it would fetch by hand.
+Publisher and aggregator terms of service often restrict automated or bulk
+downloading even by subscribers — that is a question about your agreement with
+them, and this tool does not answer it for you. Read the terms, and keep the
+volume in the range a person plausibly reads.
+
+A cookie export is a **credential**. It is a live session for every site the
+browser was signed into, not only the publisher, and anyone holding the file can
+use them. Keep it outside the repository and outside any shared directory; the
+`.gitignore` here carries patterns for the usual names. The same goes for the
+Chrome profile the Playwright driver keeps.
 
 ## API Reference
 
