@@ -59,6 +59,19 @@ def test_accepted_manuscript_is_accepted_on_its_title_alone(tmp_path):
     assert verdict.signals == ["title-on-page"]
 
 
+def test_title_behind_a_cover_and_a_contents_page_is_accepted(tmp_path):
+    """A chapter deposited with its book's front matter prints the title on page 3.
+
+    10.31234/osf.io/2tqep: a cover image, a contents list, then the citation
+    line carrying the title. Nothing on it prints the preprint's DOI.
+    """
+    cover_and_contents = ["Contents"] + ["1 INTRODUCTION 1"] * 103   # pages 1-2
+    path = _pdf(tmp_path, "chapter.pdf", cover_and_contents + [TITLE] + PROSE)
+    verdict = verify_pdf_identity(path, DOI, TITLE)
+    assert verdict.state == VERIFIED
+    assert verdict.signals == ["title-on-page"]
+
+
 def test_doi_broken_across_a_line_still_matches(tmp_path):
     """PDF text extraction wraps lines wherever the typesetter did."""
     path = _pdf(tmp_path, "wrapped.pdf", [TITLE, "https://doi.org/10.1111/", "all.14949"] + PROSE)

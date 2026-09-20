@@ -56,8 +56,15 @@ TRUNCATED = "truncated"        # this article, but only a fragment of it
 #: does not cite this paper, but the general shape -- a long document that
 #: happens to contain the DOI somewhere -- is exactly what an uncapped read
 #: would fall for.)
+#:
+#: The title gets the same three pages as the DOI. A book chapter or a
+#: publisher's sample deposited as a preprint opens with a cover image and a
+#: contents list, and prints its own title only on page 3: 10.31234/osf.io/2tqep
+#: is a cover with no text layer, then "Contents", then "This is a sample
+#: chapter from <title>". Read to two pages it was refused as a different
+#: document; read to three it verifies on the exact title.
 DOI_PAGES = 3
-TITLE_PAGES = 2
+TITLE_PAGES = 3
 
 #: How much of the title must survive on the page, summed across matching runs
 #: of at least a few characters -- deliberately gap-tolerant, so one substituted
