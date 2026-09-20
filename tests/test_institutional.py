@@ -279,7 +279,8 @@ class TestFetchEntryPoint:
         assert not result.ok
         assert result.reasons == []
 
-    def test_the_ebsco_failure_reason_reaches_the_caller(self, tmp_path):
+    def test_the_ebsco_failure_reason_reaches_the_caller(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(inst, "EBSCO_POLL_TIMEOUT", 0.0)
         options = inst.InstitutionalOptions(ebsco=True, ebsco_profile="s1234567")
         driver = FakeDriver({
             "/search/results": ("rid1", "NONE"),

@@ -28,7 +28,6 @@ from running the original of this code over a paywalled psychology corpus.
 """
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import os
 import re
@@ -38,7 +37,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
