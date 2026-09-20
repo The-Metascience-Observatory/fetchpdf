@@ -52,6 +52,12 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Elsevier full-text (TDM) retrieval.
 ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")
 
+# The EBSCOhost cluster id for --ebsco: the <cluster> in the
+# research.ebsco.com/c/<cluster>/... URL your library signs you in to. Not a
+# secret, but it names your institution, so it lives in .env.local rather than
+# on a command line. Only read when --ebsco is given.
+EBSCO_PROFILE = os.getenv("EBSCO_PROFILE")
+
 
 if not EMAIL:
     print("\033[93m⚠️  Warning: EMAIL not set in .env.local")

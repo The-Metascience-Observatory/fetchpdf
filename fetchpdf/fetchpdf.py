@@ -3890,6 +3890,45 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
 
 
 #-----------------------------------------------------------------------------------------
+@_timed("institutional")
+def _try_institutional(doi, save_path, resolved, options, verbose=False,
+                       _source_out=None):
+    """The opt-in subscription routes. A no-op unless a flag turned one on.
+
+    Returns the saved path, or None. Nothing here is imported, let alone run,
+    for a default invocation: `options` is None and the function returns on its
+    first line.
+    """
+    if options is None or not getattr(options, "enabled", False):
+        return None
+
+    from .retrieval import institutional as _institutional
+
+    def accept(path, url):
+        # The same identity check every other route answers to. A subscription
+        # is a reason to be allowed the file, not a reason to trust that the
+        # file is the right one.
+        return _accept_downloaded_pdf(path, resolved, url=url, verbose=verbose)
+
+    try:
+        result = _institutional.fetch(
+            resolved or doi, save_path, options, verbose=verbose,
+            accept=accept, on_download=_note_download_url,
+        )
+    except Exception as e:      # noqa: BLE001 - never fail a record on this
+        if verbose:
+            print(f"  Institutional access failed: {str(e)[:160]}")
+        return None
+
+    if result.ok:
+        _record_source(_source_out, result.source)
+        return result.path
+    if verbose:
+        for reason in result.reasons:
+            print(f"  Institutional access: {reason}")
+    return None
+
+
 def fetch_pdf(doi,
               save_path,
               email=None,
@@ -3905,6 +3944,7 @@ def fetch_pdf(doi,
               target_task="extraction",
               upgrade_existing=False,
               want_provenance=False,
+              institutional=None,
               _source_out=None,
               _paths_out=None,
               _visited=None,
@@ -3966,6 +4006,24 @@ def fetch_pdf(doi,
         return written
     if written:
         _record_source(_source_out, None)
+
+    # ---------------- Institutional access (opt-in) ------------------------
+    # Every open-access route has now been tried and returned nothing usable.
+    # If, and only if, the caller passed --cookies or --ebsco, try the
+    # subscription the user's library already pays for.
+    #
+    # This sits in fetch_pdf rather than in _fetch_pdf_chain on purpose.
+    # retrieval/sources/legacy_pdf.py re-enters _fetch_pdf_chain at T5 with a
+    # temporary save_path; a route placed inside the chain would fire on that
+    # re-entry too, driving a browser for a file that is unlinked seconds
+    # later. Placed here it runs once per record, after the whole chain, which
+    # is also exactly what the flags promise.
+    institutional_path = _try_institutional(
+        doi, save_path, resolved, institutional, verbose=verbose,
+        _source_out=_source_out,
+    )
+    if institutional_path:
+        return institutional_path
 
     # No acceptable PDF. Structured full text is a BETTER artifact than a PDF,
     # not a consolation prize -- it is tier 1 on the extraction ladder and the
@@ -4973,7 +5031,9 @@ def _fetch_pdf_chain(doi,
                 elsevier_crossref_message = m
             # A published paper's PsyArXiv/bioRxiv copy is a Crossref relation,
             # not Unpaywall's "best" location. Re-enter the chain on that DOI;
-            # _visited stops a cycle.
+            # _visited stops a cycle. `institutional` is deliberately not
+            # passed on: a preprint relation is open access by definition, so
+            # there is nothing here for a subscription route to unlock.
             for related in _crossref_related_dois(m, doi):
                 if verbose:
                     print(f"  Trying Crossref related DOI: {related}")
@@ -5579,7 +5639,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, institutional=None):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5684,12 +5744,13 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             download_related_unverified=download_related_unverified,
             draft_requests=draft_requests,
             make_subfolder=make_subfolder,
+            institutional=institutional,
         )
     finally:
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, institutional=None):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -6031,7 +6092,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             xml_html_only=xml_html_only, get_xml_or_html=get_xml_or_html,
             to_markdown=to_markdown,
             target_task=target_task, upgrade_existing=upgrade_existing,
-            want_provenance=want_provenance, _resolver=_resolver,
+            want_provenance=want_provenance, institutional=institutional,
+            _resolver=_resolver,
         )
 
         # Defensive guard: a downstream save site may have written the file
@@ -6931,6 +6993,51 @@ def main():
              "nothing leaves no folder behind. Ignored when an explicit output "
              "file path is given for a single download."
     )
+    # ---- Institutional access. Off unless one of these is given. ----------
+    parser.add_argument(
+        "--cookies",
+        metavar="FILE",
+        help="Institutional access: after the open-access chain has failed, try the "
+             "publisher's canonical PDF URL with cookies exported from your own "
+             "signed-in browser. FILE is a Netscape cookies.txt or a JSON export "
+             "(a bare list, or a Playwright storage_state). Off by default, and only "
+             "useful where your library holds a subscription -- see 'Institutional "
+             "access' in the README. The file is a credential: keep it out of version "
+             "control."
+    )
+    parser.add_argument(
+        "--ebsco",
+        action="store_true",
+        help="Institutional access: after the open-access chain and --cookies have "
+             "failed, search EBSCOhost by DOI in a signed-in Chrome and download the "
+             "PDF it hosts. Needs EBSCO_PROFILE in .env.local (your library's cluster "
+             "id) and a browser signed in through your institution. Off by default."
+    )
+    parser.add_argument(
+        "--ebsco-db",
+        metavar="CODE",
+        default=None,
+        help="Restrict the --ebsco search to one database code, e.g. 'psyh' for APA "
+             "PsycInfo. Default: every database your subscription covers."
+    )
+    parser.add_argument(
+        "--ebsco-driver",
+        choices=["playwright", "chrome-osascript"],
+        default="playwright",
+        help="Which browser --ebsco drives. 'playwright' (default) opens a dedicated "
+             "Chrome profile you sign into once with --institutional-login; it works "
+             "on Windows, Linux and macOS. 'chrome-osascript' drives the Chrome you "
+             "already have open and signed in, needs no second login, and is macOS "
+             "only -- it also needs Chrome's View > Developer > 'Allow JavaScript from "
+             "Apple Events' switched on."
+    )
+    parser.add_argument(
+        "--institutional-login",
+        action="store_true",
+        help="Open the dedicated Chrome profile used by --ebsco-driver playwright and "
+             "wait while you sign in through your institution. Downloads nothing; "
+             "prints the cluster id to put in EBSCO_PROFILE."
+    )
     parser.add_argument(
         "--on-existing",
         choices=[ON_EXISTING_ASK, ON_EXISTING_SKIP, ON_EXISTING_SUPPLEMENT],
@@ -6946,6 +7053,36 @@ def main():
 
     args = parser.parse_args()
 
+    # ---- Institutional access: validate, then build the one options object -
+    from ._env import EBSCO_PROFILE as _EBSCO_PROFILE
+    from .retrieval.institutional import (
+        InstitutionalOptions as _InstitutionalOptions,
+        institutional_login as _institutional_login,
+    )
+
+    if args.institutional_login:
+        raise SystemExit(_institutional_login(
+            driver_name=args.ebsco_driver, ebsco_profile=_EBSCO_PROFILE,
+        ))
+
+    if args.cookies and not os.path.isfile(args.cookies):
+        parser.error(f"--cookies: no such file: {args.cookies}")
+    if args.ebsco and not _EBSCO_PROFILE:
+        parser.error(
+            "--ebsco needs EBSCO_PROFILE in your environment or .env.local: your "
+            "library's cluster id, the <cluster> in the "
+            "research.ebsco.com/c/<cluster>/... URL you land on after signing in."
+        )
+    if args.ebsco_db and not args.ebsco:
+        parser.error("--ebsco-db only means something together with --ebsco.")
+
+    institutional_options = _InstitutionalOptions(
+        cookies_path=args.cookies,
+        ebsco=args.ebsco,
+        ebsco_db=args.ebsco_db,
+        driver=args.ebsco_driver,
+        ebsco_profile=_EBSCO_PROFILE,
+    )
 
     # Answered once, here, rather than per record. Every retrieved PDF is
     # checked against the record it was fetched for, so with no text engine
@@ -7152,6 +7289,7 @@ def main():
             download_related_unverified=args.download_related_unverified,
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
+            institutional=institutional_options,
         )
 
         success_count = sum(1 for r in results if r[1])
@@ -7238,6 +7376,7 @@ def main():
             download_related_unverified=args.download_related_unverified,
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
+            institutional=institutional_options,
         )
 
         success_count = sum(1 for r in results if r[1])
@@ -7325,6 +7464,7 @@ def main():
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
+            institutional=institutional_options,
         )
 
         # A separate call rather than a parameter on fetch_pdf, and that
