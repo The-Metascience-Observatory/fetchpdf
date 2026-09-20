@@ -1185,7 +1185,7 @@ fetchpdf papers.csv -o ./out --cookies ~/private/cookies.txt --ebsco
 ```
 
 Every PDF either route produces goes through the same identity check as every
-other source, so a subscription buys access, not trust.
+other source.
 
 ### Requirements
 
@@ -1248,6 +1248,8 @@ The EBSCO step holds a lock, because one browser has one front tab. With
 
 ### What the failures mean
 
+fetchpdf prints one of these per record it could not get this way:
+
 | Message | Meaning |
 |---|---|
 | `EBSCO has no record for this DOI` | Not indexed in the databases searched. Try without `--ebsco-db`, then give up on this route. |
@@ -1258,8 +1260,8 @@ The EBSCO step holds a lock, because one browser has one front tab. With
 
 ### What to expect
 
-These are the contributor's field observations from running the original of this
-code against a paywalled psychology corpus, not a benchmark:
+These are the contributor's field observations from runs against a paywalled
+psychology corpus, not a benchmark:
 
 - **Expect a low yield.** One batch of 62 paywalled papers produced 8 PDFs.
   Plan around partial coverage.
@@ -1271,6 +1273,8 @@ code against a paywalled psychology corpus, not a benchmark:
   which is why the EBSCO driver runs a visible browser and there is no
   automated tier here.
 - **One OpenAthens handshake per publisher**, as above.
+- **The osascript driver opens a tab per record and leaves it open**, so a
+  large batch fills the window. The Playwright driver keeps its own window.
 
 ### What this is, and what it is not
 
@@ -1283,8 +1287,9 @@ volume in the range a person plausibly reads.
 
 A cookie export is a **credential**. It is a live session for every site the
 browser was signed into, not only the publisher, and anyone holding the file can
-use them. Keep it outside the repository and outside any shared directory; the
-`.gitignore` here carries patterns for the usual names. The same goes for the
+use them. Keep it outside the repository and outside any shared directory. The
+`.gitignore` here carries patterns for the usual filenames, as a backstop for a
+file kept inside the tree by accident. The same goes for the
 Chrome profile the Playwright driver keeps.
 
 ## API Reference

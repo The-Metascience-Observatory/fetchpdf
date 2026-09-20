@@ -23,8 +23,8 @@ cookies that belong to the host being asked.
 **Headless browsers are flagged by Cloudflare at most publishers**, which is
 why the EBSCO route uses a visible browser and there is no automated tier.
 
-Contributed by Lukas Wallrich; the field observations quoted in the README come
-from running the original of this code over a paywalled psychology corpus.
+Contributed by Lukas Wallrich. The field observations quoted in the README come
+from runs against a paywalled psychology corpus.
 """
 from __future__ import annotations
 

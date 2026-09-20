@@ -3923,9 +3923,11 @@ def _try_institutional(doi, save_path, resolved, options, verbose=False,
     if result.ok:
         _record_source(_source_out, result.source)
         return result.path
-    if verbose:
-        for reason in result.reasons:
-            print(f"  Institutional access: {reason}")
+    # Printed whether or not --verbose is on. These reasons are the only way to
+    # tell "EBSCO does not index this" from "your cookies are stale", and a
+    # user who cannot tell them apart will retry the wrong one.
+    for reason in result.reasons:
+        print(f"  Institutional access: {reason}")
     return None
 
 
@@ -7054,35 +7056,40 @@ def main():
     args = parser.parse_args()
 
     # ---- Institutional access: validate, then build the one options object -
-    from ._env import EBSCO_PROFILE as _EBSCO_PROFILE
-    from .retrieval.institutional import (
-        InstitutionalOptions as _InstitutionalOptions,
-        institutional_login as _institutional_login,
-    )
-
-    if args.institutional_login:
-        raise SystemExit(_institutional_login(
-            driver_name=args.ebsco_driver, ebsco_profile=_EBSCO_PROFILE,
-        ))
-
-    if args.cookies and not os.path.isfile(args.cookies):
-        parser.error(f"--cookies: no such file: {args.cookies}")
-    if args.ebsco and not _EBSCO_PROFILE:
-        parser.error(
-            "--ebsco needs EBSCO_PROFILE in your environment or .env.local: your "
-            "library's cluster id, the <cluster> in the "
-            "research.ebsco.com/c/<cluster>/... URL you land on after signing in."
+    # None unless a flag asked for it, so a default run is exactly what it was
+    # before: the module is not imported and nothing downstream has an object
+    # to act on.
+    institutional_options = None
+    if args.cookies or args.ebsco or args.ebsco_db or args.institutional_login:
+        from ._env import EBSCO_PROFILE as _EBSCO_PROFILE
+        from .retrieval.institutional import (
+            InstitutionalOptions as _InstitutionalOptions,
+            institutional_login as _institutional_login,
         )
-    if args.ebsco_db and not args.ebsco:
-        parser.error("--ebsco-db only means something together with --ebsco.")
 
-    institutional_options = _InstitutionalOptions(
-        cookies_path=args.cookies,
-        ebsco=args.ebsco,
-        ebsco_db=args.ebsco_db,
-        driver=args.ebsco_driver,
-        ebsco_profile=_EBSCO_PROFILE,
-    )
+        if args.institutional_login:
+            raise SystemExit(_institutional_login(
+                driver_name=args.ebsco_driver, ebsco_profile=_EBSCO_PROFILE,
+            ))
+
+        if args.cookies and not os.path.isfile(args.cookies):
+            parser.error(f"--cookies: no such file: {args.cookies}")
+        if args.ebsco and not _EBSCO_PROFILE:
+            parser.error(
+                "--ebsco needs EBSCO_PROFILE in your environment or .env.local: "
+                "your library's cluster id, the <cluster> in the "
+                "research.ebsco.com/c/<cluster>/... URL you land on after signing in."
+            )
+        if args.ebsco_db and not args.ebsco:
+            parser.error("--ebsco-db only means something together with --ebsco.")
+
+        institutional_options = _InstitutionalOptions(
+            cookies_path=args.cookies,
+            ebsco=args.ebsco,
+            ebsco_db=args.ebsco_db,
+            driver=args.ebsco_driver,
+            ebsco_profile=_EBSCO_PROFILE,
+        )
 
     # Answered once, here, rather than per record. Every retrieved PDF is
     # checked against the record it was fetched for, so with no text engine
