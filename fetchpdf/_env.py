@@ -7,6 +7,7 @@ call time would silently degrade those callers to no-email API calls.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv, find_dotenv
@@ -54,10 +55,15 @@ ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")
 
 
 if not EMAIL:
-    print("\033[93m⚠️  Warning: EMAIL not set in .env.local")
-    print("   Please create .env.local with: EMAIL=your@email.com")
-    print("   This affects:")
-    print("     - Crossref API rate limits (10 req/s with email, 5 req/s without)")
-    print("     - Unpaywall API access (required)")
-    print("     - Europe PMC contact info (optional)")
-    print("   Continuing without email...\033[0m")
+    # stderr, not stdout: this fires at import, before any CLI code runs, so
+    # under `fetchpdf --json` it would otherwise land in the results stream
+    # ahead of the first JSON object and nothing downstream could parse it.
+    # A note about the caller's own configuration is not a result either way.
+    print("\033[93m⚠️  Warning: EMAIL not set in .env.local", file=sys.stderr)
+    print("   Please create .env.local with: EMAIL=your@email.com", file=sys.stderr)
+    print("   This affects:", file=sys.stderr)
+    print("     - Crossref API rate limits (10 req/s with email, 5 req/s without)",
+          file=sys.stderr)
+    print("     - Unpaywall API access (required)", file=sys.stderr)
+    print("     - Europe PMC contact info (optional)", file=sys.stderr)
+    print("   Continuing without email...\033[0m", file=sys.stderr)
