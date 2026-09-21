@@ -14,6 +14,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Format-Prioritized Retrieval](#format-prioritized-retrieval)
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
+- [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
 - [Troubleshooting](#troubleshooting)
@@ -1162,6 +1163,91 @@ GitHub URL is broken across a line by PDF layout — invisible to any regex —
 `haiku` recovered it on two runs out of four and returned nothing on the other
 two. Treat the agent as a second pass that sometimes finds what layer 1 missed,
 not as a guarantee.
+
+## Calling fetchpdf from a script or an agent
+
+`--json` puts the result on stdout as JSON and moves everything else — progress
+lines, warnings, tallies, the per-source table — to stderr. It never prompts.
+One object for a single identifier; for a batch, one object per record as
+[JSON Lines](https://jsonlines.org/), written as each record finishes rather
+than collected at the end.
+
+```bash
+fetchpdf "10.1371/journal.pone.0004215" -o ./pdfs --json
+```
+
+```json
+{"identifier": "10.1371/journal.pone.0004215", "doi": "10.1371/journal.pone.0004215", "success": true, "status": "downloaded", "path": "/abs/pdfs/10.1371--journal.pone.0004215.pdf", "format": "pdf", "source": "unpaywall", "identity": "verified", "reasons": [], "paths": []}
+```
+
+Run it a second time into the same directory and the record says so. Nothing
+was fetched and nothing re-read the file, so `identity` is null: this branch
+cannot tell a stale or wrong artifact from a good one, which is the fact
+`status` exists to report.
+
+```json
+{"identifier": "10.1371/journal.pone.0004215", "doi": "10.1371/journal.pone.0004215", "success": true, "status": "already_on_disk", "path": "/abs/pdfs/10.1371--journal.pone.0004215.pdf", "format": "pdf", "source": "existing", "identity": null, "reasons": [], "paths": []}
+```
+
+A PDF that was fetched and then refused by the identity check reports the
+refusal, not a bare failure:
+
+```json
+{"identifier": "10.31234/osf.io/2tqep", "doi": "10.31234/osf.io/2tqep", "success": false, "status": "failed", "path": null, "format": null, "source": null, "identity": "wrong_article", "reasons": ["PDF does not contain the requested DOI or the title \"A Student's Guide to Open Science: Using the Replication Crisis to Re…\""], "paths": []}
+```
+
+### Fields
+
+| Key | Type | Meaning |
+|---|---|---|
+| `identifier` | str | Exactly what you passed in — DOI, PMID or CSV cell. |
+| `doi` | str \| null | The DOI it resolved to; null when resolution failed. |
+| `success` | bool | True for `downloaded` and `already_on_disk`, false for `failed`. |
+| `status` | str | `downloaded`, `already_on_disk` or `failed`. See below. |
+| `path` | str \| null | Absolute path to the artifact, or null. |
+| `format` | str | From the artifact actually written: `pdf`, `xml`, `html`, `latex`, `landing`, `suppl`, `abstract`, `text`, `other`. **A successful record is not necessarily a PDF** — with the default XML fallback a record can succeed as `xml`. |
+| `source` | str \| null | The route that produced it (`unpaywall`, `core`, `osf`, …), `existing` for a skip, `structured_fallback` when no PDF was available and structured full text was saved instead. |
+| `identity` | str \| null | The verdict on the PDF **fetched in this run and reported in `path`**: `verified`, or a refusal — `wrong_article`, `truncated`, `unreadable`, `no_reference`, `no_engine`. Null when nothing was judged: an XML artifact, a file already on disk, or any run under the tiered flags (`--prioritize-xml`, `--get-xml-or-html`, `--xml-only`, `--xml-html-only`), where the engine validates per tier instead. A success with a non-`verified` identity is a PDF that was kept rather than deleted because the verdict could not be trusted — see [the identity check](#format-prioritized-retrieval) — not one that passed. |
+| `reasons` | list[str] | Why a record failed, or why a kept PDF could not be verified. Empty on a verified success. |
+| `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html`), empty otherwise. `path` is not repeated here. |
+
+The three statuses are separated because a caller has three different jobs to
+do: use the file, use the file knowing nothing re-checked it, or handle the
+failure. `success` alone cannot express the middle one.
+
+### Exit codes
+
+Unchanged by the flag.
+
+- Single identifier: `0` if an artifact was obtained (including one already on
+  disk), `1` if not.
+- Batch: `0` only if **every** record succeeded, `1` otherwise. Read the
+  per-record objects, not the exit code.
+- `2` for a contradictory combination of flags, and argparse's own `2` for a
+  usage error. Both write their message to stderr under `--json`.
+
+### Notes
+
+- Keys are stable and always present; a key whose value is unknown is null or
+  empty rather than absent.
+- stdout is the results channel only. Anything that is not a result — including
+  the `EMAIL not set` warning printed at import — goes to stderr.
+- ANSI colour is dropped from warnings when stderr is not a terminal. The
+  `EMAIL not set` warning keeps its colour: it prints at import, before any
+  flag has been read.
+- `--on-existing ask` never asks under `--json`; the run is treated as
+  non-interactive and skips, as it does in cron and pipes.
+- `--migrate-folders` and `--migrate-dry-run` report to stderr and write no
+  JSON: they rename directories and download nothing.
+- With `--abstract-if-no-pdf`, a record that yielded only an abstract is still
+  reported `failed` with a null `path`, matching what the batch counts as a
+  failure. The abstract is on disk as `{stem}_abstract.md`.
+
+```bash
+fetchpdf papers.csv -o ./pdfs -w 4 --json 2>run.log | while read -r line; do
+  jq -r 'select(.success) | .path' <<<"$line"
+done
+```
 
 ## API Reference
 
