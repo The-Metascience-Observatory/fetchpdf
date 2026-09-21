@@ -1,7 +1,9 @@
 import functools
 from typing import Optional
+import json
 import os
 import re
+import sys
 import time
 import difflib
 import html
@@ -674,6 +676,7 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
         page_range = _PAGES_MEMO.get((doi or "").strip().lower(), "")
     verdict = verify_pdf_identity(save_path, doi, title, pages=page_range,
                                   arxiv_id=arxiv_id_from_doi(doi))
+    _note_identity(save_path, verdict.state, verdict.reason)
     if verdict.ok:
         return True
 
@@ -735,6 +738,36 @@ def download_url_for(save_path: str) -> str:
         return ""
     with _DOWNLOAD_URL_LOCK:
         return _DOWNLOAD_URLS.get(os.path.abspath(save_path), "")
+
+
+#: Destination path -> (verdict state, reason) from the last identity check run
+#: against it in this process. Same shape and same reason as _DOWNLOAD_URLS: the
+#: verdict is decided deep inside `_accept_downloaded_pdf`, which reports it to
+#: its caller as a bare True/False, so by the time the CLI has a result the only
+#: surviving trace of "this PDF was the wrong article" is a printed warning.
+#: --json reads it back here rather than parsing that line.
+_IDENTITY_VERDICTS = {}
+_IDENTITY_LOCK = threading.Lock()
+
+
+def _note_identity(save_path: str, state: str, reason: str = "") -> None:
+    if not save_path:
+        return
+    with _IDENTITY_LOCK:
+        _IDENTITY_VERDICTS[os.path.abspath(save_path)] = (state, reason or "")
+
+
+def identity_for(save_path: str):
+    """(state, reason) of the last identity check on a path, or None.
+
+    None means nobody judged it: an .xml artifact, a file already on disk, or a
+    record whose chain never wrote a PDF at all. That is a different answer from
+    any of the pdf_identity states and is kept distinct.
+    """
+    if not save_path:
+        return None
+    with _IDENTITY_LOCK:
+        return _IDENTITY_VERDICTS.get(os.path.abspath(save_path))
 
 
 def _stat_key(path: str):
@@ -2181,6 +2214,11 @@ def _stdio_is_interactive() -> bool:
     """
     import sys
 
+    if _JSON_MODE:
+        # stdout is the results channel there and stderr may well be a
+        # terminal, so the test below would answer yes and put a question on
+        # screen that the calling script cannot see, let alone answer.
+        return False
     try:
         return bool(sys.stdin and sys.stdin.isatty()
                     and sys.stdout and sys.stdout.isatty())
@@ -2909,7 +2947,17 @@ def _extract_elsevier_pii_from_crossref(crossref_message: dict):
 
 
 def _print_yellow_warning(message: str):
-    """Print warning in yellow text for terminal users."""
+    """Print warning in yellow text for terminal users.
+
+    Plain text under --json when stderr is redirected to a file or a pipe:
+    those warnings are the caller's log, and escape codes in a log are noise a
+    reader has to strip. The check is only made in that mode, because the
+    stdout wrapper the parallel batch installs implements write and flush and
+    nothing else -- asking it whether it is a terminal is an AttributeError.
+    """
+    if _JSON_MODE and not (hasattr(sys.stderr, "isatty") and sys.stderr.isatty()):
+        print(message)
+        return
     print(f"\033[93m{message}\033[0m")
 
 
@@ -6861,7 +6909,117 @@ def _print_source_timing():
         )
 
 
-def main():
+#: True while --json is in force. Read by _stdio_is_interactive, which is the
+#: one gate between a piped run and a blocking prompt: under --json stdout is
+#: the results channel and stderr may still be a terminal, so the usual "are
+#: both ends a tty" test would answer yes and stop the run on a question its
+#: caller cannot see.
+_JSON_MODE = False
+
+#: Every value `status` can take. Three states, because a caller has three
+#: different jobs to do: use the file, use the file knowing nothing re-checked
+#: it, or handle the failure.
+JSON_STATUS_DOWNLOADED = "downloaded"        # fetched and written by this run
+JSON_STATUS_ALREADY_ON_DISK = "already_on_disk"  # found on disk, not re-verified
+JSON_STATUS_FAILED = "failed"                # nothing usable was written
+
+
+class _JsonWriter:
+    """One JSON object per record on the real stdout, flushed as it is written.
+
+    Holds the stdout the process started with, captured before the redirect
+    that sends every existing print() to stderr. Locked because batch workers
+    finish in whatever order they finish in; the lock is what keeps two records
+    from interleaving halfway through a line.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._lock = threading.Lock()
+
+    def write(self, record: dict) -> None:
+        line = json.dumps(record, ensure_ascii=False)
+        with self._lock:
+            self._stream.write(line + "\n")
+            self._stream.flush()
+
+
+def _json_record(identifier, doi=None, path=None,
+                 status=JSON_STATUS_FAILED, source=None,
+                 identity=None, reasons=None, extra_paths=None) -> dict:
+    """The --json object for one record. Key order is the documented order."""
+    return {
+        "identifier": str(identifier),
+        "doi": doi or None,
+        "success": status != JSON_STATUS_FAILED,
+        "status": status,
+        "path": os.path.abspath(path) if path else None,
+        "format": format_label(path) if path else None,
+        "source": source or None,
+        "identity": identity,
+        "reasons": list(reasons or []),
+        "paths": [os.path.abspath(p) for p in (extra_paths or [])],
+    }
+
+
+def _emit_json(json_out, identifier, doi, path, status, **fields) -> None:
+    """Write one record, or nothing at all when --json is off."""
+    if json_out is None:
+        return
+    json_out.write(_json_record(identifier, doi=doi, path=path,
+                                status=status, **fields))
+
+
+def _identity_and_reasons(result_path, save_path):
+    """(identity, reasons) for a finished record, from the recorded verdict.
+
+    Looked up on the artifact when there is one and on the intended path when
+    there is not -- a discarded PDF is deleted, so the path it occupied is the
+    only place its refusal can be found. A verified PDF carries no reasons; any
+    other state carries the verdict's own sentence, which covers both the
+    refusals and the kept-unverified case where the file exists and nobody
+    could check it.
+    """
+    from .retrieval.pdf_identity import VERIFIED
+
+    entry = (identity_for(result_path) if result_path else None) or identity_for(save_path)
+    if entry is None:
+        return None, []
+    state, reason = entry
+    if state == VERIFIED:
+        return state, []
+    return state, [reason] if reason else []
+
+
+def main(argv=None):
+    """Entry point. Splits off --json before argparse gets to print anything.
+
+    The flag turns stdout into the results channel, so the redirect has to be
+    installed before the first write to it -- and argparse writes there itself,
+    for --help and for a usage error. Hence a two-option pre-parse rather than
+    a check after parse_args(): parse_known_args ignores everything else and
+    accepts the same abbreviations the real parser does.
+    """
+    global _JSON_MODE
+    import argparse
+    import contextlib
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--json", action="store_true")
+    if not pre.parse_known_args(argv)[0].json:
+        return _main(argv)
+
+    json_out = _JsonWriter(sys.stdout)
+    _JSON_MODE = True
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            return _main(argv, json_out)
+    finally:
+        _JSON_MODE = False
+
+
+def _main(argv=None, json_out=None):
     """Command-line interface for fetchpdf."""
     import argparse
 
@@ -6950,6 +7108,16 @@ def main():
         "--verbose", "-v",
         action="store_true",
         help="Print detailed progress"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable results on stdout: one JSON object for a single "
+             "identifier, one per record as JSON Lines for a batch, written as "
+             "each record finishes. Everything the CLI normally prints -- "
+             "progress, warnings, tallies -- goes to stderr instead, so stdout "
+             "holds nothing but JSON. Never prompts. Exit codes are unchanged. "
+             "For scripts and agents that want a path or a failure, not prose."
     )
     parser.add_argument(
         "--delay",
@@ -7248,7 +7416,7 @@ def main():
              "not a terminal -- pipes, cron and CI never block."
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
 
     # Answered once, here, rather than per record. Every retrieved PDF is
@@ -7579,15 +7747,21 @@ def main():
             ab_path = os.path.join(record_dir, f"{safe_doi}_abstract.md")
             if os.path.exists(ab_path):
                 print(f"⏭️  Abstract already exists: {ab_path}")
+                _emit_json(json_out, args.doi, resolved_identifier, ab_path,
+                           JSON_STATUS_ALREADY_ON_DISK, source="existing")
                 return 0
             result = save_abstract_markdown(display_id, record_dir, email=args.email, verbose=args.verbose)
             if result:
                 print(f"\n📄 Abstract saved to {result}")
+                _emit_json(json_out, args.doi, resolved_identifier, result,
+                           JSON_STATUS_DOWNLOADED, source="abstract")
                 return 0
             else:
                 if args.make_subfolder:
                     _prune_empty_record_dir(record_dir)
                 print(f"\n❌ No abstract found for {display_id}")
+                _emit_json(json_out, args.doi, resolved_identifier, None,
+                           JSON_STATUS_FAILED, reasons=["no abstract found"])
                 return 1
 
         # Set only when --make-subfolder actually created a directory, so a run
@@ -7615,9 +7789,22 @@ def main():
             save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
             print(f"💾 No output path provided; using: {save_path}")
 
+        # Allocated the way the batch worker allocates them, and for the same
+        # reason: which source produced the file, and which artifacts a tiered
+        # run wrote, are facts the chain already has and nothing else can
+        # recover afterwards. Passing them changes no output -- fetch_pdf reads
+        # _source_out only to skip re-verifying a file it did not fetch, which
+        # the on-disk snapshot beside it already skips.
+        _tiered = bool(args.prioritize_xml or args.xml_only
+                       or args.xml_html_only or args.get_xml_or_html)
+        source_out = [None]
+        paths_out = [] if _tiered else None
+
         result = fetch_pdf(
             doi=resolved_identifier or args.doi,
             save_path=save_path,
+            _source_out=source_out,
+            _paths_out=paths_out,
             email=args.email,
             verbose=args.verbose,
             delay=args.delay,
@@ -7718,12 +7905,30 @@ def main():
                 except Exception as e:
                     print(f"\n🖼️  image extraction failed: {str(e)[:200]}")
 
+        identity, reasons = _identity_and_reasons(result, save_path)
         if result:
             print(f"\n✅ Successfully downloaded to {result}")
+            # "existing" is the chain's own word for "this was already here and
+            # nothing re-read it", and it is the whole reason status is not a
+            # bare boolean: the prose line above says "Successfully downloaded"
+            # either way. Such a record carries identity null, because the
+            # skip branch runs no identity check to report.
+            on_disk = source_out[0] == "existing"
+            # paths_out's last element is the tiered goal summary, not a path.
+            others = [p for p in (paths_out or [])[:-1] if p != result]
+            _emit_json(
+                json_out, args.doi, resolved_identifier, result,
+                JSON_STATUS_ALREADY_ON_DISK if on_disk else JSON_STATUS_DOWNLOADED,
+                source=source_out[0], identity=identity, reasons=reasons,
+                extra_paths=others,
+            )
             return 0
         else:
             _prune_empty_record_dir(made_record_dir)
             print(f"\n❌ Failed to download PDF for {args.doi}")
+            _emit_json(json_out, args.doi, resolved_identifier, None,
+                       JSON_STATUS_FAILED, identity=identity,
+                       reasons=reasons or ["no source produced a usable artifact"])
             return 1
 
     else:
