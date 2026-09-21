@@ -5877,7 +5877,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5983,12 +5983,13 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             download_related_unverified=download_related_unverified,
             draft_requests=draft_requests,
             make_subfolder=make_subfolder,
+            json_out=json_out,
         )
     finally:
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -6310,15 +6311,20 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             if os.path.exists(ab_path):
                 print(f"⏭️  Skipping {display_id} (abstract already exists)")
                 _tally(ab_path)  # counted, but the line above stays terse
+                _record_json(idx, raw_identifier, canonical_doi, ab_path,
+                             JSON_STATUS_ALREADY_ON_DISK, source="existing")
                 if track_source:
                     return (display_id, True, ab_path, "existing")
                 return (display_id, True, ab_path)
+            reason = "no abstract found"
             try:
                 from .fetch_abstract_from_doi import save_abstract_markdown
                 saved = save_abstract_markdown(display_id, record_dir, email=email, verbose=verbose)
                 if saved:
                     print(f"📄 {display_id} - abstract saved")
                     _tally(saved)
+                    _record_json(idx, raw_identifier, canonical_doi, saved,
+                                 JSON_STATUS_DOWNLOADED, source="abstract")
                     if track_source:
                         return (display_id, True, saved, "abstract")
                     return (display_id, True, saved)
@@ -6326,6 +6332,9 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                     print(f"❌ {display_id} - no abstract found")
             except Exception as e:
                 print(f"❌ {display_id} - abstract error: {e}")
+                reason = f"abstract error: {str(e)[:150]}"
+            _record_json(idx, raw_identifier, canonical_doi, None,
+                         JSON_STATUS_FAILED, reasons=[reason])
             if track_source:
                 return (display_id, False, None, None)
             return (display_id, False, None)
@@ -6356,6 +6365,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             _pull_si(display_id, raw_identifier, canonical_doi, save_path)
             _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
             _pull_images(existing_file)
+            # Nothing was fetched and nothing re-read the file, so identity
+            # stays null: this branch cannot tell a stale artifact from a good
+            # one, and the status is what says so.
+            _record_json(idx, raw_identifier, canonical_doi, existing_file,
+                         JSON_STATUS_ALREADY_ON_DISK, source="existing")
             if track_source:
                 return (display_id, True, existing_file, "existing")
             return (display_id, True, existing_file)
@@ -6460,6 +6474,17 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                 if verbose:
                     print(f"  failed_dois.csv append error: {_e}")
 
+        identity, reasons = _identity_and_reasons(result, save_path)
+        _record_json(
+            idx, raw_identifier, canonical_doi, result if success else None,
+            JSON_STATUS_DOWNLOADED if success else JSON_STATUS_FAILED,
+            source=source_out[0] if success else None,
+            identity=identity,
+            reasons=reasons if (reasons or success)
+            else ["no source produced a usable artifact"],
+            # paths_out's last element is the tiered goal summary, not a path.
+            extra_paths=[p for p in (paths_out or [])[:-1] if p != result],
+        )
         if track_source:
             return (display_id, success, result if success else None, source_out[0] if success else None)
         return (display_id, success, result if success else None)
@@ -6595,6 +6620,30 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     source_entries_written = 0
     completed_count = 0
 
+    # --json, one line per input row. The worker fills its own slot and the
+    # collection loops below are the only writers: a record abandoned at
+    # --record-timeout is still running in a daemon thread, and letting that
+    # thread write would mean a half-written line arriving on stdout during
+    # interpreter shutdown. Each slot is written by exactly one worker and read
+    # only after its future has been collected, so it needs no lock of its own.
+    json_records = [None] * len(dois)
+
+    def _record_json(idx, identifier, doi, path, status, **fields):
+        """Called by the worker that owns row `idx`; writes nothing itself."""
+        if json_out is None:
+            return
+        json_records[idx] = _json_record(identifier, doi=doi, path=path,
+                                         status=status, **fields)
+
+    def _emit_record(idx, identifier, **fields):
+        """Write the worker's record for a row, or a stand-in when it has none."""
+        if json_out is None:
+            return
+        record = json_records[idx]
+        if record is None:
+            record = _json_record(identifier, status=JSON_STATUS_FAILED, **fields)
+        json_out.write(record)
+
     if workers <= 1:
         # Sequential processing - no need for prefix wrapper. The heartbeat still
         # runs: a single-threaded run can stall just as easily, and with no other
@@ -6606,6 +6655,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         try:
             for idx, doi in enumerate(dois):
                 r = download_one(doi, idx, total)
+                _emit_record(idx, str(doi).strip())
                 results.append(r)
                 if track_source and len(r) >= 4 and r[1] and r[2] and r[3] and r[3] != "existing":
                     source_entries.append((r[2], r[3]))
@@ -6672,6 +6722,13 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                     print(f"❌ {doi_label} - worker error: {type(e).__name__}: {e}")
                     _record_failure(doi_label, "worker_error", str(e)[:200])
                     r = (doi_label, False, None, None) if track_source else (doi_label, False, None)
+                    # The worker raised before it could fill its slot, so the
+                    # stand-in record carries the exception instead.
+                    json_records[idx] = None
+                    _emit_record(idx, doi_label,
+                                 reasons=[f"worker error: {type(e).__name__}: {str(e)[:150]}"])
+                else:
+                    _emit_record(idx, doi_label)
                 ordered_results[idx] = r
                 if track_source and len(r) >= 4 and r[1] and r[2] and r[3] and r[3] != "existing":
                     source_entries.append((r[2], r[3]))
@@ -6707,6 +6764,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                         ordered_results[idx] = r
                         if track_source and len(r) >= 4 and r[1] and r[2] and r[3] and r[3] != "existing":
                             source_entries.append((r[2], r[3]))
+                        _emit_record(idx, doi_label)
                         continue
                     except FuturesTimeout:
                         waited = time.monotonic() - started
@@ -6714,13 +6772,20 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                               f"{_format_elapsed(waited)} (record timeout)")
                         _record_failure(doi_label, "timeout",
                                         f"exceeded {int(record_timeout)}s")
+                        json_reason = f"record timeout: exceeded {int(record_timeout)}s"
                     except Exception as e:
                         print(f"❌ {doi_label} - worker error: {type(e).__name__}: {e}")
                         _record_failure(doi_label, "worker_error", str(e)[:200])
+                        json_reason = f"worker error: {type(e).__name__}: {str(e)[:150]}"
                     ordered_results[idx] = (
                         (doi_label, False, None, None) if track_source
                         else (doi_label, False, None)
                     )
+                    # The abandoned worker is still running and may yet fill its
+                    # slot. Emitted from here regardless, so the stream holds one
+                    # line per input row and holds it before the process exits.
+                    json_records[idx] = None
+                    _emit_record(idx, doi_label, reasons=[json_reason])
 
             results = [
                 r if r is not None else (
@@ -6975,14 +7040,17 @@ def _identity_and_reasons(result_path, save_path):
 
     Looked up on the artifact when there is one and on the intended path when
     there is not -- a discarded PDF is deleted, so the path it occupied is the
-    only place its refusal can be found. A verified PDF carries no reasons; any
-    other state carries the verdict's own sentence, which covers both the
-    refusals and the kept-unverified case where the file exists and nobody
-    could check it.
+    only place its refusal can be found. Never on both: a record whose PDF was
+    refused and which then succeeded as structured full text would inherit the
+    deleted PDF's refusal and report an .xml artifact as the wrong article.
+
+    A verified PDF carries no reasons; any other state carries the verdict's
+    own sentence, which covers both the refusals and the kept-unverified case
+    where the file exists and nobody could check it.
     """
     from .retrieval.pdf_identity import VERIFIED
 
-    entry = (identity_for(result_path) if result_path else None) or identity_for(save_path)
+    entry = identity_for(result_path) if result_path else identity_for(save_path)
     if entry is None:
         return None, []
     state, reason = entry
@@ -7625,6 +7693,7 @@ def _main(argv=None, json_out=None):
             download_related_unverified=args.download_related_unverified,
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
+            json_out=json_out,
         )
 
         success_count = sum(1 for r in results if r[1])
@@ -7712,6 +7781,7 @@ def _main(argv=None, json_out=None):
             download_related_unverified=args.download_related_unverified,
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
+            json_out=json_out,
         )
 
         success_count = sum(1 for r in results if r[1])
