@@ -90,7 +90,7 @@ def test_auth_or_quota_failure_stops_later_records(monkeypatch, status, capsys):
 
 
 @pytest.mark.parametrize("reply", [
-    response({}, 500), response({"error": "private-test-key"}),
+    response({}, 500),
     response([]), response({"organic_results": {"unexpected": True}}),
     requests.Timeout("https://serpapi.com/search.json?api_key=private-test-key"),
     ValueError("private-test-key"),
@@ -101,6 +101,80 @@ def test_errors_fail_closed_without_leaking_key(monkeypatch, reply, capsys):
     assert get.call_count == 1
     assert "private-test-key" not in capsys.readouterr().out
     assert not fpd._SERPAPI_SESSION_DISABLED
+
+
+def test_no_results_for_the_doi_still_runs_the_title_search(monkeypatch):
+    """SerpApi reports an empty result set as `error` on a 200. That used to end
+    the attempt after the weaker query, so the title search never ran."""
+    get = setup_search(
+        monkeypatch,
+        response({"error": "Google hasn't returned any results for this query."}),
+        response({"organic_results": [hit([{"file_format": "PDF", "link": PDF}])]}),
+    )
+    download = Mock(return_value=True)
+    monkeypatch.setattr(fpd, "_try_oa_location_urls", download)
+    assert fpd.try_serpapi_scholar_fallback(DOI, "out.pdf")
+    assert get.call_count == 2
+    assert get.call_args.kwargs["params"]["q"] == f'"{TITLE}"'
+    assert not fpd._SERPAPI_SESSION_DISABLED
+
+
+def test_error_text_is_never_echoed(monkeypatch, capsys):
+    get = setup_search(monkeypatch, response({"error": "private-test-key"}),
+                       response({"organic_results": []}))
+    assert not fpd.try_serpapi_scholar_fallback(DOI, "out.pdf", True)
+    assert get.call_count == 2
+    assert "private-test-key" not in capsys.readouterr().out
+    assert not fpd._SERPAPI_SESSION_DISABLED
+
+
+@pytest.mark.parametrize("error", [
+    "Invalid API key. Your API key should be here: https://serpapi.com/manage-api-key",
+    "Your account has run out of searches.",
+])
+def test_a_bad_key_or_spent_plan_stops_the_source_for_the_run(monkeypatch, error, capsys):
+    get = setup_search(monkeypatch, response({"error": error}))
+    assert not fpd.try_serpapi_scholar_fallback(DOI, "out.pdf", True)
+    assert not fpd.try_serpapi_scholar_fallback(DOI, "out.pdf", True)
+    assert get.call_count == 1
+    assert fpd._SERPAPI_SESSION_DISABLED
+    assert "private-test-key" not in capsys.readouterr().out
+
+
+def test_short_title_is_widened_with_the_crossref_subtitle(monkeypatch):
+    short = "Social class and prosocial behavior"
+    monkeypatch.setattr(fpd, "_title_for", lambda *a, **kw: short)
+    monkeypatch.setattr(fpd, "_subtitle_for", lambda *a, **kw: "Evidence from ten countries")
+    get = setup_search(monkeypatch, response({"organic_results": []}),
+                       response({"organic_results": []}))
+    assert not fpd.try_serpapi_scholar_fallback(DOI, "out.pdf")
+    assert get.call_args.kwargs["params"]["q"] == f'"{short}" Evidence from ten countries'
+
+
+def test_long_title_is_not_widened(monkeypatch):
+    monkeypatch.setattr(fpd, "_subtitle_for", Mock(side_effect=AssertionError("no lookup")))
+    assert fpd._scholar_title_query(DOI, TITLE) == f'"{TITLE}"'
+
+
+def test_subtitle_comes_from_the_memo_without_a_request(monkeypatch):
+    doi = "10.1234/subtitle-memo"
+    monkeypatch.setattr(fpd, "_SUBTITLE_MEMO", {})
+    monkeypatch.setattr(fpd, "_crossref_get", Mock(side_effect=AssertionError("no request")))
+    fpd._remember_title(doi, "A title", subtitle=["The subtitle"])
+    assert fpd._subtitle_for(doi) == "The subtitle"
+    fpd._remember_title("10.1234/none", "A title", subtitle=[])
+    assert fpd._subtitle_for("10.1234/none") == ""
+
+
+def test_an_already_rejected_pdf_is_not_downloaded_again(monkeypatch):
+    doi = "10.1234/rejected-before"
+    monkeypatch.setattr(fpd, "_REJECTED_URLS", fpd.collections.defaultdict(set))
+    fpd._note_rejected(doi, PDF)
+    download = Mock(return_value=False)
+    monkeypatch.setattr(fpd, "try_download", download)
+    monkeypatch.setattr(fpd, "try_landing_page_pdf_fallback", lambda *a, **kw: False)
+    assert not fpd._try_oa_location_urls(doi, [(PDF, True)], "out.pdf")
+    download.assert_not_called()
 
 
 def test_wrong_pdf_is_rejected_and_next_copy_is_tried(monkeypatch, tmp_path):

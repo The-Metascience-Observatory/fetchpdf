@@ -228,6 +228,11 @@ def _note_news_item(doi: str) -> bool:
 #: only as a last resort by asking for one DOI on its own.
 _TITLE_MEMO = {}
 _PAGES_MEMO = {}
+#: Crossref files a subtitle in its own field, so `title` for many SAGE and APA
+#: records is only the first half of what the paper is called. Kept apart from
+#: the title because the identity check must not start demanding it. "" means
+#: Crossref answered and there is none; absent means nobody asked.
+_SUBTITLE_MEMO = {}
 #: The year a record was issued, per DOI, from the same Crossref answers. Read
 #: by the grey last resorts to skip Sci-Hub for papers it cannot have: measured
 #: 2026-09-02 over ~550 attempts, papers issued 2023 or later hit 2 times in 93.
@@ -412,7 +417,12 @@ def _issued_year(message) -> Optional[int]:
     return None
 
 
-def _remember_title(doi: str, title, page_range=None, year=None) -> None:
+def _remember_title(doi: str, title, page_range=None, year=None, subtitle=None) -> None:
+    """Memoise a record's title (and page range, year, subtitle when given).
+
+    `subtitle=None` means the caller did not ask Crossref for it; a list, even
+    an empty one, is Crossref's answer and is remembered as such.
+    """
     if not doi:
         return
     key = doi.strip().lower()
@@ -420,6 +430,10 @@ def _remember_title(doi: str, title, page_range=None, year=None) -> None:
         title = title[0] if title else ""
     title = str(title or "").strip()
     with _TITLE_LOCK:
+        if subtitle is not None:
+            if isinstance(subtitle, (list, tuple)):
+                subtitle = subtitle[0] if subtitle else ""
+            _SUBTITLE_MEMO.setdefault(key, str(subtitle or "").strip())
         if title:
             _TITLE_MEMO.setdefault(key, title)
         if page_range:
@@ -458,7 +472,7 @@ def prime_record_metadata(dois, verbose=False) -> int:
         message = _crossref_get(
             "https://api.crossref.org/works",
             params={"filter": ",".join("doi:" + d for d in chunk),
-                    "select": "DOI,title,page,issued", "rows": len(chunk)},
+                    "select": "DOI,title,subtitle,page,issued", "rows": len(chunk)},
             timeout=45, verbose=verbose,
         )
         if message is None:
@@ -472,7 +486,8 @@ def prime_record_metadata(dois, verbose=False) -> int:
             answered.add(doi)
             titles = item.get("title") or []
             if titles:
-                _remember_title(doi, titles[0], item.get("page"), _issued_year(item))
+                _remember_title(doi, titles[0], item.get("page"), _issued_year(item),
+                                subtitle=item.get("subtitle") or [])
                 filled += 1
         # Crossref answered, but "not in Crossref" is not "has no title" -- it
         # is most often a DataCite DOI. Left unmemoised so `_title_for` asks
@@ -508,7 +523,8 @@ def _title_for(doi: str, verbose=False) -> str:
         return ""
     titles = message.get("title") or []
     if titles:
-        _remember_title(key, titles[0], message.get("page"), _issued_year(message))
+        _remember_title(key, titles[0], message.get("page"), _issued_year(message),
+                        subtitle=message.get("subtitle") or [])
         return str(titles[0])
 
     # Crossref answered and has no such record. That is not the end of the
@@ -525,6 +541,27 @@ def _title_for(doi: str, verbose=False) -> str:
         _TITLE_MEMO.setdefault(key, "")
     return ""
 
+
+
+def _subtitle_for(doi: str, verbose=False) -> str:
+    """This DOI's Crossref subtitle: from the memo, else one Crossref call, else "".
+
+    Usually free: the batch primer and `_title_for` both memoise it from the
+    answer they already fetched. A failed lookup is not cached.
+    """
+    if not doi:
+        return ""
+    key = doi.strip().lower()
+    with _TITLE_LOCK:
+        if key in _SUBTITLE_MEMO:
+            return _SUBTITLE_MEMO[key]
+    message = _crossref_get(f"https://api.crossref.org/works/{key}", verbose=verbose)
+    if message is None:
+        return ""
+    subtitles = message.get("subtitle") or []
+    with _TITLE_LOCK:
+        _SUBTITLE_MEMO.setdefault(key, str(subtitles[0]).strip() if subtitles else "")
+        return _SUBTITLE_MEMO[key]
 
 #: URLs already downloaded and refused for a given DOI, so the same file is not
 #: fetched and judged again. try_landing_page_pdf_fallback runs from nine call
@@ -3086,7 +3123,7 @@ def _try_oa_location_urls(doi, candidates, save_path, verbose=False) -> bool:
             osf_match.group(1), save_path, verbose, doi=doi
         ):
             return True
-        if is_direct and direct_left > 0:
+        if is_direct and direct_left > 0 and not _already_rejected(doi, url):
             direct_left -= 1
             if try_download(url, save_path, verbose) and _accept_downloaded_pdf(
                 save_path, doi, url, verbose
@@ -3667,6 +3704,36 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
         return False
 
 
+#: A title shorter than this is a phrase, not an identifier, and Scholar ranks
+#: somebody else's paper first. Measured by the PR #2 author, 2026-09-20: the
+#: title Crossref holds for 10.1177/1948550616659120, "Social class and
+#: prosocial behavior", returned four other papers' PDFs in the top five; with
+#: the subtitle added, the article's own PDF came first.
+_SCHOLAR_QUERY_MIN = 60
+
+#: Substrings of SerpApi's `error` text that mean no later search can succeed
+#: either: a bad key, or a plan with no searches left.
+_SERPAPI_FATAL_ERRORS = ("api key", "run out", "out of searches", "exhausted")
+
+
+def _serpapi_error_is_fatal(error: str) -> bool:
+    lowered = (error or "").lower()
+    return any(marker in lowered for marker in _SERPAPI_FATAL_ERRORS)
+
+
+def _scholar_title_query(doi: str, title: str, verbose=False) -> str:
+    """The quoted title, with the Crossref subtitle added when the title is short.
+
+    The title stays a quoted phrase; the subtitle follows unquoted, so Scholar
+    ranks by it without requiring its exact punctuation.
+    """
+    base = '"' + html.unescape(title).replace('"', ' ').strip() + '"'
+    if len(title) >= _SCHOLAR_QUERY_MIN:
+        return base
+    subtitle = html.unescape(_subtitle_for(doi, verbose=verbose)).replace('"', ' ').strip()
+    return f"{base} {subtitle}" if subtitle else base
+
+
 @_timed("serpapi_scholar")
 def try_serpapi_scholar_fallback(doi: str, save_path: str, verbose=False):
     """Search Scholar only after other sources fail; at most two API calls.
@@ -3685,7 +3752,7 @@ def try_serpapi_scholar_fallback(doi: str, save_path: str, verbose=False):
     title = _title_for(doi, verbose=verbose)
     queries = [f'"{doi}"']
     if title:
-        queries.append('"' + html.unescape(title).replace('"', ' ') + '"')
+        queries.append(_scholar_title_query(doi, title, verbose=verbose))
     seen = set()
     for query in queries:
         if _SERPAPI_SESSION_DISABLED:
@@ -3712,10 +3779,29 @@ def try_serpapi_scholar_fallback(doi: str, save_path: str, verbose=False):
                     print(f"  SerpApi: HTTP {response.status_code}")
                 return False
             data = response.json()
-            if not isinstance(data, dict) or data.get("error"):
+            if not isinstance(data, dict):
                 if verbose:
                     print("  SerpApi: search failed")
                 return False
+            error = str(data.get("error") or "")
+            if error:
+                if _serpapi_error_is_fatal(error):
+                    with _SERPAPI_SESSION_LOCK:
+                        if not _SERPAPI_SESSION_DISABLED:
+                            _SERPAPI_SESSION_DISABLED = True
+                            _print_yellow_warning(
+                                "SerpApi disabled for session: the API reported a key "
+                                "or quota problem. Check SERPAPI_API_KEY and your account."
+                            )
+                    return False
+                # SerpApi reports "Google returned nothing for this query" as an
+                # error on a 200. For the DOI query that is the common case, and
+                # the title query is the one likely to find the paper -- so move
+                # on rather than end the attempt. The text is never printed: it
+                # is the API's own body, and the policy here is not to echo it.
+                if verbose:
+                    print("  SerpApi: no usable results for this query")
+                continue
             results = data.get("organic_results") or []
             if not isinstance(results, list):
                 return False
