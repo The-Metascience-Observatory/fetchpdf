@@ -757,6 +757,19 @@ def _note_identity(save_path: str, state: str, reason: str = "") -> None:
         _IDENTITY_VERDICTS[os.path.abspath(save_path)] = (state, reason or "")
 
 
+def _forget_identity(*paths) -> None:
+    """Drop any verdict recorded against these paths, before a record runs.
+
+    The store is process-wide, so without this a library caller -- or a CSV
+    that lists the same DOI twice -- could be told the verdict from an earlier
+    call on the same path.
+    """
+    with _IDENTITY_LOCK:
+        for path in paths:
+            if path:
+                _IDENTITY_VERDICTS.pop(os.path.abspath(path), None)
+
+
 def identity_for(save_path: str):
     """(state, reason) of the last identity check on a path, or None.
 
@@ -6108,6 +6121,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     #: than merged into _si_statuses: the two carry different fields, and a
     #: reader of either dict should not have to ask which pass wrote a row.
     _figure_statuses = {}
+    #: display_id -> ImagesResult, read only by --json.
+    _image_statuses = {}
 
     def _si_http():
         client = getattr(_si_local, "client", None)
@@ -6118,7 +6133,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             _si_local.client = client
         return client
 
-    def _pull_images(path):
+    def _pull_images(path, display_id=None):
         """Embedded-image dump for one PDF. Never changes the verdict.
 
         Same reason as _pull_si: a missing PyMuPDF or a corrupt PDF must not
@@ -6136,7 +6151,9 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             return
         try:
             from .retrieval.extract_images import extract_images as _xi
-            _xi(pdf, verbose=verbose)
+            result = _xi(pdf, verbose=verbose)
+            if display_id is not None:
+                _image_statuses[display_id] = result
         except Exception as e:
             if verbose:
                 print(f"  images: {os.path.basename(pdf)} failed ({e})")
@@ -6364,17 +6381,19 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             # branch, so a hook inside it would do nothing here.
             _pull_si(display_id, raw_identifier, canonical_doi, save_path)
             _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
-            _pull_images(existing_file)
+            _pull_images(existing_file, display_id)
             # Nothing was fetched and nothing re-read the file, so identity
             # stays null: this branch cannot tell a stale artifact from a good
             # one, and the status is what says so.
             _record_json(idx, raw_identifier, canonical_doi, existing_file,
-                         JSON_STATUS_ALREADY_ON_DISK, source="existing")
+                         JSON_STATUS_ALREADY_ON_DISK, source="existing",
+                         display_id=display_id)
             if track_source:
                 return (display_id, True, existing_file, "existing")
             return (display_id, True, existing_file)
 
         print(f"📥 Downloading {display_id}...")
+        _forget_identity(save_path)
         result = fetch_pdf(
             canonical_doi or raw_identifier, save_path, email, verbose, delay,
             allow_xml_fallback=allow_xml_fallback,
@@ -6418,7 +6437,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # corrupt the format composition tally.
         _pull_si(display_id, raw_identifier, canonical_doi, save_path)
         _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
-        _pull_images(result or save_path)
+        _pull_images(result or save_path, display_id)
 
         if success:
             # A --get-xml-or-html record has two artifacts. Both are counted, and
@@ -6475,9 +6494,18 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                     print(f"  failed_dois.csv append error: {_e}")
 
         identity, reasons = _identity_and_reasons(result, save_path)
+        # The tiered engine hands back a file it found on disk as source
+        # "existing" (--upgrade-existing, --get-xml-or-html): nothing was
+        # fetched, so it is not "downloaded" -- the same rule as single-DOI.
+        if not success:
+            json_status = JSON_STATUS_FAILED
+        elif source_out[0] == "existing":
+            json_status = JSON_STATUS_ALREADY_ON_DISK
+        else:
+            json_status = JSON_STATUS_DOWNLOADED
         _record_json(
             idx, raw_identifier, canonical_doi, result if success else None,
-            JSON_STATUS_DOWNLOADED if success else JSON_STATUS_FAILED,
+            json_status, display_id=display_id,
             source=source_out[0] if success else None,
             identity=identity,
             reasons=reasons if (reasons or success)
@@ -6628,10 +6656,17 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     # only after its future has been collected, so it needs no lock of its own.
     json_records = [None] * len(dois)
 
-    def _record_json(idx, identifier, doi, path, status, **fields):
+    def _record_json(idx, identifier, doi, path, status, display_id=None, **fields):
         """Called by the worker that owns row `idx`; writes nothing itself."""
         if json_out is None:
             return
+        if display_id is not None:
+            fields.setdefault("supplementary", _supplementary_json(
+                _si_statuses.get(display_id), pull_supplementary))
+            fields.setdefault("figures", _figures_json(
+                _figure_statuses.get(display_id), pull_figures))
+            fields.setdefault("images", _images_json(
+                _image_statuses.get(display_id), extract_images))
         json_records[idx] = _json_record(identifier, doi=doi, path=path,
                                          status=status, **fields)
 
@@ -7001,19 +7036,33 @@ class _JsonWriter:
     def __init__(self, stream):
         self._stream = stream
         self._lock = threading.Lock()
+        self.count = 0
+        #: Set by the single-identifier branch, so a crash there still yields
+        #: one `failed` object rather than an empty stdout.
+        self.pending_identifier = None
 
     def write(self, record: dict) -> None:
-        line = json.dumps(record, ensure_ascii=False)
+        # ASCII-escaped: a non-UTF-8 stdout (Windows consoles, some pipes)
+        # cannot raise UnicodeEncodeError on a title or path, and every JSON
+        # parser reads the escapes back to the same text.
+        line = json.dumps(record, ensure_ascii=True)
         with self._lock:
             self._stream.write(line + "\n")
             self._stream.flush()
+            self.count += 1
 
 
 def _json_record(identifier, doi=None, path=None,
                  status=JSON_STATUS_FAILED, source=None,
-                 identity=None, reasons=None, extra_paths=None) -> dict:
-    """The --json object for one record. Key order is the documented order."""
-    return {
+                 identity=None, reasons=None, extra_paths=None,
+                 supplementary=None, figures=None, images=None) -> dict:
+    """The --json object for one record. Key order is the documented order.
+
+    `supplementary`, `figures` and `images` are summary objects from the side
+    passes; each key appears only when its flag was on, so a caller can tell
+    "not asked" (absent) from "asked, nothing obtained" (present).
+    """
+    record = {
         "identifier": str(identifier),
         "doi": doi or None,
         "success": status != JSON_STATUS_FAILED,
@@ -7024,6 +7073,59 @@ def _json_record(identifier, doi=None, path=None,
         "identity": identity,
         "reasons": list(reasons or []),
         "paths": [os.path.abspath(p) for p in (extra_paths or [])],
+    }
+    for key, value in (("supplementary", supplementary), ("figures", figures),
+                       ("images", images)):
+        if value is not None:
+            record[key] = value
+    return record
+
+
+def _abs_or_none(path):
+    return os.path.abspath(path) if path else None
+
+
+def _supplementary_json(summary, asked: bool):
+    """The `supplementary` sub-object, or None when the pass was not asked for."""
+    if not asked:
+        return None
+    if summary is None:
+        return {"status": "error", "written": 0, "skipped": 0, "manifest": None,
+                "missing_declared": [], "blocked_urls": []}
+    return {
+        "status": summary.status,
+        "written": summary.written,
+        "skipped": summary.skipped,
+        "manifest": _abs_or_none(summary.manifest_path),
+        "missing_declared": list(summary.missing_declared or []),
+        "blocked_urls": list(getattr(summary, "blocked_urls", None) or []),
+    }
+
+
+def _figures_json(summary, asked: bool):
+    if not asked:
+        return None
+    if summary is None:
+        return {"status": "error", "written": 0, "failed": 0, "refusal": None,
+                "manifest": None}
+    return {
+        "status": summary.status,
+        "written": summary.written,
+        "failed": summary.failed,
+        "refusal": getattr(summary, "refusal", None) or None,
+        "manifest": _abs_or_none(summary.manifest_path),
+    }
+
+
+def _images_json(result, asked: bool):
+    if not asked:
+        return None
+    if result is None:
+        return {"status": "skipped", "written": 0, "manifest": None}
+    return {
+        "status": result.status,
+        "written": result.written,
+        "manifest": _abs_or_none(result.manifest_path),
     }
 
 
@@ -7082,9 +7184,28 @@ def main(argv=None):
     _JSON_MODE = True
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            return _main(argv, json_out)
+            code = _main(argv, json_out)
+    except Exception as exc:
+        _emit_unanswered(json_out, f"fetchpdf stopped with {type(exc).__name__}; see stderr")
+        raise
     finally:
         _JSON_MODE = False
+    if code:
+        _emit_unanswered(json_out, f"fetchpdf stopped (exit {code}) before a result; see stderr")
+    return code
+
+
+def _emit_unanswered(json_out, reason: str) -> None:
+    """A `failed` object for a single-identifier run that produced none.
+
+    Batch runs are left alone: they either wrote their records, or stopped
+    before the first one (a missing CSV, a bad column), where no identifier
+    exists to report -- documented as empty stdout plus a nonzero exit.
+    """
+    if json_out.count or not json_out.pending_identifier:
+        return
+    json_out.write(_json_record(json_out.pending_identifier,
+                                status=JSON_STATUS_FAILED, reasons=[reason]))
 
 
 def _main(argv=None, json_out=None):
@@ -7802,6 +7923,10 @@ def _main(argv=None, json_out=None):
 
     # Single DOI mode
     elif args.doi:
+        if json_out is not None:
+            # Lets main() still answer with one `failed` object if this record
+            # dies before it reaches its own emit.
+            json_out.pending_identifier = args.doi
         resolved_identifier = resolve_identifier_to_doi(args.doi, verbose=args.verbose)
         display_id = resolved_identifier or args.doi
 
@@ -7869,6 +7994,12 @@ def _main(argv=None, json_out=None):
                        or args.xml_html_only or args.get_xml_or_html)
         source_out = [None]
         paths_out = [] if _tiered else None
+        # For --json: a stale verdict from an earlier call must not be read back,
+        # and a file that was already here and came back untouched is not a
+        # download, whichever branch of the chain returned it.
+        _forget_identity(save_path)
+        pre_existing = _artifact_snapshot(save_path)
+        si_summary = fig_summary = img_summary = None
 
         result = fetch_pdf(
             doi=resolved_identifier or args.doi,
@@ -7922,6 +8053,7 @@ def _main(argv=None, json_out=None):
                     unpack_data_artifacts=args.unpack_data_artifacts,
                     download_related_unverified=args.download_related_unverified,
                 )
+                si_summary = summary
                 print(f"\n📎 {summary.written} supplementary file(s), "
                       f"{summary.skipped} skipped ({summary.status})")
                 if summary.manifest_path:
@@ -7946,6 +8078,7 @@ def _main(argv=None, json_out=None):
                     email=args.email,
                     delay=args.delay,
                 )
+                fig_summary = summary
                 print(f"\n🖼️  {summary.written} figure(s), {summary.failed} not "
                       f"obtained ({summary.status}"
                       + (f": {summary.refusal}" if summary.refusal else "") + ")")
@@ -7964,6 +8097,7 @@ def _main(argv=None, json_out=None):
                 try:
                     from .retrieval.extract_images import extract_images as _xi
                     img = _xi(pdf, verbose=args.verbose)
+                    img_summary = img
                     if img.status in ("ok", "skipped"):
                         print(f"\n🖼️  images: {img.status} "
                               f"({img.written} stream(s)) -> {img.manifest_path}")
@@ -7976,6 +8110,11 @@ def _main(argv=None, json_out=None):
                     print(f"\n🖼️  image extraction failed: {str(e)[:200]}")
 
         identity, reasons = _identity_and_reasons(result, save_path)
+        side_passes = {
+            "supplementary": _supplementary_json(si_summary, args.pull_supplementary),
+            "figures": _figures_json(fig_summary, args.pull_figures),
+            "images": _images_json(img_summary, args.extract_images),
+        }
         if result:
             print(f"\n✅ Successfully downloaded to {result}")
             # "existing" is the chain's own word for "this was already here and
@@ -7983,14 +8122,17 @@ def _main(argv=None, json_out=None):
             # bare boolean: the prose line above says "Successfully downloaded"
             # either way. Such a record carries identity null, because the
             # skip branch runs no identity check to report.
-            on_disk = source_out[0] == "existing"
+            on_disk = (source_out[0] == "existing"
+                       or pre_existing.get(os.path.abspath(result)) == _stat_key(result))
             # paths_out's last element is the tiered goal summary, not a path.
             others = [p for p in (paths_out or [])[:-1] if p != result]
             _emit_json(
                 json_out, args.doi, resolved_identifier, result,
                 JSON_STATUS_ALREADY_ON_DISK if on_disk else JSON_STATUS_DOWNLOADED,
-                source=source_out[0], identity=identity, reasons=reasons,
-                extra_paths=others,
+                source="existing" if on_disk else source_out[0],
+                identity=None if on_disk else identity,
+                reasons=[] if on_disk else reasons,
+                extra_paths=others, **side_passes,
             )
             return 0
         else:
@@ -7998,7 +8140,8 @@ def _main(argv=None, json_out=None):
             print(f"\n❌ Failed to download PDF for {args.doi}")
             _emit_json(json_out, args.doi, resolved_identifier, None,
                        JSON_STATUS_FAILED, identity=identity,
-                       reasons=reasons or ["no source produced a usable artifact"])
+                       reasons=reasons or ["no source produced a usable artifact"],
+                       **side_passes)
             return 1
 
     else:

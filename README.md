@@ -952,7 +952,7 @@ A PDF that was fetched and then refused by the identity check reports the
 refusal, not a bare failure:
 
 ```json
-{"identifier": "10.31234/osf.io/2tqep", "doi": "10.31234/osf.io/2tqep", "success": false, "status": "failed", "path": null, "format": null, "source": null, "identity": "wrong_article", "reasons": ["PDF does not contain the requested DOI or the title \"A Student's Guide to Open Science: Using the Replication Crisis to Re…\""], "paths": []}
+{"identifier": "10.1234/example", "doi": "10.1234/example", "success": false, "status": "failed", "path": null, "format": null, "source": null, "identity": "wrong_article", "reasons": ["PDF does not contain the requested DOI or the title \"An example article title\""], "paths": []}
 ```
 
 ### Fields
@@ -969,6 +969,13 @@ refusal, not a bare failure:
 | `identity` | str \| null | The verdict on the PDF **fetched in this run and reported in `path`**: `verified`, or a refusal — `wrong_article`, `truncated`, `unreadable`, `no_reference`, `no_engine`. Null when nothing was judged: an XML artifact, a file already on disk, or any run under the tiered flags (`--prioritize-xml`, `--get-xml-or-html`, `--xml-only`, `--xml-html-only`), where the engine validates per tier instead. A success with a non-`verified` identity is a PDF that was kept rather than deleted because the verdict could not be trusted — see [the identity check](#format-prioritized-retrieval) — not one that passed. |
 | `reasons` | list[str] | Why a record failed, or why a kept PDF could not be verified. Empty on a verified success. |
 | `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html`), empty otherwise. `path` is not repeated here. |
+| `supplementary` | object | Only with `--pull-supplementary` (or a flag that implies it): `status` (`ok`, `none_found`, `partial`, `incomplete`, `error`, `skipped`), `written`, `skipped`, `manifest` (absolute path or null), `missing_declared` (files the article declares that were not obtained) and `blocked_urls` (refused to this client; open them in a browser). |
+| `figures` | object | Only with `--pull-figures`: `status`, `written`, `failed`, `refusal` and `manifest`. |
+| `images` | object | Only with `--extract-images`: `status`, `written` and `manifest`. |
+
+A side-pass key is absent when its flag was off and present, possibly with
+nothing obtained, when it was on — so "not asked" and "asked, found nothing"
+stay distinguishable. None of them changes `success`.
 
 The three statuses are separated because a caller has three different jobs to
 do: use the file, use the file knowing nothing re-checked it, or handle the
@@ -987,8 +994,13 @@ Unchanged by the flag.
 
 ### Notes
 
-- Keys are stable and always present; a key whose value is unknown is null or
-  empty rather than absent.
+- The ten core keys are stable and always present; a key whose value is unknown
+  is null or empty rather than absent. Output is ASCII, with non-ASCII
+  characters escaped, so no console encoding can break it.
+- A single-identifier run that stops early — an unexpected exception, or an
+  error exit before its result — still writes one `failed` object whose
+  `reasons` point to stderr. A batch that stops before its first record (a
+  missing CSV, an unknown column) writes nothing to stdout and exits nonzero.
 - stdout is the results channel only. Anything that is not a result — including
   the `EMAIL not set` warning printed at import — goes to stderr.
 - ANSI colour is dropped from warnings when stderr is not a terminal. The

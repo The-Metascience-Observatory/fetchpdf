@@ -171,3 +171,102 @@ def test_without_the_flag_stdout_is_what_it_has_always_been(cli, capsys, tmp_pat
     assert code == 0
     assert out == (f"💾 No output path provided; using: {pdf}\n"
                    f"\n✅ Successfully downloaded to {pdf}\n")
+
+
+def _silent_chain(doi, save_path, *args, **kwargs):
+    """A route that writes a PDF but, like a tiered or XML route, judges nothing."""
+    with open(save_path, "wb") as f:
+        f.write(b"%PDF-1.4 unjudged")
+    fp._record_source(kwargs.get("_source_out"), "core")
+    return save_path
+
+
+def test_a_verdict_from_an_earlier_call_is_not_reported_again(cli, capsys, tmp_path):
+    """The verdict store is process-wide; a library caller or a repeated row
+    must not be told an earlier call's refusal."""
+    cli(["10.1234/one", "-o", str(tmp_path), "--json"], chain=_refusing_chain)
+    capsys.readouterr()
+
+    code = cli(["10.1234/one", "-o", str(tmp_path), "--json"], chain=_silent_chain)
+    (record,) = _stdout_records(capsys)
+
+    assert code == 0
+    assert record["status"] == "downloaded"
+    assert record["identity"] is None
+    assert record["reasons"] == []
+
+
+def test_an_untouched_file_is_on_disk_whichever_branch_returned_it(cli, capsys, tmp_path):
+    """fetch_pdf's own rule: a file whose stat did not change was not fetched,
+    even when the route that returned it did not label it "existing"."""
+    (tmp_path / "10.1234--one.pdf").write_bytes(b"%PDF-1.4 from an earlier run")
+
+    def _returns_it_unlabelled(doi, save_path, *args, **kwargs):
+        fp._record_source(kwargs.get("_source_out"), "unpaywall")
+        return save_path
+
+    cli(["10.1234/one", "-o", str(tmp_path), "--json"], chain=_returns_it_unlabelled)
+    (record,) = _stdout_records(capsys)
+
+    assert record["status"] == "already_on_disk"
+    assert record["source"] == "existing"
+    assert record["identity"] is None
+
+
+def test_a_batch_reports_a_tiered_on_disk_file_as_already_on_disk(cli, capsys, tmp_path):
+    """--get-xml-or-html does not skip records up front; the engine hands the
+    file back as source "existing", and batch mode used to call that a download."""
+    out_dir = tmp_path / "pdfs"
+    out_dir.mkdir()
+    (out_dir / "10.1234--one.pdf").write_bytes(b"%PDF-1.4 from an earlier run")
+    csv = tmp_path / "records.csv"
+    csv.write_text("DOI\n10.1234/one\n", encoding="utf-8")
+
+    cli([str(csv), "-o", str(out_dir), "--json", "--no-missing-report",
+         "--get-xml-or-html"])
+    (record,) = _stdout_records(capsys)
+
+    assert record["success"] is True
+    assert record["status"] == "already_on_disk"
+
+
+def test_side_passes_are_reported_only_when_asked_for(cli, capsys, tmp_path, monkeypatch):
+    from fetchpdf.retrieval import supplementary
+
+    manifest = tmp_path / "10.1234--one_supplementary_info.json"
+    monkeypatch.setattr(supplementary, "pull_for_record", lambda **kw:
+                        supplementary.SupplementarySummary(
+                            status="partial", written=2, skipped=1,
+                            manifest_path=str(manifest),
+                            blocked_urls=["https://publisher.example/suppl/1"]))
+
+    cli(["10.1234/one", "-o", str(tmp_path), "--json", "--pull-supplementary"])
+    (record,) = _stdout_records(capsys)
+
+    assert list(record) == FIELDS + ["supplementary"]
+    assert record["supplementary"] == {
+        "status": "partial", "written": 2, "skipped": 1,
+        "manifest": str(manifest), "missing_declared": [],
+        "blocked_urls": ["https://publisher.example/suppl/1"],
+    }
+
+
+def test_a_crash_still_answers_with_one_failed_object(cli, capsys, tmp_path):
+    def _crashing_chain(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        cli(["10.1234/one", "-o", str(tmp_path), "--json"], chain=_crashing_chain)
+    (record,) = _stdout_records(capsys)
+
+    assert record["identifier"] == "10.1234/one"
+    assert record["status"] == "failed"
+    assert "RuntimeError" in record["reasons"][0]
+
+
+def test_output_is_ascii_so_no_console_encoding_can_break_it(cli, capsys, tmp_path):
+    cli(["10.1234/café", "-o", str(tmp_path), "--json"])
+    out = capsys.readouterr().out
+
+    assert out.isascii()
+    assert json.loads(out)["identifier"] == "10.1234/café"
