@@ -17,6 +17,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
 - [Figure Images](#figure-images)
+- [Institutional access (`--cookies`)](#institutional-access---cookies) — papers your library subscribes to
 - [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
@@ -44,6 +45,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC with a manifest of labels, captions and hashes
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
 - 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
+- 🔐 **[Institutional access](#institutional-access---cookies)** (opt-in): `--cookies` fetches papers your library subscribes to, with cookies from your own signed-in browser
 - 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
@@ -923,6 +925,42 @@ Like the supplementary pass, this runs beside retrieval and never changes
 whether a record succeeded, it runs for records already on disk, and a manifest
 that fetched something makes a re-run free.
 
+## Institutional access (`--cookies`)
+
+Off by default. For papers your library subscribes to, `--cookies FILE` fetches
+the publisher's PDF with cookies exported from your own signed-in browser:
+
+```bash
+fetchpdf papers.csv -o ./pdfs --cookies ~/cookies.txt
+```
+
+1. Sign in to the publisher's site through your library in your normal browser.
+2. Export that browser's cookies with a cookie-export extension, as a Netscape
+   `cookies.txt` or JSON (a Playwright `storage_state` file also works).
+3. Pass the file with `--cookies`. Sessions expire, so re-export when records
+   start failing with "did not serve a PDF with these cookies".
+
+**When it runs.** Only after every open-access route has failed, once per
+record, on the default path (not under `--prioritize-xml` or the other tiered
+flags). It covers publishers whose PDF URL follows from the DOI: Springer
+(`10.1007`, `10.1057`), Wiley (`10.1002`, `10.1111`), Taylor & Francis
+(`10.1080`), SAGE (`10.1177`) and the Royal Society (`10.1098`). Other records
+are untouched. A PDF it fetches meets the same identity check as every other
+source, and is reported as `institutional_cookies` in source tracking and
+`--json`.
+
+**The cookie file is a credential.** Only cookies for the publisher's own
+domain are sent, so a redirect to another host carries none; cookies with no
+domain are dropped; secure cookies are only sent over https; expired ones are
+skipped; and nothing but URLs and HTTP statuses is logged. `*cookies*.txt` and
+`*cookies*.json` are git-ignored, but keep the file out of shared folders.
+
+**Use it within your licence.** Most subscription licences allow downloading
+articles for your own research and forbid systematic or bulk downloading;
+publishers enforce that by blocking the whole institution's access. Use this for
+the handful of papers the open-access routes could not find, at the default
+pace, not to mirror a journal.
+
 ## Calling fetchpdf from a script or an agent
 
 `--json` puts the result on stdout as JSON and moves everything else — progress
@@ -1194,13 +1232,15 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
     - Tries the PDF first, then full-text XML (the XML half is skipped with `--no-xml-fallback`)
     - Requires `ELSEVIER_TDM_API_KEY`
 
-If the whole chain yields no PDF, `fetch_pdf` then tries structured full text
+If the whole chain yields no PDF and `--cookies` was given, the
+[institutional cookie route](#institutional-access---cookies) is tried next.
+Failing that, `fetch_pdf` tries structured full text
 (T1 XML / T2 HTML) from the tier ladder before giving up; `--no-xml-fallback`
 turns this off.
 
 ---
 
-**Total: 18 standard steps + 5 special handlers.**
+**Total: 18 standard steps + 5 special handlers**, plus the opt-in cookie route.
 
 ## Requirements
 

@@ -6,6 +6,9 @@ __pycache__/
 # Local secrets, including backups like .env.local.bak-*. Only the template is tracked.
 .env*
 !.env.example
+# Browser cookie exports for --cookies: a signed-in session, i.e. a credential.
+*cookies*.txt
+*cookies*.json
 
 # C extensions
 *.so

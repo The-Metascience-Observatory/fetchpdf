@@ -189,6 +189,7 @@ SOURCE_DISPLAY_NAMES = {
     "pmc": "PMC",
     "pmid_direct": "PubMed",
     "psycharchives": "PsychArchives",
+    "institutional_cookies": "Institutional (cookies)",
     "semantic_scholar": "SemanticScholar",
     "serpapi_scholar": "GoogleScholar (SerpApi)",
     "ssrn": "SSRN",
@@ -4168,6 +4169,42 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
 
 
 #-----------------------------------------------------------------------------------------
+@_timed("institutional_cookies")
+def _try_institutional(save_path, resolved, cookies_file, verbose=False,
+                       _source_out=None):
+    """The opt-in cookie route. A no-op, and never imported, unless --cookies.
+
+    Returns the saved path, or None.
+    """
+    if not cookies_file or not resolved:
+        return None
+    from .retrieval import institutional as _institutional
+
+    def accept(path, url):
+        # The same identity check every other route answers to. A subscription
+        # is a reason to be allowed the file, not a reason to trust it.
+        return _accept_downloaded_pdf(path, resolved, url=url, verbose=verbose)
+
+    try:
+        path, reasons = _institutional.fetch(
+            resolved, save_path, cookies_file, verbose=verbose,
+            accept=accept, on_download=_note_download_url,
+        )
+    except Exception as e:      # noqa: BLE001 - never fail a record on this
+        if verbose:
+            print(f"  Institutional access failed ({type(e).__name__})")
+        return None
+    if path:
+        _record_source(_source_out, _institutional.SOURCE)
+        return path
+    # Printed whether or not --verbose is on: "no subscription" and "stale
+    # cookies" call for different fixes, and the user can only tell them apart
+    # from here.
+    for reason in reasons:
+        print(f"  Institutional access: {reason}")
+    return None
+
+
 def fetch_pdf(doi,
               save_path,
               email=None,
@@ -4183,6 +4220,7 @@ def fetch_pdf(doi,
               target_task="extraction",
               upgrade_existing=False,
               want_provenance=False,
+              cookies_file=None,
               _source_out=None,
               _paths_out=None,
               _visited=None,
@@ -4244,6 +4282,19 @@ def fetch_pdf(doi,
         return written
     if written:
         _record_source(_source_out, None)
+
+    # ---------------- Institutional access (opt-in, --cookies) --------------
+    # Every open-access route has been tried and returned nothing usable. Here
+    # in fetch_pdf rather than in _fetch_pdf_chain on purpose: the tiered
+    # engine re-enters the chain at T5 with a temporary save_path, and a route
+    # inside the chain would fire on that re-entry too. Placed here it runs
+    # once per record, after the whole chain.
+    institutional_path = _try_institutional(
+        save_path, resolved, cookies_file, verbose=verbose,
+        _source_out=_source_out,
+    )
+    if institutional_path:
+        return institutional_path
 
     # No acceptable PDF. Structured full text is a BETTER artifact than a PDF,
     # not a consolation prize -- it is tier 1 on the extraction ladder and the
@@ -5890,7 +5941,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5997,12 +6048,13 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             draft_requests=draft_requests,
             make_subfolder=make_subfolder,
             json_out=json_out,
+            cookies_file=cookies_file,
         )
     finally:
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -6404,6 +6456,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             to_markdown=to_markdown,
             target_task=target_task, upgrade_existing=upgrade_existing,
             want_provenance=want_provenance, _resolver=_resolver,
+            cookies_file=cookies_file,
         )
 
         # Defensive guard: a downstream save site may have written the file
@@ -7593,6 +7646,19 @@ def _main(argv=None, json_out=None):
              "file path is given for a single download."
     )
     parser.add_argument(
+        "--cookies",
+        dest="cookies_file",
+        metavar="FILE",
+        default=None,
+        help="Opt-in institutional access: cookies exported from your own "
+             "signed-in browser (Netscape cookies.txt or JSON). Tried only after "
+             "every open-access route has failed, for publishers whose PDF URL "
+             "follows from the DOI (Springer, Wiley, T&F, SAGE, Royal Society). "
+             "Only cookies for the publisher's own domain are sent. Treat the "
+             "file as a password. Default path only; ignored under the tiered "
+             "format flags.",
+    )
+    parser.add_argument(
         "--on-existing",
         choices=[ON_EXISTING_ASK, ON_EXISTING_SKIP, ON_EXISTING_SUPPLEMENT],
         default=ON_EXISTING_ASK,
@@ -7607,6 +7673,9 @@ def _main(argv=None, json_out=None):
 
     args = parser.parse_args(argv)
 
+    if args.cookies_file and not os.path.isfile(args.cookies_file):
+        print(f"❌ --cookies: no such file: {args.cookies_file}")
+        return 2
 
     # Answered once, here, rather than per record. Every retrieved PDF is
     # checked against the record it was fetched for, so with no text engine
@@ -7815,6 +7884,7 @@ def _main(argv=None, json_out=None):
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
             json_out=json_out,
+            cookies_file=args.cookies_file,
         )
 
         success_count = sum(1 for r in results if r[1])
@@ -7903,6 +7973,7 @@ def _main(argv=None, json_out=None):
             draft_requests=args.draft_requests,
             make_subfolder=args.make_subfolder,
             json_out=json_out,
+            cookies_file=args.cookies_file,
         )
 
         success_count = sum(1 for r in results if r[1])
@@ -8019,6 +8090,7 @@ def _main(argv=None, json_out=None):
             target_task=args.target_task,
             upgrade_existing=args.upgrade_existing,
             want_provenance=args.provenance,
+            cookies_file=args.cookies_file,
         )
 
         # A separate call rather than a parameter on fetch_pdf, and that
