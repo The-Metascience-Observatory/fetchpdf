@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
-.env.local
+
+# Local secrets, including backups like .env.local.bak-*. Only the template is tracked.
+.env*
+!.env.example
 
 # C extensions
 *.so
