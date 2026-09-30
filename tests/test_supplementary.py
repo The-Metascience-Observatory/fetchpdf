@@ -1746,28 +1746,20 @@ def test_pmc_s3_declares_sizes_and_md5s_before_transfer():
                    for f in files)
 
 
-def test_datacite_related_is_gated_on_type_not_relation():
-    """The capture is why. Those datasets were deposited as IsCitedBy/IsSourceOf,
-    so a relationType whitelist -- the obvious design -- discards all of them."""
+def test_datacite_citation_only_capture_requires_independent_title_evidence(monkeypatch):
+    """The captured datasets are real, but IsCitedBy alone does not prove ownership.
+    Data-from titles must be checked against the article before accepting them."""
     import json as _json
-
-    from fetchpdf.retrieval.supplement_graph import _accept_related
+    from fetchpdf.retrieval import supplement_graph as graph
 
     payload = _json.loads(fixture("datacite_reverse_related.json", "r"))
     article = "10.1186/s40168-025-02261-0"
-    accepted = [_accept_related(r, article, ctx_with(FakeHttp()))
-                for r in payload.get("data") or []]
-    kept = [doi for doi in accepted if doi]
-
-    assert kept, "the datasets that name this article must survive the filter"
-    relations = {
-        str(rel.get("relationType", "")).lower()
-        for record in payload["data"]
-        for rel in (record.get("attributes") or {}).get("relatedIdentifiers") or []
-        if article.lower() in str(rel.get("relatedIdentifier", "")).lower()
-    }
-    assert "issupplementto" not in relations, (
-        "the premise of this test: none of them used the obvious relation")
+    assert all(graph._accept_related(r, article, ctx_with(FakeHttp())) is None
+               for r in payload["data"])
+    monkeypatch.setattr(graph, "_article_title",
+                        lambda doi, ctx: "Breeding of microbiomes conferring salt tolerance to plants")
+    assert all(graph._accept_related(r, article, ctx_with(FakeHttp()))
+               for r in payload["data"])
 
 
 def test_archive_members_are_numbered_by_name_not_archive_order():
@@ -2100,10 +2092,7 @@ class _SupplSearch(FakeDownloader):
 
 
 def test_withheld_supplements_are_named_when_they_exist(tmp_path, capsys):
-    """hasSuppl=Y + closed access: the files exist and cannot be had.
-
-    Worth saying out loud, because the user can still fetch them by hand.
-    """
+    """A failed Europe PMC route is visible without ruling out other providers."""
     from fetchpdf.retrieval import supplementary as sup
     sup.reset_not_open_access_records()
 
@@ -2116,7 +2105,10 @@ def test_withheld_supplements_are_named_when_they_exist(tmp_path, capsys):
     assert skip["reason"] == "epmc_not_open_access"
     assert "not open access" in skip["detail"]
     assert summary.status == "partial"          # a withheld file is a shortfall
-    assert "will not serve it" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "may not serve it" in output
+    assert "Other retrieval routes may still succeed" in output
+    assert "cannot be retrieved programmatically" not in output
     assert len(sup.not_open_access_records()) == 1
 
 

@@ -8,13 +8,11 @@ The reverse query -- "which DataCite records name this DOI as related?" -- is on
 request and works. Verified on 10.1186/s40168-025-02261-0: three hits, a Dryad
 dataset and two Zenodo software records.
 
-That verification also settled how to filter them. The relations those three were
-deposited under were IsCitedBy and IsSourceOf -- *not* IsSupplementTo. A
-relationType whitelist, which is the obvious design and the one the legacy chain
-uses at _collect_datacite_candidate_urls, would have discarded all three. So the
-gate is types.resourceTypeGeneral: a Dataset that names your article is your data
-whatever relation the depositor picked, and a JournalArticle that names your
-article is somebody else's paper citing you.
+A deposit must affirmatively identify the article as its own source, supplement,
+or another non-citation relation. Resource type alone does not establish ownership:
+a dataset may carry the bibliography of a different paper. Citation-only and
+unresolved records stay out of the supplementary files. Replication-title metadata
+can separately establish ownership when an explicit relation is absent.
 
 Crossref: article-level `relation` is empty at most publishers (is-supplemented-by
 covers 99,154 works out of 185 million, about 0.05%). Component DOIs are a
@@ -122,6 +120,13 @@ def enumerate_datacite_related(ids, ctx) -> List[SupplementFile]:
     return files
 
 
+def _canonical_relation_doi(value) -> str:
+    from urllib.parse import unquote
+    value = unquote(str(value or "").strip()).lower()
+    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
+    return re.sub(r"^doi:\s*", "", value)
+
+
 def _accept_related(record, article_doi, ctx) -> Optional[str]:
     """The related DOI, if this record is data about our article."""
     if not isinstance(record, dict):
@@ -139,16 +144,18 @@ def _accept_related(record, article_doi, ctx) -> Optional[str]:
     if general and general not in KEEP_RESOURCE_TYPES:
         return None
 
-    # The relation is not the gate (see the module docstring), but a relation that
-    # positively means "another work citing this one" still rules a record out.
-    for relation in attributes.get("relatedIdentifiers") or []:
-        if not isinstance(relation, dict):
-            continue
-        identifier = str(relation.get("relatedIdentifier") or "").strip().lower()
-        if article_doi and article_doi.lower() in identifier:
-            kind = str(relation.get("relationType") or "").strip().lower()
-            if kind in DROP_RELATIONS and general not in ("dataset", "software"):
-                return None
+    # Search hits and a dataset type are not evidence of ownership. In particular,
+    # figshare supplements often inherit another paper's entire bibliography.
+    needle = _canonical_relation_doi(article_doi)
+    owns_article = any(
+        isinstance(relation, dict)
+        and _canonical_relation_doi(relation.get("relatedIdentifier")) == needle
+        and bool(str(relation.get("relationType") or "").strip())
+        and str(relation.get("relationType") or "").strip().lower() not in DROP_RELATIONS
+        for relation in attributes.get("relatedIdentifiers") or []
+    ) if needle else False
+    if not owns_article and not _replication_title_matches(attributes, article_doi, ctx):
+        return None
     ctx.log(f"    DataCite: {related_doi} ({general or 'untyped'})")
     return related_doi
 
@@ -290,7 +297,7 @@ _PAPER_DOI_PREFIXES = (
 
 #: Dataverse's convention for a paper's own deposit. Harvard Dataverse fills
 #: in NO relatedIdentifiers at all, so for it the title is the declaration.
-_REPLICATION_TITLE_RE = re.compile(r"(?i)^replication\s+(data|code|materials?)\s+for:?\s*(.+)")
+_REPLICATION_TITLE_RE = re.compile(r"(?i)^(?:replication\s+)?(data|code|materials?)\s+(?:for|from):?\s*(.+)")
 
 
 def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
@@ -338,7 +345,8 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
                 continue
             kind = str(relation.get("relationType") or "").strip().lower()
             identifier = str(relation.get("relatedIdentifier") or "").strip().lower()
-            if needle and needle in identifier and kind not in DROP_RELATIONS:
+            if (needle and _canonical_relation_doi(identifier) == _canonical_relation_doi(needle)
+                    and kind and kind not in DROP_RELATIONS):
                 verdict = True
                 break
         if not verdict:
