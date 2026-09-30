@@ -64,7 +64,10 @@ pip install -e .
 ### Optional: Install Chromium for Browser Automation
 
 You can use FetchPDF without installing a browser. Install Chromium only if you
-want browser-based retrieval, such as the scrapers enabled by `--add-playwright`:
+want browser-based retrieval: the scrapers enabled by `--add-playwright`, plus a
+few routes that always use a browser when one is available — SSRN downloads,
+Atypon supplementary files (which also need a display or Xvfb), and retries of
+Dataverse bot challenges:
 
 ```bash
 playwright install chromium
@@ -76,42 +79,50 @@ APIs and direct HTTP requests still work.
 ### Optional extras
 
 ```bash
-pip install 'fetchpdf[html]'     # publisher HTML full text (T2); without it that tier is skipped with a logged reason
+pip install 'fetchpdf[html]'     # publisher HTML full text (T2); without it such pages are rejected with a logged reason
 pip install 'fetchpdf[text]'     # PyMuPDF, a faster PDF text engine (pypdf is always installed)
 pip install 'fetchpdf[images]'   # --extract-images and fetchpdf-images
 ```
 
 ### Configuration: `.env.local`
 
-Create a `.env.local` file in the project root to configure API keys and settings. API keys are **optional** but significantly improve rate limits and reliability:
+Create a `.env.local` file to configure API keys and settings. For a source
+checkout, put it in the repository root; for a `pip install`, put it in (or
+above) the directory you run `fetchpdf` from. Plain environment variables work
+too. API keys are **optional** but improve rate limits and reliability:
 
 ```bash
-# Required — used by Unpaywall (mandatory) and Crossref polite pool (10 req/s vs 5)
+# Required — used by Unpaywall (mandatory) and Crossref's polite pool
 EMAIL=your@email.com
 
 # Optional — improves rate limits / avoids throttling
-OPENALEXAPIKEY=your_openalex_key           # OpenAlex: avoids 429 rate-limit errors
-SEMANTIC_SCHOLAR_API_KEY=your_s2_key        # Semantic Scholar: 1 → 100 req/s
+OPENALEXAPIKEY=your_openalex_key           # OpenAlex: fewer 429 rate-limit errors
+SEMANTIC_SCHOLAR_API_KEY=your_s2_key        # Semantic Scholar: 1 → 10 req/s
 ENTREZ_EUTILS_API_KEY=your_ncbi_key         # NCBI E-utilities: 3 → 10 req/s
 COREAPIKEY=your_core_key                   # CORE: 40M+ OA papers from core.ac.uk
 SERPAPI_API_KEY=your_serpapi_key           # Optional Google Scholar PDF fallback
 
 # Optional — publisher-specific
 ELSEVIER_TDM_API_KEY=your_elsevier_key      # Elsevier text/data-mining access
+SCOPUS_API_KEY=your_scopus_key              # Scopus abstract lookup during identifier resolution
 
 # Optional — only for --pull-everything --llm-backend openrouter
 OPENROUTER_API_KEY=your_openrouter_key      # the retrieval agent's second backend
+
+# Required by fetchpdf-pubpeer — PubPeer rejects keyless requests
+PUBPEER_DEVKEY=your_pubpeer_key
 ```
 
-**Rate limit improvements with API keys:**
+**What the keys change** (the rates are fetchpdf's own per-host throttles, set in
+[`ladder.json`](fetchpdf/retrieval/ladder.json)):
 
 | API | Without Key | With Key | How to Get |
 |-----|-------------|----------|------------|
-| Crossref | 5 req/s | 10 req/s (polite pool) | Just set `EMAIL` |
-| OpenAlex | Severe throttling | Normal | [openalex.org/users](https://openalex.org/users) |
-| Semantic Scholar | 1 req/s | 100 req/s | [semanticscholar.org/product/api](https://www.semanticscholar.org/product/api) |
+| Crossref | 10 req/s | 10 req/s; `EMAIL` puts requests in Crossref's polite pool | Just set `EMAIL` |
+| OpenAlex | 5 req/s, more 429s | 5 req/s | [openalex.org/users](https://openalex.org/users) |
+| Semantic Scholar | 1 req/s | 10 req/s | [semanticscholar.org/product/api](https://www.semanticscholar.org/product/api) |
 | NCBI E-utilities | 3 req/s | 10 req/s | [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/) |
-| CORE | Unavailable | 1,000 tokens/day | [core.ac.uk/services/api](https://core.ac.uk/services/api) |
+| CORE | Skipped | 2 req/s, 500 requests/day quota | [core.ac.uk/services/api](https://core.ac.uk/services/api) |
 | SerpApi Google Scholar | Skipped | Account search quota | [serpapi.com/google-scholar-api](https://serpapi.com/google-scholar-api) |
 
 ## Quick Start
@@ -137,8 +148,9 @@ flags widen that.
 
 1. **Structured full text** — `--get-xml-or-html` keeps a JATS/TEI XML (else
    publisher HTML) copy alongside the PDF; `--to-markdown` also renders it to
-   `{stem}.md`. XML and HTML are great formats for using with AI (LLMs): complex
-   tables usually survive better than in a PDF converted to Markdown, though a
+   `{stem}_from_xml.md` (or `{stem}_from_html.md`). XML and HTML are great
+   formats for using with AI (LLMs): complex tables usually survive better than
+   in a PDF converted to Markdown, though a
    PDF can win when tables are published as images. Stricter variants and the
    format ladder: [Format-Prioritized Retrieval](#format-prioritized-retrieval).
 2. **Supplementary material (SI/SM)** — `--pull-supplementary` saves every
@@ -146,7 +158,8 @@ flags widen that.
    number is. See [Supplementary Material](#supplementary-material).
 3. **Linked datasets and code** — the supplementary pass also records every
    dataset/software link in `{stem}_linked_artifacts.json` and downloads deposits
-   identified as the paper's own; `--download-data-artifacts` widens that. See
+   identified as the paper's own into `{stem}_data_artifacts/`;
+   `--download-data-artifacts` widens that. See
    [Linked datasets and code](#linked-datasets-and-code-stem_linked_artifactsjson).
 
 **All three at once**, which is the usual corpus-building invocation:
@@ -162,10 +175,12 @@ fetchpdf papers.csv -o ./out -w 4 \
 out/10.1371--journal.pone.0000308/
   10.1371--journal.pone.0000308.pdf                     <- the paper
   10.1371--journal.pone.0000308.xml                     <- structured full text
-  10.1371--journal.pone.0000308.md                      <- prose + HTML tables
+  10.1371--journal.pone.0000308_from_xml.md             <- prose + HTML tables
   10.1371--journal.pone.0000308_supplementary_info_1.xls
-  10.1371--journal.pone.0000308_supplementary_info_2.csv <- from a Dryad deposit
+  10.1371--journal.pone.0000308_supplementary_info_2.doc
   10.1371--journal.pone.0000308_supplementary_info.json  <- what each number is
+  10.1371--journal.pone.0000308_data_artifacts/          <- linked deposits, original filenames
+      10.5061_dryad.xxxxx/data.csv                          (one folder per deposit)
   10.1371--journal.pone.0000308_linked_artifacts.json    <- every dataset/code link
   10.1371--journal.pone.0000308.provenance.json          <- source, tier, hashes
 ```
@@ -176,11 +191,14 @@ see [below](#it-never-changes-whether-a-record-succeeded).
 ### Python API
 
 ```python
+import os
 from fetchpdf import fetch_pdf
 
 # Download a PDF from a DOI (PMID also supported)
 doi = "10.1038/nature12373"
 save_path = "./papers/nature_paper.pdf"
+
+os.makedirs("./papers", exist_ok=True)   # fetch_pdf does not create directories
 
 result = fetch_pdf(
     doi=doi,
@@ -188,11 +206,13 @@ result = fetch_pdf(
     verbose=True,
     delay=0.1  # Polite delay between API calls
 )
+# -> the saved path, or None. It can be a .xml/.html path when only structured
+#    full text was available.
 ```
 
-The extra formats and the supplementary pass are keyword arguments on the batch
-entry point — `--pull-supplementary` is plumbed through `batch_fetch_pdfs` only,
-so use it even for a single DOI:
+`fetch_pdf` has no supplementary option. The extra formats and the supplementary
+pass are keyword arguments on the batch entry point, which works for a single DOI
+too:
 
 ```python
 from fetchpdf import batch_fetch_pdfs
@@ -201,7 +221,7 @@ results = batch_fetch_pdfs(
     dois=["10.1371/journal.pone.0000308"],
     output_dir="./out",
     get_xml_or_html=True,        # structured copy AND the PDF
-    to_markdown=True,            # plus {stem}.md
+    to_markdown=True,            # plus {stem}_from_xml.md
     pull_supplementary=True,     # SI/SM as numbered siblings + manifest
     download_data_artifacts=True,  # and the paper's linked deposits
     max_supplementary_bytes=300 * 1024 * 1024,
@@ -218,7 +238,7 @@ To collect supplements for one record you already have on disk, call
 
 ### PMID Support
 
-You can provide a PMID anywhere a DOI is accepted. The tool first resolves PMID -> DOI (via NCBI), then runs the normal DOI download flow.
+`fetchpdf`, `fetch_pdf` and `batch_fetch_pdfs` accept a PMID wherever they accept a DOI. The tool first resolves PMID → DOI (NCBI, then Europe PMC and a Crossref title search as fallbacks), then runs the normal DOI download flow. (`fetch_metadata_from_doi` and `fetchpdf-pubpeer` take DOIs only.)
 
 **CLI examples:**
 ```bash
@@ -232,16 +252,16 @@ fetchpdf "PMID:33262244" -o ./pdfs
 fetchpdf "https://pubmed.ncbi.nlm.nih.gov/33262244/" -o ./pdfs
 ```
 
-If a PMID cannot be resolved to a DOI, that identifier will fail quickly and be reported in batch mode.
+If a PMID cannot be resolved to a DOI, the tool still tries PMID-native sources (the PubMed page's `citation_pdf_url`); if those fail too, the record is reported as failed.
 
 ### Other commands
 
 | Command | What it does |
 |---|---|
-| `fetchpdf-md ./out` | Render XML/HTML artifacts already on disk to `{stem}.md`, without re-downloading |
+| `fetchpdf-md ./out` | Render XML/HTML artifacts already on disk to `{stem}_from_xml.md` / `{stem}_from_html.md`, without re-downloading. Reads one directory, not its subfolders — after a `--make-subfolder` run, point it at each record's folder |
 | `fetchpdf-images` | Dump the original embedded image bitstreams from PDFs already on disk (`pip install 'fetchpdf[images]'`) |
-| `fetchpdf-verify` | Offline check that the files on disk still match the hashes their manifests recorded |
-| `fetchpdf-pubpeer` | Capture a dated record of a paper's PubPeer comments (an empty record when there are none) |
+| `fetchpdf-verify` | Offline check that supplementary files on disk still match the hashes their `_supplementary_info.json` manifests recorded |
+| `fetchpdf-pubpeer` | Capture a dated record of a paper's PubPeer comments (an empty record when there are none). DOIs only; needs `PUBPEER_DEVKEY` |
 
 
 ## Usage Examples
@@ -254,26 +274,28 @@ import os
 
 doi = "10.1038/nature12373"
 
-# Get metadata first
+# Get metadata first (any field can be None if no source had it)
 metadata = fetch_metadata_from_doi(doi)
-print(f"Downloading: {metadata['title']}")
+title = metadata['title'] or doi
+print(f"Downloading: {title}")
 
 # Use metadata for filename
-safe_title = metadata['title'][:50].replace(" ", "_").replace("/", "_")
+safe_title = title[:50].replace(" ", "_").replace("/", "_")
+os.makedirs("./papers", exist_ok=True)
 save_path = f"./papers/{safe_title}.pdf"
 
 # Download PDF
 result = fetch_pdf(doi, save_path)
 
 if result:
-    print(f"✅ Downloaded: {metadata['title']}")
+    print(f"✅ Downloaded: {title}")
     print(f"   Authors: {metadata['authors']}")
     print(f"   Year: {metadata['year']}")
 ```
 
 ### Example 2: Using the Missing PDFs Report
 
-When batch processing completes, an HTML report is automatically created for any failed downloads:
+Batch runs write `missing_pdfs.html` to the output directory, adding a row as each record fails:
 
 ```python
 from fetchpdf import batch_fetch_pdfs
@@ -285,17 +307,12 @@ results = batch_fetch_pdfs(
 )
 
 # After completion, check ./papers/missing_pdfs.html
-# The report includes:
-# - Paper title, authors, journal, year
-# - Clickable DOI links
-# - Expected filename for manual download
 ```
 
-**The report helps you:**
-- Quickly identify which papers failed
-- Click DOI links to manually download
-- See expected filenames for manual organization
-- View paper metadata even without the PDF
+Each failed record gets a row with its identifier, linked to doi.org or PubMed for
+a manual download, and the filename to save it under so a re-run picks it up. At
+the end of the run a second table lists
+[supplementary material and figures that could not be obtained](#refused-is-not-absent).
 
 To disable the report, pass `create_missing_report=False`, or on the command line:
 ```bash
@@ -305,7 +322,10 @@ fetchpdf papers.csv -o ./papers --no-missing-report
 ## Batch Processing & Parallel Execution
 
 `batch_fetch_pdfs` (and the CLI) accepts either a list of DOI/PMID identifiers or
-a path to a CSV file.
+a path to a CSV file. It returns `[(id, success, save_path), ...]`, where `id` is
+the resolved DOI (lowercased) or the bare PMID and `save_path` is `None` on
+failure; with `track_source=True` each tuple gains a fourth element, the source
+that succeeded.
 
 **CSV format** — one identifier per row under a `DOI` column:
 ```csv
@@ -397,7 +417,7 @@ fetchpdf papers.csv -o ./out --xml-only         # XML, nothing else
 # A structured copy AND the PDF for every record
 fetchpdf papers.csv -o ./out --get-xml-or-html
 
-# ...and a {stem}.md for each XML/HTML artifact
+# ...and a {stem}_from_xml.md / _from_html.md for each XML/HTML artifact
 fetchpdf papers.csv -o ./out --get-xml-or-html --to-markdown
 
 # Convert artifacts you already have, without re-downloading
@@ -410,9 +430,11 @@ fetchpdf papers.csv -o ./out --upgrade-existing
 fetchpdf papers.csv -o ./out --prioritize-xml --provenance
 ```
 
-Artifacts are written as suffixed siblings: `{stem}.xml`, `{stem}.fulltext.html`,
-`{stem}.source.tar.gz`, `{stem}.suppl.zip`, `{stem}.pdf`, `{stem}.txt`, and
-`{stem}.md` under `--to-markdown`.
+Artifacts are written as suffixed siblings, one per tier: `{stem}.xml`,
+`{stem}.fulltext.html`, `{stem}.source.tar.gz`, `{stem}.suppl.zip` (a single-file
+supplement keeps its own extension, e.g. `{stem}.xlsx`), `{stem}.pdf`,
+`{stem}.txt` and `{stem}.landing.html` — plus `{stem}_from_xml.md` /
+`{stem}_from_html.md` under `--to-markdown`.
 
 `--get-xml-or-html` doubles as a backfill: pointed at a directory of existing
 PDFs it fetches only the missing structured half and re-downloads nothing.
@@ -470,13 +492,14 @@ Every table is HTML, including simple ones with no spans. Mixing pipes and HTML
 would make a three-column header ambiguous — no spans, or spans lost in
 conversion? — and that ambiguity is worse than either format alone.
 
-Each `.md` opens with front matter recording table count, tables that were
+Each Markdown file opens with front matter recording its source and conversion time, table count, tables that were
 published as images (not machine-readable), figures referenced but not included,
 and separate prose/table token counts:
 
 ```yaml
 ---
 source_artifact: 10.3390--biom12111676.xml
+converted_at: 2026-09-14T10:02:31Z
 table_format: canonical-html
 tables: 2
 tables_not_machine_readable: 0
@@ -494,15 +517,17 @@ plot should look incomplete rather than complete.
 
 There is no ledger and nothing records which flags built a directory. Skipping
 is decided per record from the filesystem: if an artifact already sits at the
-record's stem, that record is skipped. This is what makes an interrupted run
-resumable — re-run the same command and it picks up where it stopped — and it
-works identically flat or under `--make-subfolder`, since the two layouts differ
-by one path segment.
+record's stem, that record is skipped. On the default path that means a `.pdf`
+or `.xml`; on the tiered (`--prioritize-xml`) path, any tier's suffix. This is
+what makes an interrupted run resumable — re-run the same command and it picks
+up where it stopped. It works the same flat or under `--make-subfolder`, but not
+across the two: a subfolder run does not see files from an earlier flat run, and
+re-downloads them.
 
 The silent part is that a skip also skips the *choice*. A directory of papers
 you fetched last month can gain its supplementary material without re-fetching a
 single PDF, because the SI pass runs on the skip branch — but nothing says so.
-So a re-run that is about to skip records asks:
+So a CSV batch re-run that is about to skip records asks:
 
 ```
 📁 1,284 of 5,000 records already have artifacts in ./out.
@@ -518,9 +543,12 @@ untouched, and records whose SI manifest is already written cost zero requests.
 `--on-existing {skip,supplement,ask}` pre-answers it. **The prompt never appears
 unless stdin and stdout are both terminals** — pipes, cron and CI get a one-line
 count and today's behaviour, so no unattended run can block on it. It is also
-suppressed when the answer is already known: `--pull-supplementary` given
-explicitly, `--abstract-only`, or the goal-aware flags (`--get-xml-or-html`,
-`--upgrade-existing` on the tiered path), which do not skip records at all.
+suppressed when the answer is already known: any flag that turns the
+supplementary pass on (`--pull-supplementary`, `--refresh-supplementary`,
+`--download-data-artifacts`, `--pull-everything`, `--llm-agent-retrieval`), an
+explicit `--on-existing skip` or `supplement`, `--abstract-only`, or the
+goal-aware flags (`--get-xml-or-html`, `--upgrade-existing` on the tiered path),
+which do not skip records at all. Single-identifier runs never ask.
 
 What is *not* remembered between runs: failures. `failed_dois.csv` is a report,
 never read back, so every re-run retries every previous failure. Feed it back in
@@ -548,7 +576,9 @@ examples, measurements, and rate-limit handling.
 
 `--pull-supplementary` fetches everything the authors deposited *alongside* the
 paper — supplementary PDFs, spreadsheets, documents, images, archives, raw data —
-and saves it as flat siblings of the main artifact.
+and saves it as flat, numbered siblings of the main artifact. (Deposits reached
+through link services go in a separate folder — see
+[Linked datasets and code](#linked-datasets-and-code-stem_linked_artifactsjson).)
 
 ```bash
 fetchpdf papers.csv -o ./out --pull-supplementary
@@ -573,18 +603,19 @@ the supplements for all of it without re-fetching a single paper.
 ### The manifest is not optional reading
 
 Flat numbering discards the original filenames, so
-`{stem}_supplementary_info.json` is the only record of what `_2` actually is:
+`{stem}_supplementary_info.json` is the only record of what `_4` actually is:
 
 ```json
-{"index": 2, "filename": "..._supplementary_info_2.xls",
+{"index": 4, "filename": "..._supplementary_info_4.xls",
  "original_name": "pone.0000308.s004.xls", "label": "Table S1",
  "provider": "europepmc_supplements", "container": "PMC1817752_SupplementaryFiles.zip",
  "bytes": 42496, "sha256": "9f2c...", "role": "supplement"}
 ```
 
 It also records what was *not* taken and why — `too-large` with the declared byte
-count, `duplicate-of` with the index it duplicates, `not-a-document` for a
-Cloudflare interstitial served as HTTP 200. "This record has no supplementary
+count, `duplicate-of` with the index it duplicates, `not-a-document` for a body
+that is not a plausible file, and `blocked` for a refusal or a bot-challenge page
+served as HTTP 200 ([below](#refused-is-not-absent)). "This record has no supplementary
 material" and "one 4 GB HDF5 was refused" are different facts, and the manifest is
 where they stay distinguishable.
 
@@ -608,14 +639,14 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | bioRxiv / medRxiv | `10.1101` |
 | APA supplemental | `10.1037` |
 | Figshare / Zenodo / OSF | repository DOIs, and datasets reached through link services |
-| DataCite reverse relations | any DOI — finds the deposited datasets that cite it |
+| DataCite reverse relations | any DOI — finds deposits whose own DataCite record points at the article through a non-citation relation (e.g. `IsSupplementTo`); deposits that merely cite it are dropped |
 | Crossref component DOIs | publishers that register components |
 | JATS-declared URLs | absolute URLs the JATS itself declares (e.g. LWW permalinks) — recovery of last resort |
 | OpenAIRE ScholeXplorer | any DOI — Scholix publication→dataset/software links |
 | Europe PMC datalinks | any PMID — text-mined accessions and data citations |
 | Full-text scan | deposits the paper names in its own prose — only under `--download-data-artifacts` |
-| Atypon publisher SI | PNAS, Science, Annual Reviews, SAGE, T&F — only when Europe PMC withholds the SI; drives a headed browser, so it needs Chromium and a display (or Xvfb) |
-| LLM retrieval agent | only under [`--pull-everything`](#--pull-everything-the-second-layer) |
+| Atypon publisher SI | PNAS, Science, Annual Reviews, SAGE, T&F — only when Europe PMC withholds the SI or the record has no PMCID; drives a headed browser, so it needs Playwright, Chromium and a display (or Xvfb) |
+| LLM retrieval agent | only under [`--pull-everything`](#--pull-everything-the-second-layer) or `--llm-agent-retrieval` |
 | JCI | `10.1172/jci…` |
 
 Wiley, ACS and MDPI serve HTTP 403 to plain requests and are not yet covered;
@@ -650,7 +681,10 @@ with the original reason kept under `"was"`.
 
 `--max-supplementary-mb` defaults to 300, per file. A file whose `Content-Length`
 exceeds it is skipped without downloading anything; a server that under-reports is
-aborted mid-stream and its partial removed. Nothing is ever truncated — a
+aborted mid-stream and its partial removed. An archive such as the Europe PMC
+bundle can only be opened once it has fully arrived, so it downloads under a
+larger cap (4× the per-file cap, 1,200 MB by default) and the per-file cap is
+then applied to each member. Nothing is ever truncated — a
 truncated `.xlsx` is a corrupt zip that some readers open far enough to yield
 wrong numbers, which is worse than not having the file.
 
@@ -658,17 +692,20 @@ wrong numbers, which is worse than not having the file.
 
 A paper with no supplementary material is not a failure, and a repository serving
 malformed JSON or timing out cannot turn a successful download into a failed one.
-Supplementary files never appear in `failed_dois.csv`, in the missing-PDFs report,
-in `source_tracking.csv`, or in the format-composition tally. The same holds for
-linked datasets, [figures](#figure-images) and the
+Supplementary files never appear in `failed_dois.csv`, in `source_tracking.csv`,
+or in the format-composition tally; the missing-PDFs report lists gaps in them
+only in its own separate section. The same holds for linked datasets,
+[figures](#figure-images) and the
 [`--pull-everything`](#--pull-everything-the-second-layer) agent.
 
 ### Linked datasets and code: `{stem}_linked_artifacts.json`
 
-The two link services (ScholeXplorer, Europe PMC datalinks) discover more than
-they download, and the rest lands in a second sidecar. Every
-publication→dataset and publication→software link they returned is recorded
-there with a classification:
+The link services (ScholeXplorer, Europe PMC datalinks) discover more than they
+download, and the rest lands in a second sidecar. Every publication→dataset and
+publication→software link they returned is recorded there with a
+classification; the full-text scan and the retrieval agent record their
+candidates there too. (The DataCite reverse query does not write to the
+sidecar.)
 
 - `owned` — affirmatively the paper's own material: a supplement-grade
   relation (`IsSupplementTo` and friends), or a repository deposit whose own
@@ -680,20 +717,23 @@ there with a classification:
   not this paper's code. Recorded, never downloaded.
 - `registry` — ClinicalTrials.gov and other registrations; a link, not a file
 
-**Only `owned` links are downloaded.** A "cites" link cannot distinguish the
-paper's own deposit from a dataset the paper merely cites, so citation-grade
-links earn a download only when the deposit's DataCite record names the
-article — otherwise they stay sidecar links for the operator to judge.
-Ownership-confirmed deposits in Figshare, Zenodo, OSF, Dryad or Harvard
-Dataverse route to those enumerators and land as numbered supplements
-(`routed_to_download: true` in the sidecar). The same deposit named by several
-link services is listed and downloaded once.
+**By default only `owned` links are downloaded.** A "cites" link cannot
+distinguish the paper's own deposit from a dataset the paper merely cites, so a
+citation-grade link is promoted to `owned` only when the deposit's DataCite
+record names the article. Under `--download-data-artifacts`, `related` links are
+downloaded too, unless the deposit's own metadata says it belongs to a
+*different* article (`--download-related-unverified` drops even that check).
+Routed deposits in Figshare, Zenodo, OSF, Dryad or Harvard Dataverse go to those
+enumerators and land under `{stem}_data_artifacts/<deposit>/` with their
+original filenames (`routed_to_download: true` in the sidecar); they still get
+an entry in the supplementary manifest. The same deposit named by several link
+services is listed and downloaded once.
 
 ```bash
 # Supplements + the paper's own linked deposits (Zenodo, Dryad, OSF, figshare, Dataverse)
 fetchpdf papers.csv -o ./out --pull-supplementary
 
-# Also take citation-grade deposits whose own metadata names this article,
+# Also take `related` deposits that do not claim another article,
 # and repositories named in the paper's own full text
 fetchpdf papers.csv -o ./out --download-data-artifacts
 
@@ -727,7 +767,7 @@ Discovery — the link services queried per record:
 | Europe PMC datalinks | Text-mined accessions (trial registrations, GEO/SRA/PDB…), DOI data citations, BioStudies deposits — the widest net for biomedical papers (needs a PMID) |
 | DataCite reverse query | Deposits whose own metadata names the article — depositor-declared ground truth |
 
-Download — repositories with file enumerators (ownership-confirmed links only):
+Download — repositories with file enumerators (links that pass the routing rules above):
 
 | Repository | Routed on | Notes |
 |---|---|---|
@@ -778,17 +818,19 @@ Three things a model does not have and layer 1 does:
    returned 3,005 `related` links that were never routed, and of 280 `owned`
    ones 264 were BioStudies mirrors of supplements already in hand.
 
-It proposes; the existing gates dispose. A proposal naming a repository routes
-through the same enumerator and the same ownership checks
-(`_should_route`, `_deposit_claims_another_article`) an index's link would, and
-anything it saves still meets `_commit`'s size cap, sha256, deduplication and
-challenge-page sniff. No failure of it can change whether a record succeeded.
+It proposes; the existing machinery disposes. A proposal naming a repository
+routes through the same repository enumerators an index's link would, and a
+GitHub repository is fetched as a tarball. Unlike an index's link, a proposal is
+**not** currently put through the ownership check (`_should_route`), so review
+what lands in `{stem}_data_artifacts/`. Anything it saves still meets the same
+per-file size cap, sha256 deduplication and challenge-page sniff as every other
+file. No failure of it can change whether a record succeeded.
 
 ### `--llm-backend`: two sandboxes, one result
 
 | | `claude-cli` (default) | `openrouter` |
 |---|---|---|
-| auth | whatever the local Claude Code CLI already has | `OPENROUTER_API_KEY` in `.env.local` |
+| auth | whatever the local Claude Code CLI already has | `OPENROUTER_API_KEY` in `.env.local` or the environment |
 | `--llm-model` | `haiku`, `sonnet`, … | the same names, translated to slugs |
 | tools | WebFetch only | `fetch_url` and `download`, both implemented here |
 | downloads? | **no** — it navigates and reports URLs, fetchpdf transfers | yes, into a staging directory |
@@ -816,12 +858,19 @@ under a cap with a hash is the part this package already does. The OpenRouter
 backend has no general-purpose harness to lock down, because its two tools are
 ours, so it downloads directly.
 
+`--llm-backend` selects the retrieval agent's backend only. The adjudication of
+uncertain full-text-scan candidates (on under `--pull-everything`, or with
+`--llm-adjudicate-artifacts`) always calls the Claude Code CLI, as a single-turn
+call with `--allowed-tools ""`; it does not get the `--disallowed-tools` /
+`--strict-mcp-config` lockdown described above.
+
 ### What it costs, and what to expect
 
-One model call per record. `--max-llm-records N` is the ceiling that stops an
-overnight batch spending without bound; records past it still get every API
-route, and the manifest records that the agent was *skipped* rather than that it
-found nothing.
+One agent session per record, of up to 12 model turns. `--max-llm-records N`
+is the ceiling that stops an overnight batch spending without bound (a record
+with no readable full text still uses up a slot, without a model call); records
+past it still get every API route, and `{stem}_linked_artifacts.json` records
+that the agent was *skipped* rather than that it found nothing.
 
 Measured on the corpora this was built against, **most calls will correctly find
 nothing**, and that is not a defect in the agent. Of 606 PDF-only records, 6
@@ -879,7 +928,7 @@ asked" are different facts, and a missing file cannot tell them apart:
 ```json
 {"id": "pone-0000308-g001", "figure_label": "Figure 1",
  "caption": "The 41 clinical trial publications which publicly shared…",
- "href": "pone.0000308.g001.jpg", "provenance": "original",
+ "href": "pone.0000308.g001", "provenance": "original",
  "url": "https://pmc-oa-opendata.s3.amazonaws.com/PMC1817752.1/pone.0000308.g001.jpg",
  "file": "pone.0000308.g001.jpg", "sha256": "…", "bytes": 84120,
  "content_type": "image/jpeg", "status": "ok"}
@@ -899,7 +948,7 @@ that fetched something makes a re-run free.
 
 ### `fetch_pdf(doi, save_path, email=None, verbose=False, delay=0.1, ...)`
 
-Download a PDF from a DOI (or a PMID that can be resolved to a DOI) using multiple fallback sources.
+Download a PDF from a DOI (or a PMID) using multiple fallback sources. `fetch_pdf` does not create `save_path`'s directory; create it first.
 
 **Parameters:**
 - `doi` (str): DOI or PMID identifier to download
@@ -914,7 +963,9 @@ Further keyword arguments mirror the format flags of the CLI (`prioritize_xml`,
 see `help(fetch_pdf)`.
 
 **Returns:**
-- `str`: Path to downloaded PDF if successful, `None` otherwise
+- `str`: Path to the saved file if successful, `None` otherwise. Usually the PDF,
+  but it can be a `.xml` or `.html` path when only structured full text was
+  available (disable that with `allow_xml_fallback=False`)
 
 ### `batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, ...)`
 
@@ -936,10 +987,15 @@ snake_case — e.g. `pull_supplementary`, `download_data_artifacts`, `pull_figur
 MB). See `help(batch_fetch_pdfs)` for the full list.
 
 **Returns:**
-- `list`: List of tuples `(doi, success, save_path)` for each DOI processed
+- `list`: List of tuples `(id, success, save_path)` for each identifier processed —
+  `id` is the resolved DOI or bare PMID, `save_path` is `None` on failure. With
+  `track_source=True`, 4-tuples `(id, success, save_path, source)`.
 
 **Side Effects:**
-- Creates `missing_pdfs.html` in `output_dir` if any downloads fail (unless `create_missing_report=False`)
+- Creates `output_dir` if needed
+- Writes `missing_pdfs.html` in `output_dir` when downloads fail, or when
+  supplementary material or figures could not be obtained (unless
+  `create_missing_report=False`)
 
 ### `pull_supplementary_for(raw_identifier, doi, save_path, ...)`
 
@@ -951,9 +1007,11 @@ through it would write supplementary siblings next to a file that is about to be
 deleted. Two calls make that impossible rather than merely discouraged.
 
 ```python
+import os
 from fetchpdf import fetch_pdf, pull_supplementary_for
 
 doi = "10.1371/journal.pone.0000308"
+os.makedirs("out", exist_ok=True)
 path = fetch_pdf(doi, "out/paper.pdf")
 summary = pull_supplementary_for(doi, doi=doi, save_path="out/paper.pdf")
 print(summary.status, summary.written, summary.manifest_path)
@@ -987,96 +1045,86 @@ Fetch metadata for a paper from its DOI.
 
 ## Download Sources (in order of priority)
 
-The tool tries multiple sources in sequence until a PDF is successfully downloaded. The order is optimized to check faster/more reliable sources first and preserve rate-limited API quotas.
+On the default path the tool walks the chain below (`_fetch_pdf_chain` in
+`fetchpdf/fetchpdf.py`) until a file is accepted. Every PDF is checked against the
+record before it is accepted ([details](docs/retrieval.md)). The order puts faster,
+more reliable sources first and saves rate-limited quotas for the records that
+need them. Under `--prioritize-xml` and the other format flags, the tier ladder in
+[`ladder.json`](fetchpdf/retrieval/ladder.json) governs the order instead — see
+[Format-Prioritized Retrieval](#format-prioritized-retrieval).
 
 ### Special DOI Handlers (Pattern-Matched)
-These run first if the DOI matches specific patterns:
+These run first when the DOI matches (by prefix, or by the name appearing anywhere in the DOI):
 
-- **OSF** (Open Science Framework) - Projects (`10.17605/osf.io/*`) & Preprints (`10.31234/osf.io/*`)
+- **OSF** (Open Science Framework) - Projects (`10.17605/osf.io/*`), Preprints (`10.31234/osf.io/*`), any `osf.io` DOI
   - Direct download URLs, Playwright browser automation, API fallback
-- **SSRN** (Social Science Research Network) - `10.2139/ssrn.*`
-  - Playwright with Cloudflare bypass, download button detection
-- **Figshare** - `10.6084/m9.figshare.*`
+- **SSRN** (Social Science Research Network) - `10.2139/*`
+  - Playwright with Cloudflare handling, download button detection
+- **Figshare** - `10.6084/*`
   - Figshare API for file metadata and download URLs
-- **PsychArchives** - `10.23668/psycharchives.*`
+- **PsychArchives** - `10.23668/*`
   - Leibniz psychology repository bitstream extraction
+- **Zenodo** - `10.5281/*`
+  - Files listed by Zenodo's InvenioRDM API
 
 ### Standard Fallback Chain (All DOIs)
 
-1. **PubMed Central (PMC)** via Europe PMC
-   - Open access papers via NCBI idconv → Europe PMC PDF endpoint
-   - Fast, reliable for biomedical papers
-
-2. **Unpaywall**
-   - Comprehensive legal open access aggregator
-   - Highly reliable, requires email
-
-3. **Crossref**
-   - Publisher metadata with direct PDF links
-   - Landing page scraping with `citation_pdf_url` extraction
-   - Crossref chooser page handler for multi-resolution DOIs
-   - Publisher-specific URL patterns (Wiley, T&F, SAGE, MIT Press, etc.)
-
-4. **Europe PMC**
-   - European PubMed Central search API
-   - Complementary to PMC direct access
-
-5. **Semantic Scholar**
-   - AI-powered academic search with `openAccessPdf` field
-   - Landing page fallback for OJS sites
-   - PsyArXiv→OSF URL conversion
-
-6. **OpenAlex** ⚠️ **Rate Limited**
-   - **1,000 downloads/day limit** (even with API key)
-   - Placed after other sources to preserve quota for harder-to-find papers
-   - Comprehensive metadata aggregator with open access locations
-
-7. **CORE** (core.ac.uk)
-   - 40M+ open access papers from repositories worldwide
-   - Search API with download URLs
-
-8. **Direct DOI Resolver**
-   - Follows `https://doi.org/{doi}` redirect to landing page
-   - Handles Crossref chooser pages (multiple resolution)
-   - Scrapes PDF links from HTML (`citation_pdf_url`, href patterns)
-   - Publisher-specific deterministic URL patterns
-
-9. **DataCite Related Identifiers**
-   - Supplementary material → main paper fallback
-   - Versioned DOI resolution (`IsIdenticalTo`, `IsVersionOf`)
-   - Figshare supplement handling
-
-10. **ResearchGate**
-    - DuckDuckGo search: `title + site:researchgate.net`
-    - Landing page PDF extraction
-
-11. **DOI → PMID Fallback**
-    - Convert DOI to PMID when DOI sources fail
-    - Try PMID-native sources (PubMed landing page `citation_pdf_url`)
-
-
-12. **Google Scholar via SerpApi** (optional)
+1. **PubMed Central (PMC)**
+   - NCBI ID converter → Europe PMC `?pdf=render`
+   - If there is no PDF: Europe PMC JATS, then NCBI efetch JATS (skipped with `--no-xml-fallback`)
+2. **eLife XML** — eLife DOIs only; skipped with `--no-xml-fallback`
+3. **eScholarship** — via PubMed LinkOut
+4. **Unpaywall** — legal open-access aggregator; requires `EMAIL`
+5. **Crossref**
+   - Direct PDF links in Crossref metadata, and text-mining XML links
+   - Landing page scraping (`citation_pdf_url` and similar), plus a direct `/doi/pdf/` try for Taylor & Francis
+   - Re-enters the chain on a related preprint DOI (PsyArXiv, bioRxiv, …), reported as `crossref_preprint`
+6. **Europe PMC** — search API
+7. **Semantic Scholar**
+   - `openAccessPdf` field, with a landing page fallback for OJS sites
+   - PsyArXiv → OSF URL conversion
+8. **OpenAlex** — open-access locations; placed after Semantic Scholar to conserve OpenAlex's download quota
+9. **CORE** (core.ac.uk) — 40M+ repository papers; needs `COREAPIKEY`
+10. **DOAJ** — open-access full-text links
+11. **DataCite content URLs** — direct content and related resource links
+12. **Wiley rendered PDF** — only with `--add-playwright`
+13. **APA supplemental** — APA supplemental files, converting `.doc`/`.docx` to PDF when available
+14. **Direct DOI resolver**
+    - Follows `https://doi.org/{doi}` to the landing page
+    - Handles Crossref chooser pages (multiple resolution)
+    - Scrapes PDF links from HTML (`citation_pdf_url`, href patterns)
+    - Publisher-specific deterministic URL patterns (Wiley, T&F, SAGE, MIT Press, …)
+15. **DataCite related identifiers**
+    - Supplementary material → main paper
+    - Versioned DOI resolution (`IsIdenticalTo`, `IsVersionOf`)
+16. **DOI → PMID fallback**
+    - Converts the DOI to a PMID and tries PMID-native sources (the PubMed page's `citation_pdf_url`)
+17. **Google Scholar via SerpApi** (optional)
     - Enabled by `SERPAPI_API_KEY` in `.env.local` or the environment
-    - Runs after the ordinary PDF sources, before the deferred Elsevier fallback
-    - Searches the quoted DOI, then the quoted article title if no PDF was accepted
+    - Searches the quoted DOI, then the quoted article title if the DOI search returned results but no accepted PDF
     - At most two searches per unresolved DOI, with up to five results per search;
       searches consume your SerpApi account quota
     - Prioritizes PDF resource links, then tries article landing pages; uses the
       existing title matching and downloaded-PDF identity checks
-    - Skips without a key; authentication errors or HTTP 429 disable it for the
-      rest of the process. Other request errors fail through to the next source
+    - Skips without a key. HTTP 401, 403 or 429 disables it for the rest of the
+      process; any other request error, or an error response from SerpApi, ends
+      the SerpApi attempt for that record
     - Reported as `serpapi_scholar` in source tracking
 
-### Final Fallback
+### Final Fallbacks
 
-13. **Elsevier XML API**
-    - Text/data-mining API for Elsevier articles
-    - Returns XML instead of PDF (last resort)
+18. **Elsevier full-text API**
+    - Elsevier records only (`10.1016/*`, or a Crossref landing page on sciencedirect.com / elsevier.com)
+    - Tries the PDF first, then full-text XML (the XML half is skipped with `--no-xml-fallback`)
     - Requires `ELSEVIER_TDM_API_KEY`
+
+If the whole chain yields no PDF, `fetch_pdf` then tries structured full text
+(T1 XML / T2 HTML) from the tier ladder before giving up; `--no-xml-fallback`
+turns this off.
 
 ---
 
-**Total: 13 standard sources + 4 special handlers** = 17 different download strategies
+**Total: 18 standard steps + 5 special handlers.**
 
 ## Requirements
 
