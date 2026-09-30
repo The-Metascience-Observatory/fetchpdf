@@ -459,10 +459,9 @@ class _Run:
         pmcid = getattr(self.ids, "pmcid", None) or "the PMC record"
         _print_yellow_warning(
             f"⚠️  {identifier}: Europe PMC reports supplementary material exists "
-            f"but will not serve it -- {pmcid} is not open access. Publishers "
-            f"block automated download of SI files, so these cannot be "
-            f"retrieved programmatically; fetch them from the article page by "
-            f"hand if needed."
+            f"but may not serve it -- {pmcid} is not open access. Other "
+            f"retrieval routes may still succeed; the final supplement manifest "
+            f"records what was obtained and what remains missing."
         )
         with _NOA_LOCK:
             _NOT_OPEN_ACCESS_RECORDS.append(str(identifier))

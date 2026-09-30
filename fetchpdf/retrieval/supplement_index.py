@@ -674,6 +674,7 @@ def _providers() -> Tuple[Tuple[str, Any], ...]:
         enumerate_jats_manifest,
         enumerate_pmc_s3,
     )
+    from .supplement_jci import enumerate_jci
     from .supplement_atypon import fetch_atypon_supplements
     from .supplement_publishers import (
         enumerate_apa_supplemental,
@@ -708,6 +709,7 @@ def _providers() -> Tuple[Tuple[str, Any], ...]:
         # E20 truly last: the only provider that costs money, and the only one
         # that benefits from knowing what all the others already found.
         ("llm_agent", _llm_agent),                             # E20
+        ("jci", enumerate_jci),                               # E21
     )
 
 
@@ -739,6 +741,7 @@ PROVIDER_NAMES: Tuple[str, ...] = (
     "fulltext_scan",
     "atypon_suppl",
     "llm_agent",
+    "jci",
 )
 
 
