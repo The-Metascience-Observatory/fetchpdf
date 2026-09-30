@@ -1713,8 +1713,8 @@ def test_jats_conversion_is_byte_identical_to_its_golden_rendition():
     """Pins JATS output while the walker grows an Elsevier vocabulary.
 
     The golden file is DERIVED, not captured: it is the converter's own output
-    for `epmc_fulltext_valid.xml` as of 2026-09-02, written before the Elsevier
-    branches were added. It is regenerated only when a change to JATS output is
+    for `epmc_fulltext_valid.xml`, updated 2026-09-07 to include screening metadata
+    and non-bibliographic back matter. It is regenerated only when a change to JATS output is
     intended -- any other difference is a regression in the shared walker.
     """
     from fetchpdf.retrieval.to_markdown import jats_to_markdown

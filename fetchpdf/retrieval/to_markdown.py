@@ -26,6 +26,9 @@ Figures are recorded, never inlined. JATS references images by filename and
 never contains them, so a `<fig>` becomes a visible placeholder naming what is
 missing. A record whose key outcome lives in a forest plot should look
 incomplete rather than complete.
+
+JATS abstracts, publication history, author/funding notes, and non-bibliographic
+back matter are included for internal-consistency screening. References are omitted.
 """
 
 import os
@@ -128,9 +131,62 @@ def jats_to_markdown(content: bytes, name: str = "") -> Conversion:
         return result
 
     floats = _FloatMap(root)
+    # Scope metadata to the article, never to cited articles in its references.
+    article = _find_one(root, "article")
+    if article is not None:
+        front = next((e for e in article if localname(e.tag) == "front"), None)
+        if front is not None:
+            meta = next((e for e in front if localname(e.tag) == "article-meta"), None)
+            if meta is not None:
+                _emit_article_metadata(meta, parts, result, floats)
     _walk_jats(body, parts, result, depth=2, floats=floats)
+    if article is not None:
+        back = next((e for e in article if localname(e.tag) == "back"), None)
+        if back is not None:
+            back_parts = []
+            _walk_jats(back, back_parts, result, depth=3, floats=floats)
+            if back_parts:
+                parts.append("\n## Back matter\n")
+                parts.extend(back_parts)
     _emit_leftover_floats(floats, parts, result, depth=2)
     return _finish(parts, result)
+
+
+def _emit_article_metadata(meta, parts, result, floats) -> None:
+    """Keep screening evidence, including partial dates without inventing precision."""
+    dates = []
+    for child in meta:
+        tag = localname(child.tag)
+        if tag in ("abstract", "trans-abstract"):
+            heading = _first_text(child, "title", direct_only=True) or "Abstract"
+            language = child.get("{http://www.w3.org/XML/1998/namespace}lang")
+            if language:
+                heading += f" ({language})"
+            parts.append(f"\n## {heading}\n")
+            _walk_jats(child, parts, result, depth=3, floats=floats)
+        elif tag in ("pub-date", "history"):
+            for date in ([child] if tag == "pub-date" else list(child)):
+                if localname(date.tag) not in ("date", "pub-date"):
+                    continue
+                kind = date.get("date-type") or date.get("pub-type") or "unspecified"
+                prefix = "Publication" if tag == "pub-date" else "History"
+                medium = date.get("publication-format")
+                label = f"{prefix}: {kind}" + (f" ({medium})" if medium else "")
+                # Component labels avoid ambiguous numeric month/day ordering,
+                # and preserve seasons, string-date, and month-only precision.
+                values = [f"{localname(e.tag)}={_clean(''.join(e.itertext()))}"
+                          for e in date if _clean(''.join(e.itertext()))]
+                if date.get("iso-8601-date"):
+                    values.append(f"iso-8601-date={date.get('iso-8601-date')}")
+                value = "; ".join(values) or _inline_text(date)
+                if value:
+                    dates.append(f"- {label}: {value}")
+    if dates:
+        parts.append("\n## Publication dates and history\n")
+        parts.extend(dates)
+    for child in meta:
+        if localname(child.tag) in ("author-notes", "funding-group", "support-group"):
+            _emit_one(child, meta, parts, result, 2, floats)
 
 
 def _document_title(root) -> str:
@@ -208,7 +264,41 @@ def _emit_one(child, parent, parts: List[str], result: Conversion, depth: int,
     tag = localname(child.tag)
     parent_tag = localname(parent.tag) if parent is not None else ""
 
-    if tag == "sec":
+    if tag in ("ref-list", "bibliography"):
+        return  # Cited papers are not evidence about the screened cohort.
+
+    elif tag in ("ack", "fn-group", "fn", "app-group", "app", "notes",
+                 "author-notes", "funding-group", "support-group", "supplementary-material"):
+        defaults = {"ack": "Acknowledgments", "fn-group": "Notes", "fn": "Note",
+                    "app-group": "Appendices", "app": "Appendix", "notes": "Notes",
+                    "author-notes": "Author notes", "funding-group": "Funding",
+                    "support-group": "Support", "supplementary-material": "Supplementary material"}
+        heading = _first_text(child, "title", direct_only=True) or defaults[tag]
+        label = _first_text(child, "label", direct_only=True)
+        parts.append(f"\n{'#' * min(depth, 6)} {heading}" + (f" ({label})" if label else "") + "\n")
+        # Preserve mixed inline notes while dispatching structural children normally.
+        blocks = {"p", "sec", "table-wrap", "fig", "list", "fn", "app", "fn-group",
+                  "app-group", "supplementary-material", "ref-list", "notes",
+                  "caption", "media"}
+        text = _inline_text(child, skip=tuple(blocks | {"title", "label"}))
+        if text:
+            parts.append(text + "\n")
+        href = child.get("{http://www.w3.org/1999/xlink}href")
+        if href:
+            parts.append(f"Referenced file (not included): `{href}`\n")
+        for element in child:
+            if localname(element.tag) in blocks:
+                _emit_one(element, child, parts, result, depth + 1, floats)
+
+    elif tag == "media":
+        text = _inline_text(child)
+        if text:
+            parts.append(text + "\n")
+        href = child.get("{http://www.w3.org/1999/xlink}href")
+        if href:
+            parts.append(f"Referenced file (not included): `{href}`\n")
+
+    elif tag == "sec":
         heading = _first_text(child, "title", direct_only=True)
         if heading:
             parts.append("\n{} {}\n".format("#" * min(depth, 6), heading))

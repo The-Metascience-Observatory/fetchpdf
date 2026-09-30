@@ -1,5 +1,34 @@
 # Sharing Detailed Research Data Is Associated with Increased Citation Rate
 
+## Abstract
+
+### Background
+
+Sharing research data provides benefit to the general scientific community, but the benefit is less obvious for the investigator who makes his or her data available.
+
+### Principal Findings
+
+We examined the citation history of 85 cancer microarray clinical trial publications with respect to the availability of their data. The 48% of trials with publicly available microarray data received 85% of the aggregate citations. Publicly available data was significantly (p = 0.006) associated with a 69% increase in citations, independently of journal impact factor, date of publication, and author country of origin using linear regression.
+
+### Significance
+
+This correlation between publicly available data and increased literature impact may further motivate investigators to share their detailed research data.
+
+## Publication dates and history
+
+- Publication: collection: year=2007
+- Publication: epub: day=21; month=3; year=2007
+- History: received: day=13; month=12; year=2006
+- History: accepted: day=26; month=2; year=2007
+
+## Author notes
+
+* To whom correspondence should be addressed. E-mail: hpiwowar@cbmi.pitt.edu
+
+### Note
+
+Conceived and designed the experiments: HP. Performed the experiments: HP. Analyzed the data: HP. Wrote the paper: HP. Other: Reviewed the data analysis and interpretation, reviewed the paper: RD Discussed the study motivation and scope, reviewed the paper: DF.
+
 ## Introduction
 
 Sharing information facilitates science. Publicly sharing detailed research data–sample attributes, clinical factors, patient outcomes, DNA sequences, raw mRNA microarray measurements–with other researchers allows these valuable resources to contribute far beyond their original analysis[1]. In addition to being used to confirm original results, raw data can be used to explore related or new hypotheses, particularly when combined with other publicly available data sets. Real data is indispensable when investigating and developing study methods, analysis techniques, and software implementations. The larger scientific community also benefits: sharing data encourages multiple perspectives, helps to identify errors, discourages fraud, is useful for training new researchers, and increases efficient use of funding and patient population resources by avoiding duplicate data collection.
@@ -98,7 +127,7 @@ Statistical analysis was performed using the stats package in R version 2.1[37];
 
 ## Supporting Information
 
-Text S1
+### Supplementary material (Text S1)
 
 Cohort Publication Bibliography
 
@@ -106,7 +135,9 @@ Cohort Publication Bibliography
 
 Click here for additional data file.
 
-Text S2
+Referenced file (not included): `pone.0000308.s001.doc`
+
+### Supplementary material (Text S2)
 
 Locations of Publicly Available Data for the Cohort
 
@@ -114,7 +145,9 @@ Locations of Publicly Available Data for the Cohort
 
 Click here for additional data file.
 
-Text S3
+Referenced file (not included): `pone.0000308.s002.doc`
+
+### Supplementary material (Text S3)
 
 Statistical Analysis R-code
 
@@ -122,10 +155,26 @@ Statistical Analysis R-code
 
 Click here for additional data file.
 
-Data S1
+Referenced file (not included): `pone.0000308.s003.txt`
+
+### Supplementary material (Data S1)
 
 Raw Citation Counts and Covariates
 
 (0.04 MB XLS)
 
 Click here for additional data file.
+
+Referenced file (not included): `pone.0000308.s004.xls`
+
+## Back matter
+
+### Notes
+
+#### Note
+
+Competing Interests: The authors have declared that no competing interests exist.
+
+#### Note
+
+Funding: HAP was supported by NLM Training Grant Number 5T15-LM007059-19. The NIH had no role in study design, data collection or analysis, writing the paper, or the decision to submit it for publication. The publication contents are solely the responsibility of the authors and do not necessarily represent the official views of the NIH.
