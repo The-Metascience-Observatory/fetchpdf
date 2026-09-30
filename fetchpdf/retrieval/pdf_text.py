@@ -54,14 +54,32 @@ MIN_USEFUL_CHARS = 500
 def _pymupdf():
     """PyMuPDF if installed, else None. Optional extra: fetchpdf[text]."""
     try:
-        import pymupdf
-        return pymupdf
+        import pymupdf as module
     except ImportError:
         try:
-            import fitz
-            return fitz
+            import fitz as module
         except ImportError:
             return None
+    _route_pymupdf_messages(module)
+    return module
+
+
+def _route_pymupdf_messages(module) -> None:
+    """Send PyMuPDF's own messages to Python logging, not to a stream.
+
+    PyMuPDF binds its message stream to whatever sys.stdout is at first import
+    and keeps writing there. Imported lazily inside a `--json` run, that is the
+    redirected stream; inside a captured test, a buffer that is closed by the
+    time its next warning fires ("I/O operation on closed file"). Logging holds
+    no stream, so neither can happen, and nothing of PyMuPDF's reaches stdout.
+    """
+    set_messages = getattr(module, "set_messages", None)
+    if set_messages is None:
+        return
+    try:
+        set_messages(pylogging=True)
+    except Exception:
+        pass
 
 
 def _pypdf():

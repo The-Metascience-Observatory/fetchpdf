@@ -48,14 +48,15 @@ _OWNED_FILE_RE = re.compile(r"^xref\d{6}\.")
 def _pymupdf():
     """PyMuPDF if installed, else None. Optional extra: fetchpdf[images]."""
     try:
-        import pymupdf
-        return pymupdf
+        import pymupdf as module
     except ImportError:
         try:
-            import fitz
-            return fitz
+            import fitz as module
         except ImportError:
             return None
+    from .pdf_text import _route_pymupdf_messages
+    _route_pymupdf_messages(module)
+    return module
 
 
 # -- paths ------------------------------------------------------------------
