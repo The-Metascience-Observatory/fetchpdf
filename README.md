@@ -369,32 +369,10 @@ results = batch_fetch_pdfs(
   polite to servers, and gives diminishing returns beyond 4–8 workers.
 - **Raise `delay` as you add workers** (e.g. `workers=8, delay=0.5`) — more
   workers means more simultaneous requests.
-- **Retry failures sequentially**, and keep a record of the results:
-
-```python
-import csv
-from fetchpdf import batch_fetch_pdfs
-
-results = batch_fetch_pdfs(dois="papers.csv", output_dir="./papers", workers=4)
-
-with open("download_results.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["DOI", "Success", "Path"])
-    writer.writerows(results)
-
-successes = sum(1 for _, success, _ in results if success)
-print(f"Success: {successes}/{len(results)} ({successes/len(results)*100:.1f}%)")
-
-failed_dois = [doi for doi, success, _ in results if not success]
-if failed_dois:
-    retry_results = batch_fetch_pdfs(
-        dois=failed_dois,
-        output_dir="./papers",
-        workers=1,
-        delay=1.0,
-        verbose=True,  # see what's happening
-    )
-```
+- **Retry from `failed_dois.csv`.** Every failure is written to
+  `failed_dois.csv` in the output directory. To retry just those, pass it back
+  in: `fetchpdf ./papers/failed_dois.csv -o ./papers`. Re-running the original
+  command also works, since records already on disk are skipped.
 
 ## Format-Prioritized Retrieval
 
