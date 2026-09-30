@@ -37,6 +37,8 @@ IDCONV_URL = "https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/"
 # the check-then-act that sets the flag is guarded by a lock (mirrors _PUBMED_WEB_LOCK).
 _CORE_SESSION_DISABLED = False
 _CORE_SESSION_LOCK = threading.Lock()
+_SERPAPI_SESSION_DISABLED = False
+_SERPAPI_SESSION_LOCK = threading.Lock()
 
 # Consecutive CORE *transport* failures (timeouts, resets) before we stop asking
 # for the rest of the run. Distinct from the 401/403 kill switch: a slow API is
@@ -186,6 +188,7 @@ SOURCE_DISPLAY_NAMES = {
     "pmid_direct": "PubMed",
     "psycharchives": "PsychArchives",
     "semantic_scholar": "SemanticScholar",
+    "serpapi_scholar": "GoogleScholar (SerpApi)",
     "ssrn": "SSRN",
     "unpaywall": "Unpaywall",
     "wiley": "Wiley",
@@ -3664,6 +3667,96 @@ def try_core_fallback(doi: str, save_path: str, verbose=False):
         return False
 
 
+@_timed("serpapi_scholar")
+def try_serpapi_scholar_fallback(doi: str, save_path: str, verbose=False):
+    """Search Scholar only after other sources fail; at most two API calls.
+
+    DOI searches can return papers citing the target. Filter by known title
+    and use the normal OA downloader, including its PDF identity checks.
+    """
+    global _SERPAPI_SESSION_DISABLED
+    api_key = (os.getenv("SERPAPI_API_KEY") or "").strip()
+    if not api_key or _SERPAPI_SESSION_DISABLED:
+        return False
+
+    from .retrieval._util import titles_match
+    from urllib.parse import urlsplit
+
+    title = _title_for(doi, verbose=verbose)
+    queries = [f'"{doi}"']
+    if title:
+        queries.append('"' + html.unescape(title).replace('"', ' ') + '"')
+    seen = set()
+    for query in queries:
+        if _SERPAPI_SESSION_DISABLED:
+            return False
+        try:
+            # No automatic retries: each search may consume account credits.
+            response = requests.get(
+                "https://serpapi.com/search.json",
+                params={"engine": "google_scholar", "q": query,
+                        "api_key": api_key, "num": 5, "hl": "en"},
+                timeout=30,
+            )
+            if response.status_code in (401, 403, 429):
+                with _SERPAPI_SESSION_LOCK:
+                    if not _SERPAPI_SESSION_DISABLED:
+                        _SERPAPI_SESSION_DISABLED = True
+                        _print_yellow_warning(
+                            f"SerpApi disabled for session: HTTP {response.status_code}. "
+                            "Check SERPAPI_API_KEY and your account quota."
+                        )
+                return False
+            if response.status_code != 200:
+                if verbose:
+                    print(f"  SerpApi: HTTP {response.status_code}")
+                return False
+            data = response.json()
+            if not isinstance(data, dict) or data.get("error"):
+                if verbose:
+                    print("  SerpApi: search failed")
+                return False
+            results = data.get("organic_results") or []
+            if not isinstance(results, list):
+                return False
+            candidates = []
+            for result in results[:5]:
+                if not isinstance(result, dict):
+                    continue
+                hit_title = result.get("title")
+                if title and isinstance(hit_title, str) and hit_title and not titles_match(title, hit_title):
+                    continue
+                resources = result.get("resources") or []
+                if isinstance(resources, list):
+                    for resource in resources:
+                        if isinstance(resource, dict):
+                            candidates.append((resource.get("link"),
+                                               str(resource.get("file_format", "")).upper() == "PDF"))
+                link = result.get("link")
+                if isinstance(link, str):
+                    candidates.append((link, ".pdf" in link.lower() or "/pdf" in link.lower()))
+            # PDF resources outrank article landings, even across results.
+            candidates.sort(key=lambda item: not item[1])
+            fresh = []
+            for url, direct in candidates:
+                if not isinstance(url, str) or url in seen:
+                    continue
+                parsed = urlsplit(url)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    continue
+                seen.add(url)
+                fresh.append((url, direct))
+            if _try_oa_location_urls(doi, fresh, save_path, verbose):
+                return True
+        except Exception as exc:
+            # Requests exceptions can contain the URL with the private key.
+            # Never print the exception text or the API response body.
+            if verbose:
+                print(f"  SerpApi: request failed ({type(exc).__name__})")
+            return False
+    return False
+
+
 @_timed("doaj")
 def try_doaj_fallback(doi: str, save_path: str, verbose=False):
     """Try DOAJ API for OA full-text links."""
@@ -4085,7 +4178,8 @@ def _fetch_pdf_chain(doi,
       9. DataCite related identifiers
      10. ResearchGate
      11. DOI→PMID fallback
-     12. Elsevier XML API (last resort)
+     12. Google Scholar via SerpApi (optional API key)
+     13. Elsevier XML API (last resort)
 
     Saves PDF to save_dir as: doi.replace('/', '--') + '.pdf'
     Returns the path if successful, else None.
@@ -5314,6 +5408,12 @@ def _fetch_pdf_chain(doi,
                 _record_source(_source_out, "pmid_direct")
                 return pmid_got if isinstance(pmid_got, str) else save_path
 
+
+    # ---------------- Google Scholar via SerpApi ---------------------------
+    # Preserve search credits until the ordinary PDF sources are exhausted.
+    if try_serpapi_scholar_fallback(doi, save_path, verbose):
+        _record_source(_source_out, "serpapi_scholar")
+        return save_path
 
     # ---------------- Deferred Elsevier fallback (PDF, then XML) ------------
     # Last resort for Elsevier DOIs when every other route has failed. Tries
@@ -6552,7 +6652,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             _print_yellow_warning(
                 f"  ⚠️  SI WITHHELD — Europe PMC has supplementary material for "
                 f"{len(withheld)} record(s) but may not serve it (not open "
-                f"access). Not retrievable programmatically:"
+                f"access). This is a Europe PMC limitation, not a verdict on other routes:"
             )
             for display_id in sorted(set(withheld)):
                 print(f"      {display_id}")
