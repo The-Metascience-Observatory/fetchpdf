@@ -7,6 +7,7 @@ call time would silently degrade those callers to no-email API calls.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv, find_dotenv
@@ -61,10 +62,12 @@ ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")
 
 
 if not EMAIL:
-    print("\033[93m⚠️  Warning: EMAIL not set in .env.local")
-    print("   Please create .env.local with: EMAIL=your@email.com")
-    print("   This affects:")
-    print("     - Crossref API rate limits (10 req/s with email, 5 req/s without)")
-    print("     - Unpaywall API access (required)")
-    print("     - Europe PMC contact info (optional)")
-    print("   Continuing without email...\033[0m")
+    # stderr, not stdout: this runs at import time, before any CLI code, so on
+    # stdout it would land ahead of whatever a caller is parsing there.
+    print("\033[93m⚠️  Warning: EMAIL not set in .env.local\n"
+          "   Please create .env.local with: EMAIL=your@email.com\n"
+          "   This affects:\n"
+          "     - Crossref's polite pool (requests are identified by email)\n"
+          "     - Unpaywall API access (required)\n"
+          "     - Europe PMC contact info (optional)\n"
+          "   Continuing without email...\033[0m", file=sys.stderr)
