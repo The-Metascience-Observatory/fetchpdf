@@ -12,6 +12,7 @@ from conftest import text_pdf
 from fetchpdf.retrieval import pdf_identity
 from fetchpdf.retrieval.pdf_identity import (
     NO_ENGINE,
+    TRUNCATED,
     UNREADABLE,
     VERIFIED,
     WRONG,
@@ -365,11 +366,22 @@ class TestPageCountCorroboration:
         assert verdict.signals == ["page-count-corroborated"]
 
     def test_a_scan_whose_length_contradicts_the_record_is_still_refused(self, tmp_path):
+        """EXPECTATION MOVED from UNREADABLE to TRUNCATED, deliberately.
+
+        `_truncation_reason` already diagnosed this file -- one page against the
+        six the record spans -- but on the no-text path that verdict was
+        computed and then discarded, and the generic refusal was returned
+        instead. Both refuse, so nothing was let through; what was lost was the
+        REASON, which is the distinction this module's docstring keeps for its
+        other states. "Only 1 of 6 pages" says re-fetch; "no readable text
+        layer" says this is a scan and belongs to OCR.
+        """
         path = tmp_path / "scan.pdf"
         path.write_bytes(text_pdf([""]))            # one page ...
         verdict = verify_pdf_identity(str(path), DOI, TITLE, pages="295-300")  # ... of six
-        assert verdict.state == UNREADABLE
+        assert verdict.state == TRUNCATED
         assert not verdict.ok
+        assert "1 of the 6 pages" in verdict.reason
 
     def test_a_single_page_record_cannot_corroborate_anything(self, tmp_path):
         """Crossref reports an e-locator ("e12345", "1342") as the page field
