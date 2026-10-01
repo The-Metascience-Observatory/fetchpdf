@@ -228,8 +228,22 @@ def retrieve_tiered(
                 if not spec.applicable(ids):
                     continue
 
-            artifact = _run_source(spec, ids, ctx)
+            artifact, raised = _run_source(spec, ids, ctx)
             if artifact is None:
+                if not raised:
+                    # A source returning None used to vanish: no log line, no
+                    # provenance attempt. A whole tier could be walked and look,
+                    # in both the verbose trail and the audit record, as though
+                    # it had never run -- which is exactly the wrong impression
+                    # when the question is "why did this record fail?".
+                    ctx.log(f"    - {spec.name}: nothing returned")
+                    if provenance is not None:
+                        provenance.attempt(
+                            source=spec.name,
+                            tier_attempted=tier.name,
+                            accepted=False,
+                            outcome="source returned no artifact",
+                        )
                 continue
 
             # Guarded for the same reason _run_source is. A validator is just
@@ -342,10 +356,15 @@ def retrieve_tiered(
 # -- the three rules --------------------------------------------------------
 
 
-def _run_source(spec, ids, ctx) -> Optional[Artifact]:
-    """Call a source. A source that raises demotes; it never kills the record."""
+def _run_source(spec, ids, ctx) -> Tuple[Optional[Artifact], bool]:
+    """Call a source. A source that raises demotes; it never kills the record.
+
+    Returns (artifact, raised). The flag is what lets the caller tell "this
+    source ran and found nothing" from "this source blew up", which matters
+    because only the second is already logged here.
+    """
     try:
-        return spec.resolve()(ids, ctx)
+        return spec.resolve()(ids, ctx), False
     except Exception as e:
         ctx.log(f"    ✗ {spec.name} raised: {str(e)[:150]}")
         if ctx.provenance is not None:
@@ -355,7 +374,7 @@ def _run_source(spec, ids, ctx) -> Optional[Artifact]:
                 accepted=False,
                 outcome=f"source raised: {str(e)[:150]}",
             )
-        return None
+        return None, True
 
 
 def _judge(artifact: Artifact, expected: Tier, ctx, order: List[Tier],

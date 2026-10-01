@@ -2021,3 +2021,33 @@ def test_elsevier_rawtext_only_envelope_reports_no_body_instead_of_a_title_only_
     c = jats_to_markdown(doc)
     assert not c.ok
     assert any("no <body>" in f for f in c.failures)
+
+
+# --------------------------------------------------------------------------
+# 16. Source misses are recorded, not silently dropped
+# --------------------------------------------------------------------------
+
+
+def test_source_returning_nothing_is_recorded(tmp_path):
+    """A silent miss used to leave no trace in the trail or the audit record.
+
+    Both T1 sources here fail; only one raises. Before, the quiet one left the
+    tier looking as though it had never been walked -- the exact question a
+    provenance sidecar exists to answer.
+    """
+    def quiet(ids, ctx):
+        return None
+
+    def loud(ids, ctx):
+        raise RuntimeError("boom")
+
+    result = run_engine(
+        tmp_path,
+        {Tier.T1_XML: [("quiet_one", quiet), ("loud_one", loud)]},
+        want_provenance=True,
+    )
+
+    outcomes = {a.source: a.outcome for a in result.provenance.attempts}
+    assert outcomes["quiet_one"] == "source returned no artifact"
+    assert "boom" in outcomes["loud_one"]
+    assert {a.tier_attempted for a in result.provenance.attempts if a.source == "quiet_one"} == {"T1_XML"}
