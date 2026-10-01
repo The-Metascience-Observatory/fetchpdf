@@ -50,6 +50,25 @@ UNREADABLE = "unreadable"      # engine present, no usable text layer
 NO_REFERENCE = "no_reference"  # nothing to compare against -- no DOI hit, no title
 NO_ENGINE = "no_engine"        # no PDF reader; the CLI refuses to start in this state
 TRUNCATED = "truncated"        # this article, but only a fragment of it
+WALL = "access_wall"           # the publisher's access wall or preview page, not the article
+
+#: Phrases that mean the PDF is a publisher's access wall, preview or cover
+#: sheet rendered to PDF, not the article. Checked BEFORE identity, because a
+#: wall page carries the right DOI and title. Distinct from validate.py's
+#: _PAYWALL_SIGNATURES, which are written against HTML.
+#:
+#: Measured 2026-10-01 on all 19,816 corpus PDFs (first DOI_PAGES pages): one
+#: hit, a ScienceDirect "Article preview" page saved as an 11-page PDF
+#: (abstract and references only) -- a true positive; no real article matched.
+PDF_WALL_SIGNATURES = (
+    "purchase pdf",
+    "access through your institution",
+    "this content is only available via pdf",
+    "log in to view the full text",
+    "your institution does not have access",
+    "to read this article in full you will need to make a payment",
+    "sign in to download",
+)
 
 #: Pages read from the front of the document. Capped in both directions: enough
 #: to clear a cover sheet, few enough that a 164-page report's own bibliography
@@ -233,6 +252,13 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
     truncated = _truncation_reason(reader, pages, reference_chars)
 
     text = reader.text(DOI_PAGES)
+    if text:
+        flat = " ".join(text.lower().split())
+        wall = next((phrase for phrase in PDF_WALL_SIGNATURES if phrase in flat), None)
+        if wall:
+            return IdentityVerdict(
+                WALL, "PDF is the publisher's access wall or preview page, not "
+                      "the article ({!r} on its first pages)".format(wall))
     if not text:
         corroborated = _page_count_corroborates(reader, pages)
         if corroborated:

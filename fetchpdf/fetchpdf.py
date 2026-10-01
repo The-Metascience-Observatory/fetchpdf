@@ -669,7 +669,7 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
     except OSError:
         return False
 
-    from .retrieval.pdf_identity import TRUNCATED, WRONG, verify_pdf_identity
+    from .retrieval.pdf_identity import TRUNCATED, WALL, WRONG, verify_pdf_identity
     from .retrieval.resolve import arxiv_id_from_doi
 
     title = _title_for(doi, verbose=verbose)
@@ -686,7 +686,7 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
     # is the whole point: a wrong file kept can be found again by re-running the
     # audit, a right file deleted cannot.
     #
-    #   1. Only WRONG and TRUNCATED are positive findings. NO_REFERENCE,
+    #   1. Only WRONG, TRUNCATED and WALL are positive findings. NO_REFERENCE,
     #      UNREADABLE and NO_ENGINE all mean "nobody checked" -- an absent title,
     #      a scanned page, an install with no PDF reader. None of them is a
     #      statement about the file, and every one of them used to delete it.
@@ -697,7 +697,12 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
     # metadata unavailable deleted eight of them, and every DataCite-only DOI
     # (Zenodo, OSF, figshare) was destroyed on sight because Crossref has no
     # record of it and "no record" was being read as "no title".
-    if verdict.state not in (WRONG, TRUNCATED) or _metadata_was_unavailable(doi):
+    #
+    # WALL (the publisher's access wall or preview page) is positive too, and it
+    # rests on the file's own text rather than on fetched metadata, so rule 2
+    # does not apply to it.
+    if verdict.state != WALL and (
+            verdict.state not in (WRONG, TRUNCATED) or _metadata_was_unavailable(doi)):
         _note_unverified(doi, url)
         _print_yellow_warning(
             f"⚠️  Could not verify the PDF for {doi}: {verdict.reason} "

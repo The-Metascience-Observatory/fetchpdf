@@ -6,6 +6,8 @@ against 500 real main-article PDFs from the corpora on this machine, and the
 numbers in the comments are from that run.
 """
 
+import os
+
 import pytest
 
 from conftest import text_pdf
@@ -550,3 +552,34 @@ class TestEmbeddedTitleCannotConvictOnLength:
         verdict = verify_pdf_identity(str(path), DOI, TITLE, pages="107-122")
         assert verdict.state == VERIFIED
         assert verdict.signals == ["page-count-corroborated"]
+
+
+# -- access walls -------------------------------------------------------------
+# Ported from fetchpdf-grey branch pmc-page-figures-blocked (a7d2c98).
+
+@pytest.mark.parametrize("phrase", [
+    "Purchase PDF", "Access through your institution", "Sign in to download"])
+def test_an_access_wall_with_the_right_doi_is_refused(tmp_path, phrase):
+    """A wall page carries the article's DOI and title; it is still not the article."""
+    path = _pdf(tmp_path, "wall.pdf",
+                ["ScienceDirect", phrase, TITLE, f"https://doi.org/{DOI}"] + PROSE)
+    verdict = verify_pdf_identity(path, DOI, TITLE)
+    assert verdict.state == pdf_identity.WALL
+    assert not verdict.ok
+
+
+def test_a_wall_phrase_broken_across_lines_still_matches(tmp_path):
+    path = _pdf(tmp_path, "wall.pdf", ["Access through your", "institution", TITLE] + PROSE)
+    assert verify_pdf_identity(path, DOI, TITLE).state == pdf_identity.WALL
+
+
+def test_a_wall_is_discarded_even_when_metadata_is_unreachable(tmp_path, monkeypatch):
+    from fetchpdf import fetchpdf as fpd
+
+    path = _pdf(tmp_path, "wall.pdf", ["Purchase PDF", TITLE, f"https://doi.org/{DOI}"] + PROSE)
+    monkeypatch.setattr(fpd, "_metadata_was_unavailable", lambda doi: True)
+    monkeypatch.setattr(fpd, "_note_identity", lambda *a, **k: None)
+    monkeypatch.setattr(fpd, "_note_rejected", lambda *a, **k: None)
+    monkeypatch.setattr(fpd, "_title_for", lambda doi, verbose=False: None)   # Crossref down
+    assert fpd._accept_downloaded_pdf(str(path), DOI) is False
+    assert not os.path.exists(path)
