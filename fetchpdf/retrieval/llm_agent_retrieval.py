@@ -19,10 +19,12 @@ given three things layer 1 already knows and a model does not:
      decided were probably not ours, among which the actual replication
      packages are hiding.
 
-WHAT IT MAY NOT DO. It proposes; the existing gates dispose. Nothing it returns
-skips `_should_route` or `_deposit_claims_another_article`, nothing it saves
-skips `_commit`'s size cap, sha256, deduplication and challenge-page sniff, and
-nothing it does can change whether the record succeeded. Every failure path --
+WHAT IT MAY NOT DO. It proposes; the existing gates dispose. A repository or
+GitHub proposal meets `_ownership_refusal` first -- the full-text scan's own
+verdict on how the paper mentions it, the tool-library backstop, and
+`_deposit_claims_another_article` -- nothing it saves skips `_commit`'s size
+cap, sha256, deduplication and challenge-page sniff, and nothing it does can
+change whether the record succeeded. Every failure path --
 no backend, no key, a timeout, a receipt that will not parse -- logs once and
 returns an empty list, leaving layer 1's result exactly as it was.
 
@@ -341,6 +343,11 @@ def enumerate_llm_agent(ids, ctx) -> List[SupplementFile]:
         return []
 
     _path, text = source
+    # How the paper itself mentions each repository, judged by the same rules
+    # the full-text scan applies. A proposal the paper names only inside a
+    # reference entry, or as a preregistration, is refused below.
+    from .fulltext_scan import scan_text
+    paper = {_canonical_key(c): c for c in scan_text(text)}
     brief = build_brief(
         select_text(text), _identity(ids),
         _obtained_lines(ctx), _declined_lines(ctx), backend.downloads)
@@ -367,7 +374,7 @@ def enumerate_llm_agent(ids, ctx) -> List[SupplementFile]:
     _note("proposed_something" if receipt else "ran_found_nothing")
     files: List[SupplementFile] = []
     for index, entry in enumerate(receipt):
-        routed = _route(entry, ids, ctx)
+        routed = _route(entry, ids, ctx, paper)
         if routed is None:
             routed = [_as_supplement_file(entry, ids, index)]
         files.extend(routed)
@@ -388,14 +395,14 @@ _REPOSITORY_HINTS = ("osf.io", "zenodo.org", "10.5281/zenodo", "datadryad.org",
 _GITHUB_HINT = "github.com/"
 
 
-def _route(entry: dict, ids, ctx):
+def _route(entry: dict, ids, ctx, paper=None):
     """The existing repository enumerators, when the URL names a repository.
 
     Returns None when this is an ordinary file URL and should just be
-    downloaded. Routing matters for more than politeness: `_files_in_repository`
-    is where a deposit meets `_should_route` and
-    `_deposit_claims_another_article`, so a model's proposal is judged by the
-    same gate as an index's.
+    downloaded, and [] when a repository proposal is refused. A repository or
+    GitHub proposal must pass `_ownership_refusal` before it is enumerated:
+    the enumerators themselves check nothing about whose deposit it is, and
+    the index providers apply `_should_route` before they call them.
     """
     if entry.get("saved_as"):
         return None                       # already a file, on disk
@@ -403,6 +410,12 @@ def _route(entry: dict, ids, ctx):
 
     target = (entry.get("deposit") or "") or entry.get("url") or ""
     lowered = target.lower()
+    if _GITHUB_HINT in lowered or any(hint in lowered for hint in _REPOSITORY_HINTS):
+        refusal = _ownership_refusal(target, ids, ctx, paper or {})
+        if refusal:
+            entry["refused"] = refusal
+            ctx.log(f"    llm_agent: not routing {target}: {refusal}")
+            return []
     if _GITHUB_HINT in lowered:
         repo = lowered.split(_GITHUB_HINT, 1)[1].strip("/")
         repo = "/".join(repo.split("/")[:2])
@@ -414,6 +427,71 @@ def _route(entry: dict, ids, ctx):
     return None
 
 
+_EXPLICIT_DOI = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>?#]+)", re.I)
+
+
+def _canonical_key(candidate) -> str:
+    """A full-text-scan key that matches however the deposit was written.
+
+    Zenodo appears as both zenodo.org/records/<n> and 10.5281/zenodo.<n>;
+    the paper and the model need not pick the same form.
+    """
+    ident = candidate.ident.lower()
+    if candidate.repo == "zenodo":
+        ident = ident.rsplit("zenodo.", 1)[-1]
+    return f"{candidate.repo}:{ident}"
+
+
+def _deposit_doi(target: str, candidate) -> Optional[str]:
+    """The deposit's DOI, when the proposal states it or it follows from the id."""
+    match = _EXPLICIT_DOI.search(target or "")
+    if match:
+        return match.group(1).rstrip(".,;)/")
+    if candidate is None:
+        return None
+    if candidate.repo == "osf":
+        return f"10.17605/osf.io/{candidate.ident.lower()}"
+    if candidate.repo == "zenodo":
+        return f"10.5281/zenodo.{candidate.ident.lower().rsplit('zenodo.', 1)[-1]}"
+    return None
+
+
+def _ownership_refusal(target: str, ids, ctx, paper: dict) -> Optional[str]:
+    """Why a repository proposal must not be downloaded, or None to allow it.
+
+    Three checks, each reusing a rule the deterministic path already applies:
+
+    1. The paper's own mention. If the full-text scan found this deposit in
+       the paper and refused it -- inside a reference entry, attached to a
+       preregistration, a preprint DOI -- the model's say-so does not override
+       that. A deposit the paper never names (the agent found it by
+       navigating) is not refused for that alone; finding those is the job.
+    2. Known tool and library GitHub orgs, which are never the paper's own code.
+    3. `_deposit_claims_another_article`: a deposit whose DataCite record says
+       it belongs to a different article is that article's. Fails open on a
+       lookup error, as it does for index links.
+    """
+    from .fulltext_scan import _PREPRINT_DOI, _TOOL_ORGS, REFUSE, scan_text
+    from .supplement_graph import _deposit_claims_another_article
+
+    if _PREPRINT_DOI.search(target or ""):
+        return "a preprint DOI, not a data deposit"
+    found = scan_text(target)
+    candidate = found[0] if found else None
+    if candidate is not None:
+        if candidate.repo == "github" and \
+                candidate.ident.split("/", 1)[0].lower() in _TOOL_ORGS:
+            return f"{candidate.ident.split('/', 1)[0]} is a known tool/library org"
+        mention = paper.get(_canonical_key(candidate))
+        if mention is not None and mention.verdict == REFUSE:
+            return f"the paper itself names it only as: {mention.reason}"
+    doi = _deposit_doi(target, candidate)
+    article = getattr(ids, "doi", None)
+    if doi and article and _deposit_claims_another_article(doi, article, ctx):
+        return "its DataCite record says it belongs to a different article"
+    return None
+
+
 def _record(ctx, entry: dict, routed) -> None:
     """Every proposal in the sidecar, downloaded or not.
 
@@ -421,16 +499,19 @@ def _record(ctx, entry: dict, routed) -> None:
     considered, and the sidecar is where a reader checks whether a paper's
     deposit was seen and rejected or never seen at all.
     """
-    from .linked_artifacts import CLASS_OWNED, record_link
+    from .linked_artifacts import CLASS_OWNED, CLASS_RELATED, record_link
 
     target = entry.get("url") or entry.get("deposit") or ""
+    refused = entry.get("refused")
     record_link(
         ctx, service="llm_agent", target_pid=target,
         target_type=("software" if _GITHUB_HINT in target.lower()
                      else "dataset" if entry.get("kind") == KIND_DATASET
                      else "supplement"),
-        relation="NamedInFullText", classified=CLASS_OWNED,
-        title=(entry.get("why") or "")[:300],
+        relation="NamedInFullText",
+        classified=CLASS_RELATED if refused else CLASS_OWNED,
+        title=((f"refused: {refused}; " if refused else "")
+               + (entry.get("why") or ""))[:300],
         publisher=entry.get("deposit") or "",
         provider_name="llm_agent", routed=bool(routed),
     )

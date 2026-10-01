@@ -799,13 +799,22 @@ Three things a model does not have and layer 1 does:
    returned 3,005 `related` links that were never routed, and of 280 `owned`
    ones 264 were BioStudies mirrors of supplements already in hand.
 
-It proposes; the existing machinery disposes. A proposal naming a repository
-routes through the same repository enumerators an index's link would, and a
-GitHub repository is fetched as a tarball. Unlike an index's link, a proposal is
-**not** currently put through the ownership check (`_should_route`), so review
-what lands in `{stem}_data_artifacts/`. Anything it saves still meets the same
-per-file size cap, sha256 deduplication and challenge-page sniff as every other
-file. No failure of it can change whether a record succeeded.
+It proposes; the existing rules dispose. Before a proposal naming a repository
+or a GitHub project is enumerated, it must pass three checks the deterministic
+path already applies:
+- **how the paper itself mentions it.** If the full-text scan finds the deposit
+  only inside a reference entry, attached to a preregistration, or as a
+  preprint DOI, the proposal is refused;
+- **known tool and library GitHub orgs** are refused;
+- **a deposit whose DataCite record names a different article** is refused.
+
+A deposit the paper never names, which the agent found by navigating, is not
+refused for that alone; finding those is its job. Refusals are recorded in the
+sidecar as `related`, with the reason. Plain file URLs the agent proposes are
+downloaded without an ownership check, so review what lands in
+`{stem}_data_artifacts/`. Anything it saves meets the same per-file size cap,
+sha256 deduplication and challenge-page sniff as every other file. No failure of
+it can change whether a record succeeded.
 
 ### `--llm-backend`: two sandboxes, one result
 

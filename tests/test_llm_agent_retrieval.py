@@ -161,9 +161,7 @@ def test_a_repository_landing_page_is_enumerated_not_downloaded(tmp_path, monkey
     Measured live: the agent found a GitHub repository this paper's own regex
     could not -- the PDF broke the URL across a line -- proposed the repo page,
     and the pipeline correctly refused it as "served HTML". The right refusal
-    to the wrong question. Routing it also puts the deposit through
-    _should_route and _deposit_claims_another_article, so a model's proposal is
-    judged by the same gate an index's is.
+    to the wrong question.
     """
     routed = []
     monkeypatch.setattr(agent, "get_backend", lambda *_a, **_k: FakeBackend(
@@ -172,10 +170,91 @@ def test_a_repository_landing_page_is_enumerated_not_downloaded(tmp_path, monkey
     import fetchpdf.retrieval.supplement_graph as graph
     monkeypatch.setattr(graph, "_files_in_repository",
                         lambda target, ids, ctx, via=None: routed.append((target, via)) or [])
+    monkeypatch.setattr(graph, "_deposit_claims_another_article",
+                        lambda doi, article, ctx: False)
     http = FakeHttp()
     _pull(tmp_path, http, backend=True)
     assert routed == [("https://osf.io/abcde/", "llm_agent")]
     assert http.downloaded == []
+
+
+# --- ownership: a proposal meets the same rules as the deterministic path ----
+
+def _route_spy(monkeypatch, claims_other=False):
+    """Record what reaches the enumerators; stub the DataCite ownership lookup."""
+    import fetchpdf.retrieval.supplement_graph as graph
+    routed, asked = [], []
+    monkeypatch.setattr(graph, "_files_in_repository",
+                        lambda target, ids, ctx, via=None: routed.append(target) or [])
+    monkeypatch.setattr(graph, "_github_tarball",
+                        lambda repo, ctx: routed.append(repo) or [])
+    monkeypatch.setattr(graph, "_deposit_claims_another_article",
+                        lambda doi, article, ctx: asked.append(doi) or claims_other)
+    return routed, asked
+
+
+def _propose(monkeypatch, url):
+    monkeypatch.setattr(agent, "get_backend", lambda *_a, **_k: FakeBackend(
+        [{"url": url, "kind": "dataset", "why": "the authors' deposit"}]))
+
+
+def _agent_links(tmp_path):
+    sidecar = json.loads((tmp_path / "10.1234--x_linked_artifacts.json").read_text())
+    return [l for l in sidecar["links"] if l["service"] == "llm_agent"]
+
+
+def test_a_deposit_the_paper_cites_as_someone_elses_is_refused(tmp_path, monkeypatch):
+    """The paper names this OSF project only inside a reference entry, which the
+    full-text scan refuses. The model's say-so does not override that."""
+    routed, _ = _route_spy(monkeypatch)
+    _propose(monkeypatch, "https://osf.io/zzzzz/")
+    paper = ("<body>Data availability: deposited at https://osf.io/abcde/.</body>"
+             "<ref-list><ref><mixed-citation>Smith (2020). Their data. "
+             "https://osf.io/zzzzz/</mixed-citation></ref></ref-list>")
+    from fetchpdf.retrieval.supplementary import pull_for_record
+    from fetchpdf.retrieval.supplement_index import _providers
+    (tmp_path / "10.1234--x.xml").write_text(paper, encoding="utf-8")
+    pull_for_record(raw_identifier="10.1234/x", doi="10.1234/x",
+                    save_path=str(tmp_path / "10.1234--x.pdf"), http=FakeHttp(),
+                    providers=tuple(p for p in _providers() if p[0] == "llm_agent"),
+                    llm_agent_retrieval=True, max_file_bytes=CAP)
+    assert routed == []
+    (link,) = _agent_links(tmp_path)
+    assert link["classified"] == "related"
+    assert link["routed_to_download"] is False
+    assert "reference" in link["title"]
+
+
+def test_a_deposit_claiming_another_article_is_refused(tmp_path, monkeypatch):
+    routed, asked = _route_spy(monkeypatch, claims_other=True)
+    _propose(monkeypatch, "https://osf.io/qwert/")
+    _pull(tmp_path, FakeHttp(), backend=True)
+    assert asked == ["10.17605/osf.io/qwert"]
+    assert routed == []
+
+
+def test_a_tool_librarys_repository_is_refused(tmp_path, monkeypatch):
+    routed, _ = _route_spy(monkeypatch)
+    _propose(monkeypatch, "https://github.com/tidyverse/dplyr")
+    _pull(tmp_path, FakeHttp(), backend=True)
+    assert routed == []
+
+
+def test_a_preprint_doi_is_not_a_deposit(tmp_path, monkeypatch):
+    routed, _ = _route_spy(monkeypatch)
+    _propose(monkeypatch, "https://doi.org/10.31234/osf.io/8r9p7")
+    _pull(tmp_path, FakeHttp(), backend=True)
+    assert routed == []
+
+
+def test_a_deposit_found_by_navigating_still_routes(tmp_path, monkeypatch):
+    """Not named in the paper and not claimed by another article: finding these
+    is what the agent is for, so it goes through."""
+    routed, asked = _route_spy(monkeypatch)
+    _propose(monkeypatch, "https://doi.org/10.5281/zenodo.123456")
+    _pull(tmp_path, FakeHttp(), backend=True)
+    assert asked == ["10.5281/zenodo.123456"]
+    assert routed == ["https://doi.org/10.5281/zenodo.123456"]
 
 
 def test_a_github_repo_goes_to_the_tarball_enumerator(tmp_path, monkeypatch):
