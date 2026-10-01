@@ -20,7 +20,7 @@ poor trade.
 import json
 import os
 from enum import IntEnum
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 class Tier(IntEnum):
@@ -190,6 +190,25 @@ def _tier_by_name(name: str) -> Tier:
         )
 
 
+#: Hooks that may contribute sources to every ladder loaded after they register.
+#: Empty in a plain install -- an optional pack fills it at its own import time,
+#: which is what lets a pack add a rung without ladder.json naming it. JSON
+#: carries no comment syntax, so a config file cannot hold an optional section
+#: the way a module can.
+LADDER_EXTENSIONS: List[Callable[["Ladder"], None]] = []
+
+
+def register_ladder_extension(hook: Callable[["Ladder"], None]) -> None:
+    """Register a hook run against each freshly loaded Ladder, before validation.
+
+    Before rather than after so a malformed contribution fails at load like any
+    other config error, instead of surfacing thousands of records into a batch.
+    Idempotent: registering the same hook twice would wire its sources twice.
+    """
+    if hook not in LADDER_EXTENSIONS:
+        LADDER_EXTENSIONS.append(hook)
+
+
 def default_ladder_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), _LADDER_FILENAME)
 
@@ -208,6 +227,8 @@ def load_ladder(path: Optional[str] = None, validate: bool = True) -> Ladder:
     except json.JSONDecodeError as e:
         raise LadderConfigError(f"ladder config {path} is not valid JSON: {e}")
     ladder = Ladder(raw, path=path)
+    for extend in LADDER_EXTENSIONS:
+        extend(ladder)
     if validate:
         ladder.validate()
     return ladder

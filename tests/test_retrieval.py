@@ -2051,3 +2051,34 @@ def test_source_returning_nothing_is_recorded(tmp_path):
     assert outcomes["quiet_one"] == "source returned no artifact"
     assert "boom" in outcomes["loud_one"]
     assert {a.tier_attempted for a in result.provenance.attempts if a.source == "quiet_one"} == {"T1_XML"}
+
+
+# --------------------------------------------------------------------------
+# 17. Ladder extensions: an optional pack adds rungs without ladder.json
+# --------------------------------------------------------------------------
+
+
+def test_a_registered_extension_adds_a_rung_after_its_anchor(monkeypatch):
+    from fetchpdf.retrieval import tiers
+
+    monkeypatch.setattr(tiers, "LADDER_EXTENSIONS", [])
+
+    def extend(ladder):
+        spec = tiers.SourceSpec("pack_xml", {"callable": "pack:pack_xml",
+                                             "requires": ["pmcid"]})
+        spec._fn = lambda ids, ctx: None
+        ladder.sources["pack_xml"] = spec
+        names = ladder.tier_sources[tiers.Tier.T1_XML]
+        names.insert(names.index("pmc_efetch") + 1, "pack_xml")
+
+    tiers.register_ladder_extension(extend)
+    tiers.register_ladder_extension(extend)        # idempotent
+    names = tiers.load_ladder().tier_sources[tiers.Tier.T1_XML]
+    assert names.count("pack_xml") == 1
+    assert names[names.index("pmc_efetch") + 1] == "pack_xml"
+
+
+def test_a_plain_install_has_no_extensions():
+    from fetchpdf.retrieval import tiers
+
+    assert "pack_xml" not in tiers.load_ladder().sources
