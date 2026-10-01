@@ -818,7 +818,9 @@ def record_stem_for(artifact_path: str) -> str:
 
 def write_markdown(artifact_path: str, overwrite: bool = False,
                    verbose: bool = False) -> Optional[str]:
-    """Convert one artifact and write `{stem}.md`. Returns the path, or None.
+    """Convert one artifact and write `{stem}_from_xml.md` / `{stem}_from_html.md`.
+
+    Returns the path, or None.
 
     Never raises into a batch: a document that will not convert is one bad
     record, not a dead run.

@@ -39,7 +39,7 @@ ENV_FILE = _load_env_file()
 EMAIL = os.getenv("EMAIL")
 
 # Rate-limit lifts these keys buy, where the provider documents one:
-S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")    # Semantic Scholar: 1 -> 100 req/s
+S2_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")    # Semantic Scholar: 1 -> 10 req/s (ladder.json)
 ENTREZ_API_KEY = os.getenv("ENTREZ_EUTILS_API_KEY")   # NCBI E-utils: 3 -> 10 req/s
 OPENALEX_API_KEY = os.getenv("OPENALEXAPIKEY")
 CORE_API_KEY = os.getenv("COREAPIKEY")

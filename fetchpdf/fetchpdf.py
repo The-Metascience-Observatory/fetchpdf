@@ -7423,8 +7423,10 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--no-xml-fallback",
         action="store_true",
-        help="Disable the Elsevier full-text XML fallback (last resort for Elsevier DOIs). "
-             "XML fallback is ON by default; use this for PDF-only pipelines that can't ingest XML."
+        help="Never save structured full text in place of a PDF: skips the PMC/efetch "
+             "and eLife JATS routes, Crossref text-mining XML, the XML half of the Elsevier "
+             "API, and the T1/T2 fallback tried when no PDF is found. ON by default; use "
+             "this for PDF-only pipelines that cannot ingest .xml or .html."
     )
     parser.add_argument(
         "--prioritize-xml",
@@ -7457,7 +7459,8 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--to-markdown",
         action="store_true",
-        help="Also write {stem}.md for every XML/HTML artifact retrieved. Prose becomes "
+        help="Also write {stem}_from_xml.md / {stem}_from_html.md for every XML/HTML "
+             "artifact retrieved. Prose becomes "
              "Markdown; tables stay canonical HTML so colspan/rowspan survive, which "
              "Markdown cannot express. Run fetchpdf-md on a directory to convert "
              "artifacts you already have."
@@ -7630,7 +7633,10 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--llm-model",
         default="haiku",
-        help="Model for --llm-adjudicate-artifacts (default: haiku)."
+        help="Model for --llm-adjudicate-artifacts and the retrieval agent "
+             "(--llm-agent-retrieval, --pull-everything). Claude names such as haiku "
+             "or sonnet; translated to OpenRouter slugs under --llm-backend openrouter "
+             "(default: haiku)."
     )
     parser.add_argument(
         "--make-subfolder",
