@@ -49,6 +49,11 @@ dependencies = [
 html = [
     "lxml>=4.9",
 ]
+# Institutional access (`get-cookies setup`): reads the publishers' cookies from
+# the user's own browser, where they signed in through their library.
+access = [
+    "browser_cookie3>=0.19",
+]
 images = [
     "pymupdf>=1.24",
 ]
@@ -76,6 +81,8 @@ Issues = "https://github.com/The-Metascience-Observatory/fetchpdf/issues"
 
 [project.scripts]
 fetchpdf = "fetchpdf.fetchpdf:main"
+# Sign in through your library once and save the cookie file --cookies reads.
+get-cookies = "fetchpdf.get_cookies:main"
 # Converts artifacts already on disk, so a corpus fetched before --to-markdown
 # existed does not need re-downloading.
 fetchpdf-md = "fetchpdf.retrieval.to_markdown:main"

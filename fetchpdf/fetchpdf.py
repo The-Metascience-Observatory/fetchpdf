@@ -4170,15 +4170,22 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
 
 #-----------------------------------------------------------------------------------------
 @_timed("institutional_cookies")
-def _try_institutional(save_path, resolved, cookies_file, verbose=False,
+def _try_institutional(save_path, resolved, cookies_file=None, verbose=False,
                        _source_out=None):
-    """The opt-in cookie route. A no-op, and never imported, unless --cookies.
+    """The institutional-access route. Returns the saved path, or None.
 
-    Returns the saved path, or None.
+    Off unless the user opted in -- `get-cookies setup`, or --cookies FILE --
+    and silent for a publisher the route does not cover, so a run over APA or
+    Elsevier DOIs carries no extra noise.
     """
-    if not cookies_file or not resolved:
+    if not resolved:
         return None
     from .retrieval import institutional as _institutional
+    if not _institutional.publisher_pdf_urls(resolved):
+        return None
+    cookies_file = cookies_file or _institutional.active_cookies_file()
+    if not cookies_file:
+        return None
 
     def accept(path, url):
         # The same identity check every other route answers to. A subscription
@@ -4195,6 +4202,8 @@ def _try_institutional(save_path, resolved, cookies_file, verbose=False,
             print(f"  Institutional access failed ({type(e).__name__})")
         return None
     if path:
+        if verbose:
+            print(f"✅ Institutional access success for {resolved}")
         _record_source(_source_out, _institutional.SOURCE)
         return path
     # Printed whether or not --verbose is on: "no subscription" and "stale
@@ -4203,6 +4212,27 @@ def _try_institutional(save_path, resolved, cookies_file, verbose=False,
     for reason in reasons:
         print(f"  Institutional access: {reason}")
     return None
+
+
+def _starts_with_pdf_magic(path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"%PDF"
+    except OSError:
+        return False
+
+
+def _cookies_only_fetch(doi, save_path, verbose=False, _source_out=None):
+    """--cookies-only: the institutional route alone, for DOIs whose
+    open-access chain has already failed on an earlier run."""
+    pdf_path = save_path if str(save_path).lower().endswith(".pdf") \
+        else os.path.splitext(str(save_path))[0] + ".pdf"
+    if os.path.exists(pdf_path) and _starts_with_pdf_magic(pdf_path):
+        _record_source(_source_out, "existing")
+        return pdf_path
+    resolved = resolve_identifier_to_doi(doi, verbose=verbose) or doi
+    return _try_institutional(pdf_path, resolved, verbose=verbose,
+                              _source_out=_source_out)
 
 
 def fetch_pdf(doi,
@@ -4258,6 +4288,17 @@ def fetch_pdf(doi,
     # none, and the skip-if-exists path then reports nothing at all.
     pre_existing = _artifact_snapshot(save_path)
 
+    # Institutional access is process state (see retrieval/institutional.py):
+    # an explicit cookie file is recorded for the rest of the run, so the
+    # tiered engine's T5 rung, which re-enters the chain without it, sees it.
+    if cookies_file or _visited is None:
+        from .retrieval import institutional as _institutional
+        if cookies_file:
+            _institutional.use_cookies_file(cookies_file)
+        if _visited is None and _institutional.cookies_only():
+            return _cookies_only_fetch(doi, save_path, verbose=verbose,
+                                       _source_out=_source_out)
+
     written = _fetch_pdf_chain(
         doi, save_path, email=email, verbose=verbose, delay=delay,
         allow_xml_fallback=allow_xml_fallback, use_playwright=use_playwright,
@@ -4282,19 +4323,6 @@ def fetch_pdf(doi,
         return written
     if written:
         _record_source(_source_out, None)
-
-    # ---------------- Institutional access (opt-in, --cookies) --------------
-    # Every open-access route has been tried and returned nothing usable. Here
-    # in fetch_pdf rather than in _fetch_pdf_chain on purpose: the tiered
-    # engine re-enters the chain at T5 with a temporary save_path, and a route
-    # inside the chain would fire on that re-entry too. Placed here it runs
-    # once per record, after the whole chain.
-    institutional_path = _try_institutional(
-        save_path, resolved, cookies_file, verbose=verbose,
-        _source_out=_source_out,
-    )
-    if institutional_path:
-        return institutional_path
 
     # No acceptable PDF. Structured full text is a BETTER artifact than a PDF,
     # not a consolation prize -- it is tier 1 on the extraction ladder and the
@@ -4401,6 +4429,10 @@ def _fetch_pdf_chain(doi,
     if email is None:
         email = _DEFAULT_EMAIL
 
+    # A re-entry for a related DOI (Crossref relation, DataCite alternate)
+    # passes _visited; the record asked for -- including the tiered engine's
+    # T5 rung, which re-enters without it -- does not.
+    _top_level = _visited is None
     if _visited is None:
         _visited = set()
 
@@ -5242,6 +5274,20 @@ def _fetch_pdf_chain(doi,
     except Exception as e: 
         if (verbose): print(f"Error with Unpaywall: {e}")
         pass
+
+    # ---------------- Institutional access (opt-in) ----------------
+    # After the fast open-access lookups (repositories, PMC, Unpaywall), so an
+    # open copy never spends a subscription download, and before the slow long
+    # tail (Crossref landing pages, CORE, DOAJ, DataCite, PMID, Elsevier) that
+    # rarely finds what a subscription serves in a second or two. Grey sources
+    # (fetchpdf_grey) still run after the whole walk. A no-op unless the user
+    # ran `get-cookies setup` or passed --cookies, and for publishers it does
+    # not cover. Once per record: not on related-DOI re-entries.
+    if _top_level and not (xml_only or xml_html_only):
+        institutional_path = _try_institutional(
+            save_path, doi, verbose=verbose, _source_out=_source_out)
+        if institutional_path:
+            return institutional_path
 
     # ----------------  Crossref ----------------
     try:
@@ -7033,8 +7079,22 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     # run proceeds, this is one whole-run summary written once.
     if track_source:
         _print_source_timing()
+    _print_institutional_report()
 
     return results
+
+
+def _print_institutional_report():
+    """Name the publishers whose session looks expired, and the fix."""
+    try:
+        from .retrieval import institutional as _institutional
+    except Exception:      # noqa: BLE001
+        return
+    lines = _institutional.session_report()
+    if lines:
+        print("\n🔐 Institutional access:")
+        for line in lines:
+            print(f"    {line}")
 
 
 def _print_source_timing():
@@ -7656,13 +7716,26 @@ def _main(argv=None, json_out=None):
         dest="cookies_file",
         metavar="FILE",
         default=None,
-        help="Opt-in institutional access: cookies exported from your own "
-             "signed-in browser (Netscape cookies.txt or JSON). Tried only after "
-             "every open-access route has failed, for publishers whose PDF URL "
-             "follows from the DOI (Springer, Wiley, T&F, SAGE, Royal Society). "
-             "Only cookies for the publisher's own domain are sent. Treat the "
-             "file as a password. Default path only; ignored under the tiered "
-             "format flags.",
+        help="Institutional access from this cookie file instead of the one "
+             "`get-cookies setup` configured. Without it, access is used only "
+             "if setup has been run. Covers publishers whose PDF URL follows "
+             "from the DOI (Wiley, T&F, SAGE, Springer, Royal Society, Hogrefe, "
+             "INFORMS); tried after the fast open-access lookups. Only cookies "
+             "for the publisher's own domain are sent. Treat the file as a password.",
+    )
+    parser.add_argument(
+        "--no-cookies", action="store_true",
+        help="Do not use institutional access this run, even if it is set up.",
+    )
+    parser.add_argument(
+        "--cookies-only", action="store_true",
+        help="Institutional access ALONE: skip every other source. For DOIs whose "
+             "open-access chain already failed on an earlier run.",
+    )
+    parser.add_argument(
+        "--cookies-max", type=int, default=None, metavar="N",
+        help="Most PDFs fetched through institutional access in this run "
+             "(default 5000).",
     )
     parser.add_argument(
         "--on-existing",
@@ -7682,6 +7755,21 @@ def _main(argv=None, json_out=None):
     if args.cookies_file and not os.path.isfile(args.cookies_file):
         print(f"❌ --cookies: no such file: {args.cookies_file}")
         return 2
+    from .retrieval import institutional as _institutional
+    if args.no_cookies:
+        _institutional.disable_cookies()
+    elif args.cookies_file:
+        _institutional.use_cookies_file(args.cookies_file)
+    if args.cookies_max:
+        _institutional.set_max_downloads(args.cookies_max)
+    if args.cookies_only:
+        if args.no_cookies or not _institutional.active_cookies_file():
+            print("❌ --cookies-only: institutional access is not set up. Run "
+                  "`get-cookies setup` (or pass --cookies FILE).")
+            return 2
+        _institutional.set_cookies_only(True)
+        # "Alone" includes the grey last resorts an installed fetchpdf_grey adds.
+        globals()["_LAST_RESORTS_ENABLED"] = False
 
     # Answered once, here, rather than per record. Every retrieved PDF is
     # checked against the record it was fetched for, so with no text engine

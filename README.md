@@ -17,7 +17,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
 - [Figure Images](#figure-images)
-- [Institutional access (`--cookies`)](#institutional-access---cookies) — papers your library subscribes to
+- [Institutional access](#institutional-access-your-librarys-subscriptions) — papers your library subscribes to (`get-cookies setup`)
 - [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
@@ -45,7 +45,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC with a manifest of labels, captions and hashes
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
 - 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
-- 🔐 **[Institutional access](#institutional-access---cookies)** (opt-in): `--cookies` fetches papers your library subscribes to, with cookies from your own signed-in browser
+- 🔐 **[Institutional access](#institutional-access-your-librarys-subscriptions)** (opt-in): a one-time `get-cookies setup` lets fetchpdf download papers your library subscribes to
 - 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
@@ -143,6 +143,10 @@ fetchpdf 10.1038/nature12373 -o ./papers # custom output dir
 fetchpdf 10.1038/nature12373 output.pdf  # custom filename
 fetchpdf 33262244                          # PMID auto-resolved to DOI
 ```
+
+**At a university?** Run `get-cookies setup` once and fetchpdf will also fetch
+papers your library subscribes to. See
+[Institutional access](#institutional-access-your-librarys-subscriptions).
 
 ### Getting more than the PDF
 
@@ -934,41 +938,130 @@ Like the supplementary pass, this runs beside retrieval and never changes
 whether a record succeeded, it runs for records already on disk, and a manifest
 that fetched something makes a re-run free.
 
-## Institutional access (`--cookies`)
+## Institutional access (your library's subscriptions)
 
-Off by default. For papers your library subscribes to, `--cookies FILE` fetches
-the publisher's PDF with cookies exported from your own signed-in browser:
+**Off until you set it up.** fetchpdf normally uses only open-access sources.
+If you belong to a university or institute whose library subscribes to
+journals, a one-time setup lets fetchpdf also download papers through your
+library, for the papers that have no open-access copy.
+
+### Set it up (once, about three minutes)
 
 ```bash
-fetchpdf papers.csv -o ./pdfs --cookies ~/cookies.txt
+pip install 'fetchpdf[access]'
+get-cookies setup
 ```
 
-1. Sign in to the publisher's site through your library in your normal browser.
-2. Export that browser's cookies with a cookie-export extension, as a Netscape
-   `cookies.txt` or JSON (a Playwright `storage_state` file also works).
-3. Pass the file with `--cookies`. Sessions expire, so re-export when records
-   start failing with "did not serve a PDF with these cookies".
+The wizard asks two questions, then opens some tabs:
 
-**When it runs.** Only after every open-access route has failed, once per
-record, on the default path (not under `--prioritize-xml` or the other tiered
-flags). It covers publishers whose PDF URL follows from the DOI: Springer
-(`10.1007`, `10.1057`), Wiley (`10.1002`, `10.1111`), Taylor & Francis
-(`10.1080`), SAGE (`10.1177`) and the Royal Society (`10.1098`). Other records
-are untouched. A PDF it fetches meets the same identity check as every other
-source, and is reported as `institutional_cookies` in source tracking and
-`--json`.
+1. **Your library.** Pick it from the list (Harvard Library is built in). For
+   any other library, paste its OpenAthens sign-in link
+   (`https://go.openathens.net/redirector/<your-library-domain>?url=`; your
+   library's website calls it a "redirector" or "bookmarkable link"), or choose
+   to sign in with each publisher's **Access through your institution** button.
+2. **The browser you use every day.** Chrome, Firefox, Edge, Brave or Chromium.
+3. **Sign in.** One tab per publisher opens in **that** browser. Sign in on the
+   first with your institutional account (HarvardKey, for Harvard). Your
+   library's single sign-on lets you straight into the rest, so reload any tab
+   that loaded before you signed in. Check that each one opens the PDF, then
+   press Enter.
 
-**The cookie file is a credential.** Only cookies for the publisher's own
-domain are sent, so a redirect to another host carries none; cookies with no
-domain are dropped; secure cookies are only sent over https; expired ones are
-skipped; and nothing but URLs and HTTP statuses is logged. `*cookies*.txt` and
-`*cookies*.json` are git-ignored, but keep the file out of shared folders.
+The wizard then tests every publisher and prints what works:
 
-**Use it within your licence.** Most subscription licences allow downloading
-articles for your own research and forbid systematic or bulk downloading;
-publishers enforce that by blocking the whole institution's access. Use this for
-the handful of papers the open-access routes could not find, at the default
-pace, not to mirror a journal.
+```
+    Wiley              ✅ ok
+    Taylor & Francis   ✅ ok
+    SAGE               ✅ ok
+    Springer           ⚠️  no access
+    Hogrefe            ❌ not signed in
+```
+
+Offer to retry the ones that did not work, or leave them. `no access` means a
+session exists but the test article was refused: the session lapsed, or your
+library does not take that particular journal. Access is turned on only if at
+least one publisher works.
+
+**That's it.** From now on every `fetchpdf` run, from the CLI, from
+`batch_fetch_pdfs` or from a pipeline, reads those publishers' cookies straight
+from your browser and tries your library's copy when there is no open-access
+one. There is no file to manage and no flag to remember.
+
+### Living with it
+
+| You want to | Run |
+|---|---|
+| See which publishers work right now | `get-cookies check` |
+| Fix publishers whose session lapsed | `get-cookies refresh` (reopens just those tabs; usually no password) |
+| Skip it for one run | `fetchpdf ... --no-cookies` |
+| Retry only through your library, e.g. for DOIs that already failed everywhere else | `fetchpdf failed.csv -o pdfs --cookies-only` |
+| Turn it off | `get-cookies disable` |
+
+Sessions lapse on the publisher's schedule. When a publisher refuses every
+request in a run, the run ends by saying so:
+
+```
+🔐 Institutional access:
+    wiley.com: 0 of 12 PDFs -- the session has probably expired (or was never made). Run `get-cookies refresh`.
+```
+
+Because cookies are read from your browser at the start of each run, keeping
+the browser signed in (simply using it) keeps fetchpdf signed in too. Clearing
+your browser's cookies signs fetchpdf out as well.
+
+### What it covers, and where it sits in the chain
+
+Publishers whose PDF address follows from the DOI: **Wiley** (`10.1002`,
+`10.1111`), **Taylor & Francis** (`10.1080`), **SAGE** (`10.1177`),
+**Springer** (`10.1007`, `10.1057`), the **Royal Society** (`10.1098`),
+**Hogrefe** (`10.1027`) and **INFORMS** (`10.1287`). Other DOIs are untouched
+and produce no extra output.
+
+It runs right after the fast open-access lookups (repositories, PMC,
+Unpaywall), so a paper that is free anywhere is fetched from there and never
+spends a subscription download. It runs before the slow long tail (Crossref
+landing pages, CORE, DOAJ, DataCite, ...), where a subscription answers in a
+second or two. The PDF meets the same identity check as every other source and
+is reported as `institutional_cookies` in source tracking and `--json`. It also
+fills the PDF half of `--get-xml-or-html` runs.
+
+### Sign-in, the VPN, and Cloudflare
+
+- **Your own browser, not one fetchpdf drives.** Sign-in pages refuse a browser
+  they can tell is automated: HarvardKey answers "Unable to sign in". That is
+  why setup opens tabs in your everyday browser and reads its cookies (via
+  `browser_cookie3`) instead. `get-cookies window` keeps the automated variant
+  for libraries whose sign-in tolerates it.
+- **No VPN needed.** A session made through your library's sign-in belongs to
+  your account, not your IP address, so it works off the institutional VPN.
+  That matters when the VPN blocks other sources. Access you get only from
+  being on the campus network or VPN does not carry over.
+- **Cloudflare.** Wiley, Taylor & Francis and SAGE refuse a plain HTTP client.
+  With your browser's cookies and its User-Agent the request usually gets
+  through; when a challenge is served anyway, fetchpdf retries in a headed
+  browser on a private Xvfb display. Set `FETCHPDF_INSTITUTIONAL_VISIBLE=1` to
+  watch it on your own screen.
+- **Known gap:** Springer's "Access through your institution" loops for some
+  libraries (Harvard among them), leaving no session to use.
+
+### Privacy and your licence
+
+- Only cookies for the covered publishers' own domains are read from your
+  browser, written (owner-only, under `~/.config/fetchpdf/`), or sent. A
+  redirect to another host carries none; secure cookies stay on https; expired
+  ones are skipped. Nothing but URLs and HTTP statuses is logged. Treat the
+  files as passwords and keep them out of synced folders.
+- **Stay within your licence.** Most subscription licences allow downloading
+  for your own research and forbid systematic or bulk downloading; publishers
+  enforce that by blocking the whole institution. fetchpdf stops after 5,000
+  library downloads per run (`--cookies-max N` changes it). That is a
+  backstop; keeping to your licence is up to you.
+
+### Without setup: a cookie file
+
+`--cookies FILE` uses a cookie file for one run instead of the configured
+browser. Make one with `get-cookies export --browser chrome`, or with a browser
+cookie-export extension (a Netscape `cookies.txt`, JSON, or Playwright
+`storage_state`).
 
 ## Calling fetchpdf from a script or an agent
 
@@ -1198,6 +1291,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 2. **eLife XML** — eLife DOIs only; skipped with `--no-xml-fallback`
 3. **eScholarship** — via PubMed LinkOut
 4. **Unpaywall** — legal open-access aggregator; requires `EMAIL`
+   - → **[Institutional access](#institutional-access-your-librarys-subscriptions)** runs here, if set up, for the publishers it covers
 5. **Crossref**
    - Direct PDF links in Crossref metadata, and text-mining XML links
    - Landing page scraping (`citation_pdf_url` and similar), plus a direct `/doi/pdf/` try for Taylor & Francis
@@ -1241,15 +1335,13 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
     - Tries the PDF first, then full-text XML (the XML half is skipped with `--no-xml-fallback`)
     - Requires `ELSEVIER_TDM_API_KEY`
 
-If the whole chain yields no PDF and `--cookies` was given, the
-[institutional cookie route](#institutional-access---cookies) is tried next.
-Failing that, `fetch_pdf` tries structured full text
+If the whole chain yields no PDF, `fetch_pdf` tries structured full text
 (T1 XML / T2 HTML) from the tier ladder before giving up; `--no-xml-fallback`
 turns this off.
 
 ---
 
-**Total: 18 standard steps + 5 special handlers**, plus the opt-in cookie route.
+**Total: 18 standard steps + 5 special handlers**, plus opt-in institutional access after Unpaywall.
 
 ## Requirements
 
