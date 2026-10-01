@@ -6,7 +6,12 @@ set in pyproject.toml and the hook below decides what "auto" means.
 
 import os
 
+import pytest
 
+
+# optionalhook: without pytest-xdist installed this hook is unknown, and pytest
+# would refuse to start rather than run serially (`-o addopts=""`).
+@pytest.hookimpl(optionalhook=True)
 def pytest_xdist_auto_num_workers(config):
     """min(8, cores-1) workers: leave one core for the rest of the machine,
     and stop at 8 -- past that, worker startup outweighs a 400-test suite.

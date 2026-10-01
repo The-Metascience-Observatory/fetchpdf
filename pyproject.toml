@@ -98,7 +98,12 @@ version = {attr = "fetchpdf.__version__"}
 # "auto" defers to pytest_xdist_auto_num_workers in tests/conftest.py, which
 # caps the count at min(8, cores-1). The cap cannot live here: addopts is
 # static text, and xdist has no expression syntax for worker counts.
-addopts = "-n auto"
+#
+# -p no:hydra_pytest: hydra-core 1.0.x registers a pytest plugin that crashes on
+# import under Python 3.11+ (a dataclass with a mutable default), killing the
+# run before any test loads. It is somebody else's dependency, not ours;
+# blocking it is harmless when it is not installed.
+addopts = "-n auto -p no:hydra_pytest"
 
 [tool.setuptools.packages.find]
 where = ["."]
