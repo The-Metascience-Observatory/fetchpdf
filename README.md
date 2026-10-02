@@ -17,7 +17,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
 - [Figure Images](#figure-images)
-- [Institutional access](#institutional-access-your-librarys-subscriptions) — papers your library subscribes to (`get-cookies setup`)
+- [Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions) — papers your library subscribes to (`fetchpdf cookies setup`)
 - [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
@@ -45,7 +45,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC with a manifest of labels, captions and hashes
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
 - 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
-- 🔐 **[Institutional access](#institutional-access-your-librarys-subscriptions)** (opt-in): a one-time `get-cookies setup` lets fetchpdf download papers your library subscribes to
+- 🔐 **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** (opt-in): a one-time `fetchpdf cookies setup` lets fetchpdf download papers your library subscribes to
 - 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
@@ -144,9 +144,9 @@ fetchpdf 10.1038/nature12373 output.pdf  # custom filename
 fetchpdf 33262244                          # PMID auto-resolved to DOI
 ```
 
-**At a university?** Run `get-cookies setup` once and fetchpdf will also fetch
+**At a university?** Run `fetchpdf cookies setup` once and fetchpdf will also fetch
 papers your library subscribes to. See
-[Institutional access](#institutional-access-your-librarys-subscriptions).
+[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions).
 
 ### Getting more than the PDF
 
@@ -938,7 +938,7 @@ Like the supplementary pass, this runs beside retrieval and never changes
 whether a record succeeded, it runs for records already on disk, and a manifest
 that fetched something makes a re-run free.
 
-## Institutional access (your library's subscriptions)
+## Institutional access via cookies (ie using your library's subscriptions)
 
 **Off until you set it up.** fetchpdf normally uses only open-access sources.
 If you belong to a university or institute whose library subscribes to
@@ -947,9 +947,10 @@ library, for the papers that have no open-access copy.
 
 ### Set it up (once, about three minutes)
 
+Browser cookie support is included in the standard fetchpdf installation.
+
 ```bash
-pip install 'fetchpdf[access]'
-get-cookies setup
+fetchpdf cookies setup
 ```
 
 The wizard asks two questions, then opens some tabs:
@@ -981,27 +982,24 @@ session exists but the test article was refused: the session lapsed, or your
 library does not take that particular journal. Access is turned on only if at
 least one publisher works.
 
-**That's it.** From now on every `fetchpdf` run, from the CLI, from
-`batch_fetch_pdfs` or from a pipeline, reads those publishers' cookies straight
-from your browser and tries your library's copy when there is no open-access
-one. There is no file to manage and no flag to remember.
+**Cookies often expire within hours**. You likely will have to rerun `fetchpdf cookies setup` periodically to restore access.
 
 ### Living with it
 
 | You want to | Run |
 |---|---|
-| See which publishers work right now | `get-cookies check` |
-| Fix publishers whose session lapsed | `get-cookies refresh` (reopens just those tabs; usually no password) |
+| See which publishers work right now | `fetchpdf cookies check` |
+| Fix publishers whose session lapsed | `fetchpdf cookies refresh` (reopens just those tabs; usually no password) |
 | Skip it for one run | `fetchpdf ... --no-cookies` |
 | Retry only through your library, e.g. for DOIs that already failed everywhere else | `fetchpdf failed.csv -o pdfs --cookies-only` |
-| Turn it off | `get-cookies disable` |
+| Turn it off | `fetchpdf cookies disable` |
 
 Sessions lapse on the publisher's schedule. When a publisher refuses every
 request in a run, the run ends by saying so:
 
 ```
 🔐 Institutional access:
-    wiley.com: 0 of 12 PDFs -- the session has probably expired (or was never made). Run `get-cookies refresh`.
+    wiley.com: 0 of 12 PDFs -- the session has probably expired (or was never made). Run `fetchpdf cookies refresh`.
 ```
 
 Because cookies are read from your browser at the start of each run, keeping
@@ -1029,7 +1027,7 @@ fills the PDF half of `--get-xml-or-html` runs.
 - **Your own browser, not one fetchpdf drives.** Sign-in pages refuse a browser
   they can tell is automated: HarvardKey answers "Unable to sign in". That is
   why setup opens tabs in your everyday browser and reads its cookies (via
-  `browser_cookie3`) instead. `get-cookies window` keeps the automated variant
+  `browser_cookie3`) instead. `fetchpdf cookies window` keeps the automated variant
   for libraries whose sign-in tolerates it.
 - **No VPN needed.** A session made through your library's sign-in belongs to
   your account, not your IP address, so it works off the institutional VPN.
@@ -1059,7 +1057,7 @@ fills the PDF half of `--get-xml-or-html` runs.
 ### Without setup: a cookie file
 
 `--cookies FILE` uses a cookie file for one run instead of the configured
-browser. Make one with `get-cookies export --browser chrome`, or with a browser
+browser. Make one with `fetchpdf cookies export --browser chrome`, or with a browser
 cookie-export extension (a Netscape `cookies.txt`, JSON, or Playwright
 `storage_state`).
 
@@ -1291,7 +1289,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 2. **eLife XML** — eLife DOIs only; skipped with `--no-xml-fallback`
 3. **eScholarship** — via PubMed LinkOut
 4. **Unpaywall** — legal open-access aggregator; requires `EMAIL`
-   - → **[Institutional access](#institutional-access-your-librarys-subscriptions)** runs here, if set up, for the publishers it covers
+   - → **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** runs here, if set up, for the publishers it covers
 5. **Crossref**
    - Direct PDF links in Crossref metadata, and text-mining XML links
    - Landing page scraping (`citation_pdf_url` and similar), plus a direct `/doi/pdf/` try for Taylor & Francis

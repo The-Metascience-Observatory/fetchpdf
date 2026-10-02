@@ -17,7 +17,7 @@ from fetchpdf.retrieval import institutional as inst
 
 @pytest.fixture(autouse=True)
 def _isolated_access(monkeypatch, tmp_path_factory):
-    """No test sees the developer's real `get-cookies setup`, or another test's choices."""
+    """No test sees the developer's real `fetchpdf cookies setup`, or another test's choices."""
     cfg_dir = tmp_path_factory.mktemp("fetchpdf_config")
     monkeypatch.setattr(inst, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(inst, "ACCESS_CONFIG", cfg_dir / "access.json")
@@ -337,7 +337,7 @@ def test_a_publisher_that_refuses_everything_is_reported(monkeypatch):
         inst._note_attempt(f"10.1111/x{i}", False)
     inst._note_attempt("10.1177/y", False)
     lines = inst.session_report()
-    assert len(lines) == 1 and lines[0].startswith("wiley.com") and "get-cookies refresh" in lines[0]
+    assert len(lines) == 1 and lines[0].startswith("wiley.com") and "fetchpdf cookies refresh" in lines[0]
 
 
 def test_refusals_with_a_working_session_blame_the_subscription(monkeypatch):

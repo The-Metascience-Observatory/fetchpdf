@@ -4,6 +4,7 @@ import json
 import pytest
 
 from fetchpdf import get_cookies as gc
+from fetchpdf import fetchpdf as fp
 from fetchpdf.retrieval import institutional as inst
 
 
@@ -46,7 +47,6 @@ def _run_setup(monkeypatch, status):
 
 
 def test_setup_turns_access_on_when_a_publisher_serves_a_pdf(monkeypatch):
-    pytest.importorskip("browser_cookie3")
     assert _run_setup(monkeypatch, {"wiley": "ok", "sage": "no access"}) == 0
     cfg = json.loads(inst.ACCESS_CONFIG.read_text())
     assert cfg["enabled"] and cfg["browser"] == "chrome" and cfg["key"] == "harvard"
@@ -54,15 +54,41 @@ def test_setup_turns_access_on_when_a_publisher_serves_a_pdf(monkeypatch):
 
 
 def test_setup_leaves_access_off_when_nothing_works(monkeypatch):
-    pytest.importorskip("browser_cookie3")
     assert _run_setup(monkeypatch, {"wiley": "not signed in"}) == 1
     assert not inst.ACCESS_CONFIG.exists()
 
 
 def test_disable_turns_it_off(monkeypatch):
     inst.ACCESS_CONFIG.write_text(json.dumps({"browser": "chrome", "enabled": True}))
-    assert gc.main(["disable"]) == 0
+    assert fp.main(["cookies", "disable"]) == 0
     assert inst.load_access_config() is None
+
+
+@pytest.mark.parametrize("argv,code,text", [
+    (["--help"], 0, "setup,check,refresh,disable,export,window"),
+    (["setup", "--help"], 0, "--institution"),
+    (["export"], 2, "--browser"),
+    (["check", "--json"], 2, "unrecognized arguments: --json"),
+])
+def test_cookie_cli_help_and_errors(argv, code, text, capsys):
+    with pytest.raises(SystemExit) as exc:
+        fp.main(["cookies", *argv])
+    assert exc.value.code == code
+    captured = capsys.readouterr()
+    output = captured.out if code == 0 else captured.err
+    assert "usage: fetchpdf cookies" in output
+    assert text in output
+
+
+def test_cookie_cli_without_action_preserves_exit_status(capsys):
+    assert fp.main(["cookies"]) == 2
+    assert "fetchpdf cookies" in capsys.readouterr().out
+
+
+def test_cookie_cli_reads_process_arguments(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["fetchpdf", "cookies", "check"])
+    assert fp.main() == 2
+    assert "fetchpdf cookies setup" in capsys.readouterr().out
 
 
 def test_an_unreadable_browser_never_overwrites_the_last_export(monkeypatch, tmp_path):

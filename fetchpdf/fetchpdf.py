@@ -4179,7 +4179,7 @@ def _try_institutional(save_path, resolved, cookies_file=None, verbose=False,
                        _source_out=None):
     """The institutional-access route. Returns the saved path, or None.
 
-    Off unless the user opted in -- `get-cookies setup`, or --cookies FILE --
+    Off unless the user opted in -- `fetchpdf cookies setup`, or --cookies FILE --
     and silent for a publisher the route does not cover, so a run over APA or
     Elsevier DOIs carries no extra noise.
     """
@@ -5286,7 +5286,7 @@ def _fetch_pdf_chain(doi,
     # tail (Crossref landing pages, CORE, DOAJ, DataCite, PMID, Elsevier) that
     # rarely finds what a subscription serves in a second or two. Grey sources
     # (fetchpdf_grey) still run after the whole walk. A no-op unless the user
-    # ran `get-cookies setup` or passed --cookies, and for publishers it does
+    # ran `fetchpdf cookies setup` or passed --cookies, and for publishers it does
     # not cover. Once per record: not on related-DOI re-entries.
     if _top_level and not (xml_only or xml_html_only):
         institutional_path = _try_institutional(
@@ -7280,7 +7280,9 @@ def _identity_and_reasons(result_path, save_path):
 
 
 def main(argv=None):
-    """Entry point. Splits off --json before argparse gets to print anything.
+    """Entry point. Dispatches subcommands before parsing download options.
+
+    Splits off --json before argparse gets to print anything.
 
     The flag turns stdout into the results channel, so the redirect has to be
     installed before the first write to it -- and argparse writes there itself,
@@ -7293,6 +7295,10 @@ def main(argv=None):
     import contextlib
 
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "cookies":
+        from .get_cookies import main as cookies_main
+        return cookies_main(argv[1:])
+
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--json", action="store_true")
     if not pre.parse_known_args(argv)[0].json:
@@ -7333,6 +7339,9 @@ def _main(argv=None, json_out=None):
     parser = argparse.ArgumentParser(
         description="Download PDFs from DOIs using multiple fallback sources.",
         epilog=(
+            "Institutional access:\n"
+            "  fetchpdf cookies setup    # sign in through your library\n"
+            "  fetchpdf cookies --help   # all cookie commands\n\n"
             "Examples:\n"
             "  fetchpdf papers.csv -o ./pdfs                      # batch from CSV\n"
             "  fetchpdf papers.csv -o ./pdfs -w 4                 # batch, 4 workers\n"
@@ -7722,7 +7731,7 @@ def _main(argv=None, json_out=None):
         metavar="FILE",
         default=None,
         help="Institutional access from this cookie file instead of the one "
-             "`get-cookies setup` configured. Without it, access is used only "
+             "`fetchpdf cookies setup` configured. Without it, access is used only "
              "if setup has been run. Covers publishers whose PDF URL follows "
              "from the DOI (Wiley, T&F, SAGE, Springer, Royal Society, Hogrefe, "
              "INFORMS); tried after the fast open-access lookups. Only cookies "
@@ -7770,7 +7779,7 @@ def _main(argv=None, json_out=None):
     if args.cookies_only:
         if args.no_cookies or not _institutional.active_cookies_file():
             print("❌ --cookies-only: institutional access is not set up. Run "
-                  "`get-cookies setup` (or pass --cookies FILE).")
+                  "`fetchpdf cookies setup` (or pass --cookies FILE).")
             return 2
         _institutional.set_cookies_only(True)
         # "Alone" includes the grey last resorts an installed fetchpdf_grey adds.

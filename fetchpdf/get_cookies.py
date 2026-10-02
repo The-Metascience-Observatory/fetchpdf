@@ -1,12 +1,12 @@
-"""get-cookies: set up institutional access for fetchpdf, once.
+"""fetchpdf cookies: set up institutional access for fetchpdf, once.
 
-    get-cookies setup        # one-time wizard
-    get-cookies check        # which publishers your sessions currently open
-    get-cookies refresh      # re-open sign-in tabs for the ones that lapsed
-    get-cookies disable      # stop using institutional access
+    fetchpdf cookies setup        # one-time wizard
+    fetchpdf cookies check        # which publishers your sessions currently open
+    fetchpdf cookies refresh      # re-open sign-in tabs for the ones that lapsed
+    fetchpdf cookies disable      # stop using institutional access
 
 Institutional access lets fetchpdf download a paper your library subscribes to
-when no open-access copy exists. It is OFF until you run ``get-cookies setup``.
+when no open-access copy exists. It is OFF until you run ``fetchpdf cookies setup``.
 
 How it works. Each publisher keeps your library sign-in as a cookie on its own
 site (wiley.com, tandfonline.com, ...). The wizard opens one subscription
@@ -17,11 +17,11 @@ PDF. It saves your library and browser to ``~/.config/fetchpdf/access.json``.
 From then on every fetchpdf run reads those publishers' cookies straight from
 that browser, so sessions you keep alive by ordinary browsing are picked up
 with nothing to re-export. When one lapses, fetchpdf says so at the end of the
-run and ``get-cookies refresh`` re-opens just those tabs.
+run and ``fetchpdf cookies refresh`` re-opens just those tabs.
 
 Why your own browser and not one this tool drives: identity providers refuse a
 browser they can tell is automated -- HarvardKey answers "Unable to sign in".
-The automated mode is still here as ``get-cookies window`` for libraries whose
+The automated mode is still here as ``fetchpdf cookies window`` for libraries whose
 sign-in tolerates it.
 
 Only cookies for the covered publishers' own domains are read or sent, and the
@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote, urlsplit
@@ -153,7 +154,7 @@ def export_from_browser(browser: str, out_path: Path, label: str,
     Returns cookies per publisher site. Raises if the browser's cookie store
     cannot be read (browser_cookie3 missing, store locked, keyring refused).
     """
-    import browser_cookie3      # optional: pip install 'fetchpdf[access]'
+    import browser_cookie3
     loader = getattr(browser_cookie3, browser)
     sites = sorted({_site(t.format(doi="x/y"))
                     for t in inst.PUBLISHER_ARTICLE_TEMPLATES.values()})
@@ -206,22 +207,74 @@ def check_access(cookie_file, publishers: List[str], verbose: bool = False) -> D
     """
     cookies = inst.load_cookies(cookie_file)
     ua = inst.load_user_agent(cookie_file)
+
+    def probe(name: str) -> str:
+        doi = PROBES[name]
+        site = _publisher_site(name)
+        if not any(inst._domain_matches(c["domain"], site) for c in cookies):
+            return "not signed in"
+        target = Path(tmp) / f"{name}.pdf"
+        url, challenged = inst.fetch_with_cookies(doi, target, cookies,
+                                                  verbose=verbose, user_agent=ua)
+        if not url and challenged:
+            url = inst.fetch_in_browser(doi, target, cookies, user_agent=ua,
+                                        verbose=verbose)
+        return "ok" if url else "no access"
+
+    # Probes run concurrently: each Cloudflare-fronted publisher can take 90 s
+    # (page load + challenge wait in a hidden browser), and serially that is
+    # minutes of silence. fetch_in_browser owns its own Playwright session and
+    # the Xvfb display is shared under a lock, so the probes are independent --
+    # the batch downloader already runs this path from many worker threads.
+    # The bar reports each publisher as it finishes; tqdm when installed, one
+    # line per publisher otherwise.
     out = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        for name in publishers:
-            doi = PROBES[name]
-            site = _publisher_site(name)
-            if not any(inst._domain_matches(c["domain"], site) for c in cookies):
-                out[name] = "not signed in"
-                continue
-            target = Path(tmp) / f"{name}.pdf"
-            url, challenged = inst.fetch_with_cookies(doi, target, cookies,
-                                                      verbose=verbose, user_agent=ua)
-            if not url and challenged:
-                url = inst.fetch_in_browser(doi, target, cookies, user_agent=ua,
-                                            verbose=verbose)
-            out[name] = "ok" if url else "no access"
-    return out
+    bar = _progress(len(publishers))
+    with tempfile.TemporaryDirectory() as tmp, \
+            ThreadPoolExecutor(max_workers=max(1, len(publishers))) as pool:
+        futures = {pool.submit(probe, name): name for name in publishers}
+        for fut in as_completed(futures):
+            name = futures[fut]
+            out[name] = fut.result()
+            bar.update(f"{PUBLISHER_NAMES[name]}: {out[name]}")
+    bar.close()
+    return {name: out[name] for name in publishers}
+
+
+class _PlainProgress:
+    """tqdm's shape without tqdm: one line per publisher as each finishes."""
+
+    def __init__(self, total):
+        self._total = total
+        self._n = 0
+
+    def update(self, text):
+        self._n += 1
+        print(f"  [{self._n}/{self._total}] {text}", flush=True)
+
+    def close(self):
+        pass
+
+
+class _TqdmProgress:
+    def __init__(self, total):
+        from tqdm import tqdm
+        self._bar = tqdm(total=total, desc="  Testing publishers", unit="publisher",
+                         leave=False, dynamic_ncols=True)
+
+    def update(self, text):
+        self._bar.set_postfix_str(text)
+        self._bar.update(1)
+
+    def close(self):
+        self._bar.close()
+
+
+def _progress(total):
+    try:
+        return _TqdmProgress(total)
+    except ImportError:
+        return _PlainProgress(total)
 
 
 def _print_status(status: Dict[str, str]) -> None:
@@ -315,8 +368,8 @@ def cmd_setup(args) -> int:
     try:
         import browser_cookie3  # noqa: F401
     except ImportError:
-        print("  This needs one extra package:  pip install 'fetchpdf[access]'\n"
-              "  (or: pip install browser_cookie3), then run get-cookies setup again.")
+        print("  A required dependency is missing: browser_cookie3.\n"
+              "  Run pip install 'browser_cookie3>=0.19', then run fetchpdf cookies setup again.")
         return 2
 
     # 1. Library
@@ -381,7 +434,7 @@ def cmd_setup(args) -> int:
 
     if not any(st == "ok" for st in status.values()):
         print("  No publisher served a PDF, so institutional access is NOT turned on.\n"
-              "  Check you can open a PDF in your browser, then run get-cookies setup again.")
+              "  Check you can open a PDF in your browser, then run fetchpdf cookies setup again.")
         return 1
 
     cfg["publishers"] = status
@@ -391,9 +444,9 @@ def cmd_setup(args) -> int:
 
   Every fetchpdf run now reads these publishers' cookies from {browser}, and
   tries your library's copy after the fast open-access sources. Nothing else to do.
-    - Sessions lapse. A run tells you when; then:  get-cookies refresh
+    - Sessions lapse. A run tells you when; then:  fetchpdf cookies refresh
     - One run without it:  fetchpdf ... --no-cookies
-    - Turn it off:         get-cookies disable
+    - Turn it off:         fetchpdf cookies disable
 """)
     return 0
 
@@ -401,7 +454,7 @@ def cmd_setup(args) -> int:
 def _require_config() -> Optional[dict]:
     cfg = inst.load_access_config()
     if not cfg:
-        print("Institutional access is not set up. Run:  get-cookies setup")
+        print("Institutional access is not set up. Run:  fetchpdf cookies setup")
     return cfg
 
 
@@ -441,7 +494,7 @@ def cmd_disable(args) -> int:
         return 0
     cfg["enabled"] = False
     _write_private_json(ACCESS_CONFIG, cfg)
-    print(f"Institutional access is OFF. Turn it back on with: get-cookies setup")
+    print(f"Institutional access is OFF. Turn it back on with: fetchpdf cookies setup")
     return 0
 
 
@@ -472,7 +525,7 @@ def cmd_window(args) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="get-cookies",
+        prog="fetchpdf cookies",
         description="Set up institutional access for fetchpdf (off until you run setup).")
     sub = parser.add_subparsers(dest="command")
 
@@ -578,11 +631,11 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("get-cookies needs Playwright: pip install playwright && "
+        print("fetchpdf cookies needs Playwright: pip install playwright && "
               "playwright install chromium")
         return 2
     if not os.environ.get("DISPLAY") and sys.platform.startswith("linux"):
-        print("get-cookies opens a browser window for you to sign in; no $DISPLAY here.")
+        print("fetchpdf cookies opens a browser window for you to sign in; no $DISPLAY here.")
         return 2
 
     profile.mkdir(parents=True, exist_ok=True)
@@ -650,7 +703,7 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
             if "closed" not in str(exc).lower():
                 raise
             print("\nThe browser window was closed before the run finished. Your "
-                  "sign-in (if any) is kept in the profile; rerun get-cookies to "
+                  "sign-in (if any) is kept in the profile; rerun fetchpdf cookies to "
                   "finish and write the cookie file.")
             return 1
         finally:

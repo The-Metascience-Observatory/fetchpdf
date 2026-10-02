@@ -48,7 +48,7 @@ SOURCE = "institutional_cookies"
 # --------------------------------------------------------------------------
 # Off until the user opts in. Two ways to opt in:
 #
-# * `get-cookies setup` writes ACCESS_CONFIG (library + everyday browser). From
+# * `fetchpdf cookies setup` writes ACCESS_CONFIG (library + everyday browser). From
 #   then on every fetchpdf run re-reads the publisher cookies straight from that
 #   browser, once per process, so sessions the user keeps alive by ordinary
 #   browsing are picked up without re-exporting anything.
@@ -69,7 +69,7 @@ _live_resolved = False
 
 
 def load_access_config() -> Optional[dict]:
-    """The `get-cookies setup` configuration, or None if access is not set up."""
+    """The `fetchpdf cookies setup` configuration, or None if access is not set up."""
     try:
         cfg = json.loads(ACCESS_CONFIG.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -114,7 +114,7 @@ def reset_cookie_source() -> None:
 def active_cookies_file() -> Optional[str]:
     """The cookie file this process should use, or None when access is off.
 
-    An explicit ``--cookies`` wins. Otherwise, if `get-cookies setup` has been
+    An explicit ``--cookies`` wins. Otherwise, if `fetchpdf cookies setup` has been
     run, the configured browser's cookies are exported once per process to the
     config dir and that file is used; if the browser cannot be read (locked
     store, keyring prompt declined) the last export is used instead.
@@ -192,7 +192,7 @@ def session_report() -> List[str]:
 
     Five or more attempts and not one PDF is either a lapsed session or a run
     of titles the library does not subscribe to. The publisher's known-good
-    test article tells the two apart, so the user is sent to `get-cookies
+    test article tells the two apart, so the user is sent to `fetchpdf cookies
     refresh` only when signing in again would help.
     """
     with _stats_lock:
@@ -207,7 +207,7 @@ def session_report() -> List[str]:
                          f"likely titles your library does not subscribe to.")
         else:
             lines.append(f"{site}: 0 of {tried} PDFs -- the session has probably "
-                         f"expired (or was never made). Run `get-cookies refresh`.")
+                         f"expired (or was never made). Run `fetchpdf cookies refresh`.")
     return lines
 
 
@@ -358,7 +358,7 @@ PUBLISHER_PDF_TEMPLATES = {
 #: DOI prefix -> the article's landing page on the publisher's own host. The
 #: browser fallback lands here first: Cloudflare issues its challenge for the
 #: site, not the PDF endpoint, and a PDF URL opened cold hands the challenge to
-#: a fetch() that cannot run it. `get-cookies` also signs in by way of these.
+#: a fetch() that cannot run it. `fetchpdf cookies` also signs in by way of these.
 PUBLISHER_ARTICLE_TEMPLATES = {
     "10.1007": "https://link.springer.com/article/{doi}",
     "10.1057": "https://link.springer.com/article/{doi}",
@@ -448,7 +448,7 @@ def _save_pdf(response, save_path) -> bool:
 
 
 def load_user_agent(path) -> Optional[str]:
-    """The browser User-Agent recorded in a `get-cookies` file, or None.
+    """The browser User-Agent recorded in a `fetchpdf cookies` file, or None.
 
     Cloudflare binds its clearance cookie to the User-Agent that earned it, so
     replaying the cookies under a different one gets the challenge again.
