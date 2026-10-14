@@ -40,13 +40,15 @@
       "preprint_jats",
       "pmc_efetch",
       "elsevier_tdm",
-      "crossref_tdm"
+      "crossref_tdm",
+      "epmc_repo_xml"
     ],
     "T2_HTML": [
       "unpaywall_html",
       "pmc_html",
       "publisher_html",
-      "arxiv_html"
+      "arxiv_html",
+      "epmc_transform_html"
     ],
     "T3_SOURCE": [
       "arxiv_eprint"
@@ -104,6 +106,13 @@
       ],
       "notes": "link[] with content-type text/xml AND intended-application text-mining. Crossref retired click-through tokens in Dec 2020, so 401/403 is the expected case, not an error."
     },
+    "epmc_repo_xml": {
+      "callable": "epmc_repo:fetch_repo_xml",
+      "requires": [
+        "pmcid"
+      ],
+      "notes": "Last T1 rung. Europe PMC's render repository: canonical JATS for records that are inEPMC=Y but isOpenAccess=N, which every documented route refuses (fullTextXML 404, efetch denial stub). Internal frontend endpoint, not the documented API; set enabled=false to refuse it. Skipped when a PMC JATS was already taken."
+    },
     "unpaywall_html": {
       "callable": "publisher_html:fetch_unpaywall_fulltext",
       "requires": [
@@ -128,6 +137,13 @@
         "arxiv_id"
       ],
       "notes": "Official arxiv.org/html covers ~Dec 2023 onward; ar5iv covers the back catalogue to 2007 (verified: 0704.0001 -> 200, 35 tables). Enabled because between them they cover effectively the whole corpus. Machine conversion, so the caveat is recorded in provenance."
+    },
+    "epmc_transform_html": {
+      "callable": "epmc_repo:fetch_transform_html",
+      "requires": [
+        "pmcid"
+      ],
+      "notes": "Last T2 rung. The same render-repository JATS, server-rendered to HTML by Europe PMC; a different failure surface, reached when the manifest lists no XML. Internal frontend endpoint; set enabled=false to refuse it."
     },
     "arxiv_eprint": {
       "callable": "arxiv:fetch_eprint_source",
@@ -213,6 +229,10 @@
     "www.ebi.ac.uk": {
       "rps": 5,
       "burst": 5
+    },
+    "europepmc.org": {
+      "rps": 2,
+      "burst": 2
     },
     "api.crossref.org": {
       "rps": 10,

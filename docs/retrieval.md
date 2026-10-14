@@ -163,6 +163,33 @@ Brill record above yields 715 KB of publisher HTML where it previously yielded
 two pages of PDF, and `10.1111/all.14949` yields the full JATS that NCBI efetch
 serves for records Europe PMC's OA route refuses.
 
+### Europe PMC's render repository
+
+The last rung of T1 (`epmc_repo_xml`) and of T2 (`epmc_transform_html`),
+in `fetchpdf/retrieval/sources/epmc_repo.py`. Both are reached on the tiered
+path and by the no-PDF fallback above.
+
+A record can be `inEPMC=Y` and `isOpenAccess=N` at once (JAMA, and most
+subscription titles depositing under a public-access mandate). Every
+documented route refuses it: `fullTextXML` 404s, `oa.fcgi` answers
+`idIsNotOpenAccess`, efetch returns the denial stub, doi.org returns 403. Yet
+europepmc.org renders the whole article to anyone, from a repository its own
+frontend reads:
+
+    /api/fulltextRepo?pmcId=..&type=METADATA   file manifest (lists *.ssnex.xml)
+    /api/fulltextRepo?type=FILE&fileName=..    the JATS, with a real <body>
+    /api/fulltextXmlTransform?ft_id=..         the same JATS rendered to HTML
+
+Verified on PMC12712832 (3 tables, 263 populated cells) and four further
+inEPMC/non-OA records. The XML rung is skipped when a PMC JATS was already
+taken for the record.
+
+These are internal frontend endpoints, not the documented REST API, so both
+sources validate like any other and demote quietly if the shape changes. The
+publisher of such a record has signalled no bulk XML; a deployment that must
+honour that sets `"enabled": false` on both sources in its ladder config
+(`FETCHPDF_LADDER`).
+
 ## T2 HTML support
 
 Publisher HTML needs a forgiving parser, the `html` extra — see

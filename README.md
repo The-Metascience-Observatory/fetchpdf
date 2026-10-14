@@ -440,7 +440,7 @@ PDFs it fetches only the missing structured half and re-downloads nothing.
 
 | Tier | Format | Why it sits here |
 |------|--------|------------------|
-| T1 | JATS/TEI XML | Cells, spans, headers and footnotes are markup. The only lossless tier. |
+| T1 | JATS/TEI XML | Cells, spans, headers and footnotes are markup. The only lossless tier. Its last rung is Europe PMC's render repository (`epmc_repo_xml`), which serves full JATS for records Europe PMC displays but does not list as open access; see [docs/retrieval.md](docs/retrieval.md#europe-pmcs-render-repository). |
 | T2 | Publisher HTML | Real `<table>` with `<th>` and spans; at most OA publishers generated from the same JATS. Includes the PMC article page, tried when both PMC XML routes come up empty — measured over a 105-paper corpus, all six records the ladder had settled on a PDF for had a PMCID and a complete PMC page waiting. |
 | T3 | LaTeX / e-print source | Lossless in principle, macro-hostile in practice. |
 | T4 | Structured supplements | Often the underlying data; coverage is partial. |
@@ -1335,7 +1335,9 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 
 If the whole chain yields no PDF, `fetch_pdf` tries structured full text
 (T1 XML / T2 HTML) from the tier ladder before giving up; `--no-xml-fallback`
-turns this off.
+turns this off. Each tier ends with a Europe PMC render-repository rung
+(`epmc_repo_xml`, `epmc_transform_html`), so a non-OA record that Europe PMC
+still displays comes back as JATS.
 
 ---
 
