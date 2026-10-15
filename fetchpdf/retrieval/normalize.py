@@ -185,6 +185,19 @@ def _span_attrs(cell) -> str:
     return "".join(parts)
 
 
+#: Empty elements that stand for whitespace: JATS <break/>, Elsevier ce:br,
+#: ce:hsp and ce:vsp, and their HTML counterparts. They carry no text, so
+#: without a separator the text on either side runs together ("Pain
+#: TestingMorphological Analyses"). The canonical form allows no <br>, so the
+#: separator is a space.
+_SEPARATOR_TAGS = frozenset(("break", "br", "hsp", "vsp", "hr"))
+
+#: Block content inside a cell (JATS <p>/<list-item>, Elsevier ce:para, HTML
+#: <li>/<div>): adjacent blocks are separate lines in the source and get a
+#: space between them for the same reason.
+_BLOCK_TAGS = frozenset(("p", "para", "list-item", "li", "div", "label", "disp-quote"))
+
+
 def _cell_text(cell) -> str:
     """Cell content as escaped text, with superscript markers kept inline.
 
@@ -192,32 +205,44 @@ def _cell_text(cell) -> str:
     says what it means ("mean +/- SD unless stated"). Dropping them makes the
     note unresolvable, so they are preserved as literal characters rather than
     as markup that the canonical format does not allow.
+
+    Line breaks and block boundaries become a space; inline markup (<bold>,
+    <italic>, <sub>) adds nothing, because "p<sub>1</sub>" is one token.
     """
-    parts = []
-    for node in cell.iter():
-        name = _localname(node.tag)
+    parts: List[str] = []
+    _walk_cell(cell, parts)
+    return _esc(_WS_RE.sub(" ", "".join(parts)).strip())
+
+
+def _walk_cell(node, parts: List[str], markers: bool = True) -> None:
+    """Append `node`'s content (not its tail) to `parts`, in document order.
+
+    `markers=False` skips the <sup>/<xref> handling, for publisher HTML, whose
+    cells have only ever been flattened as plain text.
+    """
+    if node.text and isinstance(node.tag, str):
+        parts.append(node.text)
+    for child in node:
+        name = _localname(child.tag)
+        if name in _SEPARATOR_TAGS or name in _BLOCK_TAGS:
+            parts.append(" ")
         # <sup> is bracketed: a superscript marker must survive as visible text or
         # its footnote becomes unresolvable. <xref> is NOT: the source almost
         # always supplies its own delimiters, and adding ours produced "[[351]]".
-        if node is not cell and name == "sup" and node.text:
-            parts.append("[{}]".format(node.text.strip()))
-            if node.tail:
-                parts.append(node.tail)
-            continue
-        if node is not cell and name == "xref":
-            if node.text:
-                parts.append(node.text.strip())
-            if node.tail:
-                parts.append(node.tail)
-            continue
-        if node is cell and node.text:
-            parts.append(node.text)
-        elif node is not cell:
-            if node.text:
-                parts.append(node.text)
-            if node.tail:
-                parts.append(node.tail)
-    return _esc(_WS_RE.sub(" ", "".join(parts)).strip())
+        if markers and name == "sup" and child.text:
+            inner: List[str] = []
+            _walk_cell(child, inner)
+            parts.append("[{}]".format(_WS_RE.sub(" ", "".join(inner)).strip()))
+        elif markers and name == "xref":
+            inner = []
+            _walk_cell(child, inner)
+            parts.append("".join(inner).strip())
+        elif name:
+            _walk_cell(child, parts, markers)
+        if name in _BLOCK_TAGS:
+            parts.append(" ")
+        if child.tail:
+            parts.append(child.tail)
 
 
 # -- publisher HTML ---------------------------------------------------------
@@ -238,7 +263,9 @@ def html_table_to_canonical(table_el, failures: Optional[List[str]] = None) -> s
             if name not in ("td", "th") or cell is tr:
                 continue
             attrs = _span_attrs(cell)
-            text = _WS_RE.sub(" ", "".join(cell.itertext())).strip()
+            text_parts: List[str] = []
+            _walk_cell(cell, text_parts, markers=False)
+            text = _WS_RE.sub(" ", "".join(text_parts)).strip()
             cells.append("<{0}{1}>{2}</{0}>".format(name, attrs, _esc(text)))
         if cells:
             rows.append("<tr>{}</tr>".format("".join(cells)))
