@@ -111,6 +111,24 @@ def reset_cookie_source() -> None:
         _site_stats.clear()
 
 
+def reload_cookie_source() -> None:
+    """Re-export the browser's cookies on next use (after a mid-run setup or refresh).
+
+    Unlike reset_cookie_source, keeps --no-cookies, --cookies and the tally.
+    """
+    global _live_file, _live_resolved
+    with _source_lock:
+        _live_file, _live_resolved = None, False
+
+
+def cookies_user_managed() -> bool:
+    """True when this process was told how to treat cookies (--no-cookies, --cookies FILE).
+
+    The end-of-run offer to import cookies stays out of the way of both.
+    """
+    return _disabled or bool(_explicit_file)
+
+
 def active_cookies_file() -> Optional[str]:
     """The cookie file this process should use, or None when access is off.
 
@@ -418,6 +436,20 @@ def publisher_pdf_urls(doi: str) -> List[str]:
     """Canonical publisher PDF URLs for a DOI, or ``[]`` if none is derivable."""
     prefix = (doi or "").split("/")[0]
     return [t.format(doi=doi) for t in PUBLISHER_PDF_TEMPLATES.get(prefix, [])]
+
+
+def covered_by_site(dois) -> dict:
+    """The DOIs this route could try, grouped by publisher site (``wiley.com`` -> [...]).
+
+    Prefix only: says cookies *could* fetch them, not that the library subscribes.
+    """
+    out: dict = {}
+    for doi in dois:
+        if not doi or not publisher_pdf_urls(doi):
+            continue
+        site = registrable_domain(urlsplit(publisher_article_url(doi) or "").hostname or "")
+        out.setdefault(site, []).append(doi)
+    return out
 
 
 def _save_pdf(response, save_path) -> bool:

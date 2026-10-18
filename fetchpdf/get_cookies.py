@@ -41,7 +41,7 @@ import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
 from .retrieval import institutional as inst
@@ -104,6 +104,15 @@ def _site(url: str) -> str:
 
 def _publisher_site(name: str) -> str:
     return _site(inst.publisher_article_url(PROBES[name]))
+
+
+def publisher_for_site(site: str) -> Optional[str]:
+    """The PROBES name for a publisher site (``wiley.com`` -> ``wiley``), or None.
+
+    None for a covered site with no test article (Royal Society): there is no
+    page to open for signing in, nor one to check the session against.
+    """
+    return next((n for n in PROBES if _publisher_site(n) == site), None)
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -469,21 +478,34 @@ def cmd_check(args) -> int:
     return 0 if any(st == "ok" for st in status.values()) else 1
 
 
+def refresh_sessions(cfg: dict, publishers: Optional[List[str]] = None
+                     ) -> Tuple[Dict[str, str], List[str]]:
+    """Re-test *publishers* (default: all) and re-open sign-in tabs for the lapsed ones.
+
+    Returns (status, lapsed): *lapsed* names the publishers that needed signing
+    in again -- empty when every session still worked and nothing was opened.
+    A publisher never signed in at setup counts as lapsed, so this also adds one.
+    """
+    names = [n for n in PROBES if not publishers or n in publishers]
+    export_from_browser(cfg["browser"], Path(cfg["cookie_file"]), cfg["name"], quiet=True)
+    status = check_access(cfg["cookie_file"], names)
+    lapsed = [n for n, st in status.items() if st != "ok"]
+    if not lapsed:
+        print("Every publisher checked still serves a PDF; nothing to refresh.")
+        _print_status(status)
+        return status, lapsed
+    status.update(_signin_round(cfg, lapsed))
+    _print_status(status)
+    cfg["publishers"] = {**(cfg.get("publishers") or {}), **status}
+    _write_private_json(ACCESS_CONFIG, cfg)
+    return status, lapsed
+
+
 def cmd_refresh(args) -> int:
     cfg = _require_config()
     if not cfg:
         return 2
-    export_from_browser(cfg["browser"], Path(cfg["cookie_file"]), cfg["name"], quiet=True)
-    status = check_access(cfg["cookie_file"], list(PROBES))
-    lapsed = [n for n, st in status.items() if st != "ok"]
-    if not lapsed:
-        print("Every publisher still serves a PDF; nothing to refresh.")
-        _print_status(status)
-        return 0
-    status.update(_signin_round(cfg, lapsed))
-    _print_status(status)
-    cfg["publishers"] = status
-    _write_private_json(ACCESS_CONFIG, cfg)
+    status, _ = refresh_sessions(cfg, args.publishers)
     return 0 if any(st == "ok" for st in status.values()) else 1
 
 
@@ -543,6 +565,8 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("refresh", help="re-open sign-in tabs for lapsed publishers")
+    p.add_argument("--publishers", type=lambda s: [x.strip() for x in s.split(",")],
+                   help=f"subset of: {', '.join(PROBES)}")
     p.set_defaults(func=cmd_refresh)
 
     p = sub.add_parser("disable", help="stop using institutional access")

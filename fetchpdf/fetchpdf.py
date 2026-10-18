@@ -6986,6 +6986,143 @@ def _print_institutional_report():
             print(f"    {line}")
 
 
+def _cookie_offer_applies(args) -> bool:
+    """The library route only ever yields a PDF; these modes would not keep one."""
+    return not (args.abstract_only or args.xml_only or args.xml_html_only)
+
+
+def _ask_yes(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def _import_cookies(cfg, publishers) -> bool:
+    """Run `fetchpdf cookies setup` (no config yet) or `refresh` in-process,
+    for *publishers* only -- the ones the failed papers are at.
+
+    True when the retry is worth making: setup succeeded, or refresh found a
+    lapsed session and re-signed it. A refresh that finds those sessions still
+    working means the misses are titles the library does not take.
+    """
+    from . import get_cookies
+    try:
+        if cfg is None:
+            return get_cookies.main(["setup", "--publishers", ",".join(publishers)]) == 0
+        _, lapsed = get_cookies.refresh_sessions(cfg, publishers)
+    except KeyboardInterrupt:
+        print("\n   Cookie import cancelled.")
+        return False
+    except Exception as exc:      # noqa: BLE001 - never lose the run's results to this
+        print(f"   Cookie import failed ({type(exc).__name__}: {str(exc)[:200]}).")
+        return False
+    if not lapsed:
+        print("   Your library sessions there all work, so these are most likely "
+              "titles your library does not subscribe to.")
+        return False
+    return True
+
+
+def _and_list(names) -> str:
+    names = list(names)
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _offer_cookie_import(failed, retry):
+    """End of run: offer to import library cookies for failures they could fetch.
+
+    *failed* is the run's failed DOIs; *retry(dois)* re-runs those through the
+    library route alone and returns the ones it recovered. Only DOIs at a
+    publisher the route covers are mentioned, and only those publishers are
+    signed in to -- one paper at Wiley opens one Wiley tab, not six. Interactive
+    runs are asked; pipes, cron and --json get the command to run instead.
+    --no-cookies and --cookies FILE are left alone. Returns the recovered DOIs.
+    """
+    from .retrieval import institutional as _institutional
+    from .get_cookies import PUBLISHER_NAMES, publisher_for_site
+    if _institutional.cookies_user_managed():
+        return []
+    # A covered site with no test article (Royal Society) has no page to sign
+    # in on, so it is left out rather than offered a sign-in that opens nothing.
+    by_publisher = {}
+    for site, dois in _institutional.covered_by_site(failed).items():
+        name = publisher_for_site(site)
+        if name:
+            by_publisher[name] = dois
+    if not by_publisher:
+        return []
+    publishers = sorted(by_publisher, key=lambda p: (-len(by_publisher[p]), p))
+    covered = [d for p in publishers for d in by_publisher[p]]
+    n = len(covered)
+    noun = "paper" if n == 1 else "papers"
+    where = ", ".join(f"{PUBLISHER_NAMES[p]} {len(by_publisher[p])}" for p in publishers)
+    who = _and_list([PUBLISHER_NAMES[p] for p in publishers])
+    cfg = _institutional.load_access_config()
+    print()
+    if cfg is None:
+        print(f"🔐 {n} failed {noun} ({where}) may be available through your "
+              f"library's subscriptions, by importing your browser's cookies.")
+        command = f"fetchpdf cookies setup --publishers {','.join(publishers)}"
+    else:
+        print(f"🔐 {n} failed {noun} ({where}) are at publishers your library access "
+              f"covers. If your library sign-in there has lapsed, signing in again may get them.")
+        command = f"fetchpdf cookies refresh --publishers {','.join(publishers)}"
+    question = f"   Sign in to {who} through your library and retry them? [y/N]: "
+    if not _stdio_is_interactive():
+        print(f"   To try: `{command}`, then re-run the failures with --cookies-only "
+              f"(failed_dois.csv has a doi column).")
+        return []
+    if not _ask_yes(question) or not _import_cookies(cfg, publishers):
+        return []
+
+    # Setup or refresh just rewrote the cookie file; read it afresh.
+    _institutional.reload_cookie_source()
+    if not _institutional.active_cookies_file():
+        print("   No library cookies could be read, so nothing was retried.")
+        return []
+    print(f"\n🔁 Retrying {n} {noun} through your library...")
+    global _LAST_RESORTS_ENABLED
+    saved = _institutional.cookies_only(), _LAST_RESORTS_ENABLED
+    _institutional.set_cookies_only(True)
+    _LAST_RESORTS_ENABLED = False
+    try:
+        recovered = list(retry(covered))
+    finally:
+        _institutional.set_cookies_only(saved[0])
+        _LAST_RESORTS_ENABLED = saved[1]
+    print(f"🔐 Library retry: recovered {len(recovered)} of {n}.")
+    return recovered
+
+
+def _retry_batch(dois, batch_kwargs):
+    """Re-run *dois* as a batch; failed_dois.csv ends up as before, minus recoveries.
+
+    The retry would otherwise append a second row for each DOI still missing.
+    """
+    import csv as _csv
+    csv_path = os.path.join(batch_kwargs["output_dir"], "failed_dois.csv")
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            before = list(_csv.reader(f))
+    except OSError:
+        before = None
+    kwargs = dict(batch_kwargs, start_offset=0, create_missing_report=False, json_out=None)
+    results = batch_fetch_pdfs(dois=dois, **kwargs)
+    recovered = [r[0] for r in results if r[1]]
+    if before:
+        gone = {d.lower() for d in recovered}
+        header, rows = before[0], before[1:]
+        col = header.index("doi") if "doi" in header else 1
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(r for r in rows
+                             if len(r) <= col or r[col].lower() not in gone)
+    return recovered
+
+
 def _print_source_timing():
     """Print the seconds-per-hit ranking. Terminal only -- no file written."""
     rows = source_timing_rows()
@@ -7950,6 +8087,11 @@ def _main(argv=None, json_out=None):
 
         success_count = sum(1 for r in results if r[1])
         failed = [r[0] for r in results if not r[1]]
+        if failed and _cookie_offer_applies(args):
+            kw = _batch_kwargs(args, json_out)
+            recovered = set(_offer_cookie_import(failed, lambda ds: _retry_batch(ds, kw)))
+            failed = [d for d in failed if d not in recovered]
+            success_count += len(recovered)
 
         print("\n" + "=" * 60)
         print(f"✅ Success: {success_count}/{len(dois)} ({success_count/len(dois)*100:.1f}%)")
@@ -7997,6 +8139,11 @@ def _main(argv=None, json_out=None):
 
         success_count = sum(1 for r in results if r[1])
         failed = [r[0] for r in results if not r[1]]
+        if failed and _cookie_offer_applies(args):
+            kw = _batch_kwargs(args, json_out)
+            recovered = set(_offer_cookie_import(failed, lambda ds: _retry_batch(ds, kw)))
+            failed = [d for d in failed if d not in recovered]
+            success_count += len(recovered)
 
         print("\n" + "=" * 60)
         print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/len(identifiers)*100:.1f}%)")
@@ -8111,6 +8258,15 @@ def _main(argv=None, json_out=None):
             want_provenance=args.provenance,
             cookies_file=args.cookies_file,
         )
+        if not result and _cookie_offer_applies(args):
+            retried = []
+
+            def _retry_single(dois):
+                retried.append(fetch_pdf(doi=dois[0], save_path=save_path,
+                                         _source_out=source_out, verbose=args.verbose))
+                return dois[:1] if retried[-1] else []
+            if _offer_cookie_import([resolved_identifier or args.doi], _retry_single):
+                result = retried[-1]
 
         # A separate call rather than a parameter on fetch_pdf, and that
         # is the recursion guard: the tiered engine re-enters the chain at T5 via

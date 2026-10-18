@@ -1028,7 +1028,7 @@ least one publisher works.
 | You want to | Run |
 |---|---|
 | See which publishers work right now | `fetchpdf cookies check` |
-| Fix publishers whose session lapsed | `fetchpdf cookies refresh` (reopens just those tabs; usually no password) |
+| Fix publishers whose session lapsed | `fetchpdf cookies refresh` (reopens just those tabs; usually no password; `--publishers wiley,sage` to check only some) |
 | Skip it for one run | `fetchpdf ... --no-cookies` |
 | Retry only through your library, e.g. for DOIs that already failed everywhere else | `fetchpdf failed.csv -o pdfs --cookies-only` |
 | Turn it off | `fetchpdf cookies disable` |
@@ -1040,6 +1040,24 @@ request in a run, the run ends by saying so:
 🔐 Institutional access:
     wiley.com: 0 of 12 PDFs -- the session has probably expired (or was never made). Run `fetchpdf cookies refresh`.
 ```
+
+You don't have to remember any of this. When a run ends with failures at a
+publisher the library route covers, fetchpdf says how many there are and where,
+and offers to sign you in to **only those publishers**: one failed Wiley paper
+opens one Wiley tab, not six. If access is not set up yet, this is the setup;
+if it is, it is a refresh of those publishers' sign-ins. Answer `y` and it
+signs you in, then retries just those papers through your library in the same
+run. This works the same for a single DOI and for a batch:
+
+```
+🔐 3 failed papers (Wiley 2, Taylor & Francis 1) may be available through your library's subscriptions, by importing your browser's cookies.
+   Sign in to Wiley and Taylor & Francis through your library and retry them? [y/N]:
+```
+
+Runs that cannot be asked (pipes, cron, `--json`) print the command instead
+(`fetchpdf cookies setup --publishers wiley,tandf`, or `refresh --publishers ...`).
+`--no-cookies` and `--cookies FILE` turn the offer off. Royal Society papers are
+not offered, because there is no test article to sign in on.
 
 Because cookies are read from your browser at the start of each run, keeping
 the browser signed in (simply using it) keeps fetchpdf signed in too. Clearing
