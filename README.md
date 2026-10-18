@@ -42,11 +42,11 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🔄 **Smart Fallback**: If one source fails, automatically tries the next
 - 🧬 **[Format Prioritization](#format-prioritized-retrieval)**: `--prioritize-xml` prefers structured full text (JATS/TEI) over PDF
 - 📎 **[Supplementary Material](#supplementary-material)**: `--pull-supplementary` fetches every supplementary file alongside the paper
-- 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC with a manifest of labels, captions and hashes
+- 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC (or the Elsevier object API) with a manifest of labels, captions and hashes
+- 🖨️ **[XML to HTML / PDF](#rendering-the-xml-as-html-or-pdf)**: `--generate-html-from-xml` / `--generate-pdf-from-xml` render a retrieved XML as one self-contained page, figures and tables embedded
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
 - 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
 - 🔐 **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** (opt-in): a one-time `fetchpdf cookies setup` lets fetchpdf download papers your library subscribes to
-- 🎭 **Browser Automation**: Uses Playwright to bypass JavaScript-based protections
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
 
@@ -64,20 +64,16 @@ cd fetchpdf
 pip install -e .
 ```
 
-### Optional: Install Chromium for Browser Automation
+### Optional: Install Playwright and Chromium for Browser Automation
 
-You can use FetchPDF without installing a browser. Install Chromium only if you
-want browser-based retrieval: the scrapers enabled by `--add-playwright`, plus a
-few routes that always use a browser when one is available — SSRN downloads,
-Atypon supplementary files (which also need a display or Xvfb), and retries of
-Dataverse bot challenges:
+Install Playwright and Chromium only if you want to try additional scrapers enabled by `--add-playwright`. The scapers are for SSRN, OSF (if direct download fails), Wiley 10.1111/ DOIs, HTML table retrieval (second route), and Atypon supplementary material (PNAS, Science, SAGE, T&F, Annual Reviews).
 
 ```bash
+pip install -e ".[browser]"   # or: pip install playwright
 playwright install chromium
 ```
 
-Without Chromium, browser-based retrieval is unavailable, but downloads through
-APIs and direct HTTP requests still work.
+In practice this is not very useful. 
 
 ### Optional extras
 
@@ -142,6 +138,13 @@ fetchpdf 10.1038/nature12373            # saves to ./pdfs/
 fetchpdf 10.1038/nature12373 -o ./papers # custom output dir
 fetchpdf 10.1038/nature12373 output.pdf  # custom filename
 fetchpdf 33262244                          # PMID auto-resolved to DOI
+
+# Comma-separated list of DOIs/PMIDs: a batch, 8 parallel workers by default
+fetchpdf "10.1038/nature12373,10.1126/science.1241224,33262244" -o ./pdfs
+fetchpdf "10.1038/nature12373,10.1126/science.1241224" -w 2   # override workers
+fetchpdf 10.1038/nature12373, 10.1126/science.1241224          # unquoted works too...
+fetchpdf '10.1002/(SICI)1521-3773(19981116)37:21<2922::AID-ANIE2922>3.0.CO;2-1, 10.1021/ar9900820'
+#   ...but single-quote any list holding ( ) < > ; -- the shell would read them as syntax
 ```
 
 **At a university?** Run `fetchpdf cookies setup` once and fetchpdf will also fetch
@@ -266,6 +269,7 @@ If a PMID cannot be resolved to a DOI, the tool still tries PMID-native sources 
 | Command | What it does |
 |---|---|
 | `fetchpdf-md ./out` | Render XML/HTML artifacts already on disk to `{stem}_from_xml.md` / `{stem}_from_html.md`, without re-downloading. Reads one directory, not its subfolders — after a `--make-subfolder` run, point it at each record's folder |
+| `fetchpdf-render ./out --pdf` | Render article XML already on disk to `{stem}_from_xml.html` (default) and/or `{stem}_from_xml.pdf`; `--fetch-figures` runs the figures pass first. Walks subfolders (`pip install 'fetchpdf[render]'`, plus `[browser]` for `--pdf`) |
 | `fetchpdf-images` | Dump the original embedded image bitstreams from PDFs already on disk (`pip install 'fetchpdf[images]'`) |
 | `fetchpdf-verify` | Offline check that supplementary files on disk still match the hashes their `_supplementary_info.json` manifests recorded |
 | `fetchpdf-pubpeer` | Capture a dated record of a paper's PubPeer comments (an empty record when there are none). DOIs only; needs `PUBPEER_DEVKEY` |
@@ -349,7 +353,8 @@ fetchpdf data.csv --doi-column "paper_doi" -o ./pdfs
 ```
 
 **Parallel execution** — `-w N` on the command line, `workers=N` in Python;
-`delay` is the pause between API calls *per worker*:
+`delay` is the pause between API calls *per worker*. Without `-w`, a CSV runs
+sequentially and a comma-separated list on the command line uses 8 workers:
 
 ```bash
 fetchpdf papers.csv -o ./papers -w 4
@@ -905,7 +910,7 @@ fetches the publisher's image files, which is the only route available when
 there is no PDF at all. Neither substitutes for the other, and they write to
 separate directories.
 
-**PMC only, and it says so.** The two routes are PMC's AWS Open Data mirror —
+**PMC, and Elsevier, and it says so.** The two PMC routes are PMC's AWS Open Data mirror —
 preferred, because the package holds the figure files themselves and declares
 each object's size and md5 before a byte moves — and the PMC blob CDN, whose
 per-file paths are listed nowhere but the article page. A file from the mirror
@@ -928,8 +933,16 @@ asked" are different facts, and a missing file cannot tell them apart:
  "content_type": "image/jpeg", "status": "ok"}
 ```
 
-Record-level refusals are `no_pmcid`, `no_jats_or_page` and
-`page_without_figure_links`; per-figure ones are `figure_not_on_page`,
+**Elsevier** records — Elsevier XML on disk, or a `10.1016` DOI with no PMCID —
+go to the Elsevier object API instead (needs `ELSEVIER_TDM_API_KEY`). The XML's
+`<ce:link locator="gr1">` names each figure and the API's downsampled JPEG for
+that `@ref` is fetched, marked `render`. The listing answers from anywhere; the
+images of a subscription article answer 401 off an entitled network and are
+recorded `blocked:401`, so re-run from the institution's network.
+
+Record-level refusals are `no_pmcid`, `no_jats_or_page`,
+`page_without_figure_links`, `no_elsevier_key`, `elsevier_objects_unavailable`
+and `elsevier_objects_without_figures`; per-figure ones are `figure_not_on_page`,
 `download_failed:<status>` and `blocked:<status>` — a publisher or CDN that
 refuses this client while serving a person has not said the figure does not
 exist, it has said to send a person.
@@ -937,6 +950,32 @@ exist, it has said to send a person.
 Like the supplementary pass, this runs beside retrieval and never changes
 whether a record succeeded, it runs for records already on disk, and a manifest
 that fetched something makes a re-run free.
+
+## Rendering the XML as HTML or PDF
+
+`--generate-html-from-xml` writes `{stem}_from_xml.html` for every record with
+an `.xml` (JATS, or Elsevier full-text XML): one file, figures embedded as
+`data:` URIs, tables as HTML with `colspan`/`rowspan` intact, nothing loaded
+from the network. `--generate-pdf-from-xml` prints the same page to
+`{stem}_from_xml.pdf` with Chromium. Give both to keep both. Either implies
+`--pull-figures`, which is where the images come from.
+
+```bash
+pip install 'fetchpdf[render,browser]' && playwright install chromium
+fetchpdf papers.csv -o ./out --get-xml-or-html --generate-pdf-from-xml
+fetchpdf-render ./out --html --pdf --fetch-figures   # XML you already have
+```
+
+**A rendering, not the publisher's PDF**, and never written as `{stem}.pdf`:
+that name means the typeset article to the skip check and the validators. The
+page opens with a banner naming the source file, the DOI, and how many figures
+were embedded. A figure whose image could not be had keeps a visible
+placeholder, so an incomplete rendering looks incomplete. The prose and
+tables come from the same walker as `--to-markdown`, so the two agree;
+references are omitted and formulas stay as text.
+
+Only records whose XML was kept are rendered — add `--get-xml-or-html` to keep
+the XML beside the PDF.
 
 ## Institutional access via cookies (ie using your library's subscriptions)
 
@@ -1347,10 +1386,9 @@ still displays comes back as JATS.
 
 - Python 3.10+
 - requests, urllib3, python-dotenv
-- playwright (Chromium itself is optional — see [Installation](#optional-install-chromium-for-browser-automation))
 - pypdf (every retrieved PDF is identity-checked, so a PDF text engine is required)
 
-Optional extras are listed under [Optional extras](#optional-extras).
+Playwright is optional (the `browser` extra; see [Installation](#optional-install-playwright-and-chromium-for-browser-automation-experimental)). Optional extras are listed under [Optional extras](#optional-extras).
 
 ## Troubleshooting
 

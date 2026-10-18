@@ -34,6 +34,24 @@ THE TWO ROUTES, IN ORDER, AND WHY THAT ORDER
   3. No JATS at all, but a page: the `<figure>` elements on the page carry both
      the label and the blob URL, so the page enumerates its own figures.
 
+ELSEVIER, WHICH PMC DOES NOT COVER. A record whose XML on disk is Elsevier's
+`full-text-retrieval-response`, or a 10.1016 record with no PMCID, is asked of
+the Elsevier object API instead. Its choice list names every image by the same
+`@ref` the XML's `<ce:link locator>` uses. Verified 2026-10-14 on
+10.1016/j.scitotenv.2019.05.070: `gr1` and `ga1` (the graphical abstract) each
+come as IMAGE-THUMBNAIL (.sml gif), IMAGE-DOWNSAMPLED (.jpg) and IMAGE-HIGH-RES
+(`_lrg.jpg`), beside ALTIMG svgs for formulas and the AAM-PDF. The downsampled
+JPEG is the one taken: it is what ScienceDirect shows in the article, and the
+high-res copy multiplies the size of an embedding for no gain on a page. Marked
+`render`, since it is Elsevier's encode, not the authors' file. The XML is the
+figure list, as JATS is for PMC; the object list alone is used only when there
+is no XML, and then only its `gr*` refs, because `ga1` is not a numbered figure.
+The listing is open; the images are not. Off an entitled network a subscription
+article's DOWNSAMPLED and HIGH-RES files answer 401 AUTHORIZATION_ERROR while its
+THUMBNAIL answers 200, and an open-access article's files answer 200 (both
+measured 2026-10-14, S0048969719320820 against S2589004225028421). So a 401 here
+is `blocked:401`: run it again from the institution's network.
+
 REFUSALS ARE NAMED, per record and per figure, and a manifest with zero
 figures is still written. "We asked and PMC listed nothing" and "we never
 asked" are different facts, and a missing file cannot tell them apart -- the
@@ -59,7 +77,12 @@ from .http import redact
 #: layout can read the other.
 FIGURES_DIR_SUFFIX = "_figures"
 MANIFEST_SUFFIX = "_figures.json"
-_SCHEMA_VERSION = 1
+#: 2 added the Elsevier route. A version-1 `no_pmcid` refusal is therefore not
+#: final any more: it was written by a build that had nowhere else to ask.
+_SCHEMA_VERSION = 2
+
+#: The rendition taken from the Elsevier object API (see the module docstring).
+ELSEVIER_IMAGE_TYPE = "IMAGE-DOWNSAMPLED"
 
 #: Per-file ceiling. Figures are small -- the largest in the working corpus is
 #: under 4 MB -- so this is not a budget, it is a guard against a mislabelled
@@ -183,6 +206,58 @@ def figures_from_jats(content: bytes) -> List[dict]:
             "caption": (caption or "")[:_CAPTION_MAX_CHARS],
         })
     return found
+
+
+def figures_from_elsevier(content: bytes) -> List[dict]:
+    """Every `<ce:figure>` carrying a `<ce:link locator>`: id, label, caption, href.
+
+    The href is the locator (`gr1`), which is the object API's `@ref` and the
+    key to_markdown looks the image up under, so the three agree without a
+    translation table.
+    """
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return []
+
+    found: List[dict] = []
+    seen = set()
+    for block in root.iter():
+        if not _tag_is(block, "figure"):
+            continue
+        index = len(found) + 1
+        label = caption = href = None
+        for element in block.iter():
+            if _tag_is(element, "label") and label is None:
+                label = "".join(element.itertext()).strip()
+            elif _tag_is(element, "caption") and caption is None:
+                caption = " ".join("".join(element.itertext()).split())
+            elif _tag_is(element, "link") and href is None and element.get("locator"):
+                href = element.get("locator").strip()
+        # Elsevier repeats a figure in `ce:floats` and, now and then, inline;
+        # one image is one figure.
+        if not href or href in seen:
+            continue
+        seen.add(href)
+        # `ga1` is the graphical abstract, which carries no label. Numbering it
+        # would invent a "Figure 2" the paper does not have.
+        if not label and re.fullmatch(r"ga\d+", href):
+            figure_label = "Graphical abstract"
+        else:
+            figure_label = normalise_label(label, index)
+        found.append({
+            "id": block.get("id") or f"fig{index}",
+            "figure_label": figure_label,
+            "raw_label": label or "",
+            "href": href,
+            "caption": (caption or "")[:_CAPTION_MAX_CHARS],
+        })
+    return found
+
+
+def is_elsevier_xml(content: bytes) -> bool:
+    """Whether an XML document is Elsevier's full-text response, not JATS."""
+    return b"full-text-retrieval-response" in (content or b"")[:4096]
 
 
 def figures_from_page(html: str) -> List[dict]:
@@ -351,11 +426,22 @@ def _run(manifest, manifest_path, directory, stem, ids, ctx, http,
         ctx.log(f"    figures: refused ({kind}) -- {detail}")
         return finish()
 
+    # Elsevier XML on disk names its figures by locator (`gr1`), which a PMC
+    # copy of the same article would not match, so it goes to Elsevier first.
+    elsevier_xml = _elsevier_xml_on_disk(stem)
+    if elsevier_xml is not None:
+        return _run_elsevier(manifest, directory, ids, ctx, http, max_file_bytes,
+                             elsevier_xml, finish, refuse)
+
     pmcid = pmcid_for(ids, ctx)
     if not pmcid:
+        if _is_elsevier(ids):
+            return _run_elsevier(manifest, directory, ids, ctx, http,
+                                 max_file_bytes, None, finish, refuse)
         return refuse("no_pmcid",
-                      "no PMCID resolved and none in a JATS file on disk; "
-                      "PMC is the only figure route this package has")
+                      "no PMCID resolved and none in a JATS file on disk, and "
+                      "the record is not Elsevier's; PMC and the Elsevier "
+                      "object API are the figure routes this package has")
     manifest["pmcid"] = pmcid
     # Recorded on the identifier set rather than kept local: `learn` never
     # overwrites, so this only ever fills a blank, and the PMC providers below
@@ -421,7 +507,11 @@ def _run(manifest, manifest_path, directory, stem, ids, ctx, http,
                       f"cdn.ncbi.nlm.nih.gov/pmc/blobs link")
 
     _fetch_all(declared, mirror, urls, directory, manifest, ctx, http, max_file_bytes)
+    _settle(manifest, ctx)
+    return finish()
 
+
+def _settle(manifest, ctx) -> None:
     counts = manifest["counts"]
     if counts["failed"] and counts["written"]:
         manifest["status"] = "partial"
@@ -431,11 +521,107 @@ def _run(manifest, manifest_path, directory, stem, ids, ctx, http,
         manifest["status"] = "partial"
     ctx.log(f"    🖼️  {counts['written']} figure(s), {counts['failed']} not obtained "
             f"({manifest['status']})")
+
+
+def _run_elsevier(manifest, directory, ids, ctx, http, max_file_bytes, xml,
+                  finish, refuse) -> FiguresSummary:
+    """The Elsevier route: figures from the XML, files from the object API."""
+    from .._env import ELSEVIER_TDM_API_KEY
+
+    manifest["figures_from"] = "elsevier_xml" if xml else "elsevier_objects"
+    if not ELSEVIER_TDM_API_KEY:
+        return refuse("no_elsevier_key",
+                      "Elsevier record and no ELSEVIER_TDM_API_KEY; the object "
+                      "API is the only route to its figures")
+
+    images = _elsevier_images(ids, ctx)
+    if images is None:
+        return refuse("elsevier_objects_unavailable",
+                      "the Elsevier object API listed nothing for this record "
+                      "(no DOI/PII, not entitled, or no answer)")
+
+    if xml is not None:
+        declared = figures_from_elsevier(xml)
+    else:
+        refs = sorted((r for r in images if re.fullmatch(r"gr\d+", r)),
+                      key=lambda r: int(r[2:]))
+        declared = [{"id": ref, "figure_label": normalise_label(None, i),
+                     "raw_label": "", "href": ref, "caption": ""}
+                    for i, ref in enumerate(refs, start=1)]
+    manifest["counts"]["declared"] = len(declared)
+    if not declared:
+        ctx.log("    figures: the Elsevier record names no figure with an image")
+        manifest["status"] = "none_found"
+        return finish()
+
+    urls = {f["href"]: images[f["href"]] for f in declared if f["href"] in images}
+    if not urls:
+        return refuse("elsevier_objects_without_figures",
+                      f"the object API lists none of the {len(declared)} "
+                      f"figure locator(s) the XML names")
+
+    _fetch_all(declared, {}, urls, directory, manifest, ctx, http, max_file_bytes,
+               headers={"X-ELS-APIKey": ELSEVIER_TDM_API_KEY})
+    _settle(manifest, ctx)
     return finish()
 
 
+def _elsevier_images(ids, ctx) -> Optional[Dict[str, str]]:
+    """`@ref` -> URL of its downsampled image, or None if nothing answered.
+
+    Same lookup, same error-payload rule and the same PII-then-DOI order as the
+    supplementary pass's E10 (supplement_publishers.py), whose helpers this
+    borrows; only the choice kept differs.
+    """
+    from .._env import ELSEVIER_TDM_API_KEY
+    from .supplement_publishers import _elsevier_choices, _elsevier_object_urls
+
+    for url in _elsevier_object_urls(ids):
+        response = ctx.http.get(
+            url,
+            headers={"X-ELS-APIKey": ELSEVIER_TDM_API_KEY, "Accept": "application/json"},
+            timeout=30,
+            polite=False,
+        )
+        # 300 Multiple Choices is this endpoint's success; see E10.
+        if not response.ok and response.status != 300:
+            continue
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            continue
+        if "service-error" in payload or "error-response" in payload:
+            ctx.log("    figures: Elsevier objects answered with an error payload")
+            continue
+        found: Dict[str, str] = {}
+        for choice in _elsevier_choices(payload):
+            if str(choice.get("@type") or "").upper() != ELSEVIER_IMAGE_TYPE:
+                continue
+            ref = str(choice.get("@ref") or "").strip()
+            link = choice.get("$") or choice.get("@href")
+            if ref and link:
+                found.setdefault(ref, link)
+        if found:
+            return found
+    return None
+
+
+def _elsevier_xml_on_disk(stem: str) -> Optional[bytes]:
+    try:
+        with open(stem + ".xml", "rb") as f:
+            content = f.read()
+    except OSError:
+        return None
+    return content if is_elsevier_xml(content) else None
+
+
+def _is_elsevier(ids) -> bool:
+    return bool(getattr(ids, "elsevier_pii", None)
+                or str(getattr(ids, "doi", "") or "").lower().startswith("10.1016/"))
+
+
 def _fetch_all(declared, mirror, urls, directory, manifest, ctx, http,
-               max_file_bytes) -> None:
+               max_file_bytes, headers=None) -> None:
     """One file at a time, through the shared limiter. Never in parallel."""
     for index, figure in enumerate(declared, start=1):
         record = dict(figure)
@@ -467,7 +653,7 @@ def _fetch_all(declared, mirror, urls, directory, manifest, ctx, http,
         filename = _filename_for(figure["href"], url, index)
         destination = os.path.join(directory, filename)
         outcome = http.download(url, destination, max_bytes=max_file_bytes,
-                                polite=False)
+                                headers=headers, polite=False)
         if not outcome.ok:
             record["status"] = _failure_status(outcome)
             record["detail"] = outcome.detail
@@ -530,7 +716,9 @@ def _reusable(existing: dict) -> Optional[FiguresSummary]:
     """
     counts = existing.get("counts") or {}
     refusal = (existing.get("refusal") or {}).get("kind")
-    if not (counts.get("written") or refusal == "no_pmcid"):
+    final_refusal = (refusal == "no_pmcid"
+                     and existing.get("schema_version", 1) >= _SCHEMA_VERSION)
+    if not (counts.get("written") or final_refusal):
         return None
     return FiguresSummary(
         status="skipped",

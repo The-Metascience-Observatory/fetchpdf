@@ -35,7 +35,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Mapping, Optional
 
 from ._util import iso, localname
 from .normalize import html_table_to_canonical, jats_table_to_canonical, token_count
@@ -74,6 +74,11 @@ class Conversion:
     prose_tokens: int = 0
     table_tokens: int = 0
     failures: List[str] = field(default_factory=list)
+    #: image key -> `data:` URI, for a caller rendering HTML (to_html.py). Empty
+    #: for Markdown, which never embeds; a figure whose file is not here keeps
+    #: its placeholder either way, so a missing image still looks missing.
+    images: Dict[str, str] = field(default_factory=dict, repr=False)
+    n_figures_embedded: int = 0
 
     @property
     def ok(self) -> bool:
@@ -95,14 +100,19 @@ def convert_file(path: str) -> Optional[Conversion]:
 # -- JATS -------------------------------------------------------------------
 
 
-def jats_to_markdown(content: bytes, name: str = "") -> Conversion:
+def jats_to_markdown(content: bytes, name: str = "",
+                     images: Optional[Mapping[str, str]] = None) -> Conversion:
     """JATS/TEI/Elsevier XML -> Markdown, walking the body in document order.
 
     Elsevier's `full-text-retrieval-response` shares no tag names with JATS
     (`ce:section`/`ce:para`/`ce:table` against `sec`/`p`/`table-wrap`), so one
     walker carries both vocabularies without either branch shadowing the other.
+
+    `images` (keys from `image_keys`) turns a figure whose file is present into
+    an HTML `<figure>` block. Only to_html.py passes it; the Markdown route
+    leaves it out and its output is unchanged.
     """
-    result = Conversion(markdown="")
+    result = Conversion(markdown="", images=dict(images or {}))
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
@@ -321,10 +331,7 @@ def _emit_one(child, parent, parts: List[str], result: Conversion, depth: int,
         graphic = _graphic_href(child)
         result.n_figures += 1
         # Named, never inlined -- JATS references images and never holds them.
-        parts.append(
-            f"\n> **[{label} — image not included]** {caption}"
-            f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
-        )
+        parts.append(_figure_block(label, caption, graphic, result))
 
     elif tag in ("list",):
         for item in child:
@@ -382,10 +389,7 @@ def _emit_one(child, parent, parts: List[str], result: Conversion, depth: int,
         caption = _first_text(child, "caption")
         graphic = _graphic_href(child)
         result.n_figures += 1
-        parts.append(
-            f"\n> **[{label} — image not included]** {caption}"
-            f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
-        )
+        parts.append(_figure_block(label, caption, graphic, result))
 
     elif tag == "float-anchor":
         if floats is not None:
@@ -472,11 +476,17 @@ def _table_block(wrap, result: Conversion) -> str:
         graphic = _graphic_href(wrap)
         # A <table-wrap> holding only a <graphic> is a table shipped as an image:
         # zero cells, nothing extractable. Say so rather than emit an empty block.
+        # A rendering may still show the image, but keeps the warning above it.
         lines.append("")
         lines.append(
             f"> **[table not machine-readable — published as an image]**"
             f"{f' (source file: `{graphic}`)' if graphic else ''}"
         )
+        src = embedded_image(result.images, graphic)
+        if src:
+            lines.append("")
+            lines.append(f'<figure class="table-image"><img src="{src}" '
+                         f'alt="{_attr(label)}"></figure>')
 
     footnotes = _jats_footnotes(wrap)
     if footnotes:
@@ -510,6 +520,71 @@ def _graphic_href(element) -> str:
         elif name == "link" and el.get("locator"):
             return el.get("locator")
     return ""
+
+
+#: The extensions a figure file is served under, stripped only when present:
+#: `pone.0000308.g001` has no extension, and splitext would cut it to
+#: `pone.0000308`, a key every figure of the article shares.
+_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".svg", ".webp")
+
+
+def image_keys(name: str) -> List[str]:
+    """Every key a figure file or href is looked up under, best first.
+
+    The JATS href, the file PMC served for it and an Elsevier locator name the
+    same image three ways (`pone.0000308.g001`, `pone.0000308.g001.jpg`, `gr1`
+    against `1-s2.0-S…-gr1.jpg`), so both sides reduce to the same keys.
+    """
+    base = os.path.basename(str(name or "").replace("\\", "/")).lower()
+    if not base:
+        return []
+    keys = [base]
+    root, extension = os.path.splitext(base)
+    if extension in _IMAGE_SUFFIXES:
+        keys.append(root)
+    return keys
+
+
+def embedded_image(images: Mapping[str, str], graphic: str) -> str:
+    """The `data:` URI for a figure's href or locator, or ""."""
+    if not images or not graphic:
+        return ""
+    for key in image_keys(graphic):
+        if key in images:
+            return images[key]
+    return ""
+
+
+def _figure_block(label: str, caption: str, graphic: str, result: Conversion) -> str:
+    """A figure: an HTML `<figure>` when its image is at hand, else the placeholder.
+
+    The HTML has no blank line inside it, because CommonMark ends an HTML block
+    at the first one and would render the rest as text.
+    """
+    src = embedded_image(result.images, graphic)
+    if not src:
+        return (
+            f"\n> **[{label} — image not included]** {caption}"
+            f"{f' (source file: `{graphic}`)' if graphic else ''}\n"
+        )
+    result.n_figures_embedded += 1
+    return (
+        f'\n<figure><img src="{src}" alt="{_attr(label)}">'
+        f"<figcaption><b>{_html_text(label)}.</b> {_html_text(caption)}</figcaption>"
+        f"</figure>\n"
+    )
+
+
+def _html_text(text: str) -> str:
+    import html
+
+    return html.escape(text or "", quote=False)
+
+
+def _attr(text: str) -> str:
+    import html
+
+    return html.escape(text or "", quote=True)
 
 
 def _formula_text(element) -> str:
@@ -903,7 +978,8 @@ def convert_directory(directory: str, overwrite: bool = False, verbose: bool = F
             summary["figures"] += conversion.n_figures
 
     # A PDF with no structured sibling has no markdown route here at all.
-    pdfs = {n[:-4] for n in os.listdir(directory) if n.endswith(".pdf")}
+    pdfs = {n[:-4] for n in os.listdir(directory)
+            if n.endswith(".pdf") and not n.endswith("_from_xml.pdf")}  # to_html's render
     summary["no_structured"] = len(pdfs - {os.path.basename(r) for r in best_for_record})
     return summary
 

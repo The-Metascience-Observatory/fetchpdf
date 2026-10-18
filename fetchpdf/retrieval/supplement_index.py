@@ -151,23 +151,34 @@ def jats_sets(ctx) -> Tuple[set, set]:
             ctx.scratch.get("jats_figures") or set())
 
 
-def _matches_href(basename: str, hrefs) -> bool:
-    """True if a filename matches a JATS xlink:href, extension-insensitively.
+# Only actual file extensions may be removed. Dotted publisher asset IDs such
+# as pone.0000308.s001/g001/t001 are identifiers, not filename extensions.
+_ASSET_FILE_EXTENSIONS = {
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "rtf",
+    "csv", "tsv", "txt", "xml", "json", "html", "htm", "zip", "gz", "tgz",
+    "tar", "rar", "7z", "jpg", "jpeg", "png", "gif", "tif", "tiff", "svg",
+    "eps", "ps", "bmp", "webp", "mp4", "avi", "mov", "mp3", "wav", "ogg",
+    "r", "rdata", "rds", "sas", "sps", "sav", "dta", "do", "mat", "h5", "hdf5",
+}
 
-    JATS routinely omits the extension -- href "pone.0000308.s001" against a
-    blob named "pone.0000308.s001.doc" -- so a bare equality test would miss
-    almost every match.
+
+def _matches_href(basename: str, hrefs) -> bool:
+    """Match declared assets without erasing a dotted publisher identifier.
+
+    JATS often omits the file extension. Both a bare asset ID and another
+    encoding of that same asset may match, but s001 must never match s002.
+    Unknown suffixes are preserved; uncertain files retain their normal role.
     """
-    if not basename:
-        return False
-    stem = basename.rsplit(".", 1)[0]
-    for href in hrefs:
-        other = str(href).split("?")[0].rsplit("/", 1)[-1].strip().lower()
-        if not other:
-            continue
-        if basename == other or stem == other.rsplit(".", 1)[0]:
-            return True
-    return False
+    def keys(value):
+        name = str(value).split("?")[0].replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+        result = {name} if name else set()
+        stem, dot, extension = name.rpartition(".")
+        if dot and extension in _ASSET_FILE_EXTENSIONS:
+            result.add(stem)
+        return result
+
+    names = keys(basename)
+    return bool(names and any(names & keys(href) for href in hrefs))
 
 
 # -- Europe PMC -------------------------------------------------------------

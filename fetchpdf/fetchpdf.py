@@ -1364,6 +1364,34 @@ def extract_pmid(raw_identifier):
     return None
 
 
+#: Workers for a comma-separated identifier list when --workers is not given.
+#: A CSV batch keeps 1: it can be thousands of rows, where 8 concurrent
+#: workers is impolite to the sources; a list typed on the command line is short.
+DEFAULT_LIST_WORKERS = 8
+
+
+def split_identifier_list(text):
+    """Split a comma-separated list of DOIs/PMIDs, or return None.
+
+    None means "treat the input as one identifier": there is no comma, only one
+    piece survives, or some piece is not a DOI or PMID. That last case is what
+    keeps a DOI whose suffix contains a comma (legal, if rare) whole -- the
+    fragment after the comma does not start with "10." and is not a PMID.
+    Duplicates are dropped, first occurrence kept.
+    """
+    if not isinstance(text, str) or "," not in text:
+        return None
+    pieces = [p.strip() for p in text.split(",")]
+    pieces = list(dict.fromkeys(p for p in pieces if p))
+    if len(pieces) < 2:
+        return None
+    for piece in pieces:
+        raw = sanitize_doi(piece)
+        if not (canonicalize_doi(raw).startswith("10.") or extract_pmid(raw)):
+            return None
+    return pieces
+
+
 def doi_to_pmid(doi: str, verbose=False):
     """Resolve DOI to PMID when the article is indexed in PubMed."""
     if not isinstance(doi, str) or not doi.strip():
@@ -1407,277 +1435,94 @@ def doi_to_pmid(doi: str, verbose=False):
     return None
 
 
-def pmid_to_doi(pmid: str, verbose=False):
-    """Resolve PMID to DOI using multiple metadata sources."""
+def _primary_pubmed_dois(xml_text, requested_pmid):
+    """Only a matching report's own identifiers; references are never aliases."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_text)
+    for node in root.iter():
+        if isinstance(node.tag, str):
+            node.tag = node.tag.rsplit("}", 1)[-1]
+    dois = set()
+    for article in list(root) if root.tag.endswith("Set") else [root]:
+        pmid = article.findtext("MedlineCitation/PMID") or article.findtext("BookDocument/PMID")
+        if str(pmid or "").strip() != str(requested_pmid).strip():
+            continue
+        ids = article.findall("PubmedData/ArticleIdList/ArticleId") + article.findall("PubmedBookData/ArticleIdList/ArticleId")
+        values = [node.text for node in ids if node.get("IdType", "").lower() == "doi"]
+        values += [node.text for node in article.findall("MedlineCitation/Article/ELocationID")
+                   if node.get("EIdType", "").lower() == "doi" and node.get("ValidYN") != "N"]
+        for value in values:
+            if value:
+                doi = canonicalize_doi(value.strip())
+                if doi.startswith("10."):
+                    dois.add(doi)
+    return dois
 
-    def _clean(doi_value):
-        if not isinstance(doi_value, str):
+
+def pmid_to_doi(pmid: str, verbose=False):
+    """Resolve an exact PubMed report through its own authoritative identifiers.
+
+    A DOI in a reference list or a similar Crossref title can identify another
+    version, chapter, or cited paper. Returning it here changes the requested
+    report, so unmatched candidates must leave PMID-native retrieval available.
+    """
+    pmid = str(pmid).strip()
+    def clean(value):
+        if not isinstance(value, str):
             return None
-        doi = doi_value.strip()
-        if doi.lower().startswith("doi:"):
-            doi = doi[4:].strip()
-        doi = doi.strip(" \t\r\n.;,)]}>\"'")
-        doi = canonicalize_doi(doi)
+        doi = canonicalize_doi(value.strip())
         return doi if doi.startswith("10.") else None
 
-    def _first_doi_from_text(text):
-        if not isinstance(text, str):
-            return None
-        m = DOI_CANDIDATE_RE.search(text)
-        if not m:
-            return None
-        return _clean(m.group(0))
-
-    def _extract_pubmed_core_fields(xml_text: str):
-        title = ""
-        journal = ""
-        year = None
-        if not isinstance(xml_text, str) or not xml_text:
-            return title, journal, year
-
-        mt = re.search(r"<ArticleTitle>(.*?)</ArticleTitle>", xml_text, re.IGNORECASE | re.DOTALL)
-        if mt:
-            title = re.sub(r"<[^>]+>", " ", mt.group(1))
-            title = html.unescape(title)
-            title = re.sub(r"\s+", " ", title).strip()
-
-        mj = re.search(r"<JournalTitle>(.*?)</JournalTitle>", xml_text, re.IGNORECASE | re.DOTALL)
-        if mj:
-            journal = re.sub(r"<[^>]+>", " ", mj.group(1))
-            journal = html.unescape(journal)
-            journal = re.sub(r"\s+", " ", journal).strip()
-
-        # Prefer article publication year from PubDate/ArticleDate; first <Year> can be DateCompleted etc.
-        my = re.search(
-            r"<(?:PubDate|ArticleDate)[^>]*>.*?<Year>(\d{4})</Year>",
-            xml_text,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if not my:
-            my = re.search(r"<Year>(\d{4})</Year>", xml_text, re.IGNORECASE)
-        if my:
-            try:
-                year = int(my.group(1))
-            except Exception:
-                year = None
-        return title, journal, year
-
-    def _crossref_item_year(item: dict):
-        for key in ("issued", "published-print", "published-online", "created"):
-            parts = ((item.get(key) or {}).get("date-parts") or [])
-            if parts and isinstance(parts[0], list) and parts[0]:
-                try:
-                    return int(parts[0][0])
-                except Exception:
-                    pass
-        return None
-
-    def _lookup_doi_via_crossref_title(title: str, journal: str, year, verbose=False):
-        title = (title or "").strip()
-        if len(title) < 8:
-            return None
-
-        candidates = {}
-        queries = [
-            {"query.title": title, "rows": 25},
-            {"query.bibliographic": " ".join(x for x in [title, journal or "", str(year or "")] if x), "rows": 25},
-        ]
-        try:
-            for params in queries:
-                # Add mailto for polite pool (10 req/s vs 5 req/s)
-                if _DEFAULT_EMAIL:
-                    params["mailto"] = _DEFAULT_EMAIL
-                r = _crossref_raw_get("https://api.crossref.org/works", params=params, timeout=15)
-                if r.status_code != 200:
-                    continue
-                items = ((r.json() or {}).get("message") or {}).get("items") or []
-                for item in items:
-                    doi = _clean(item.get("DOI"))
-                    if not doi:
-                        continue
-                    if doi in candidates:
-                        continue
-                    ctitle = ((item.get("title") or [""])[0] or "").strip()
-                    cjournal = ((item.get("container-title") or [""])[0] or "").strip()
-                    cyear = _crossref_item_year(item)
-                    t_sim = _text_similarity(title, ctitle)
-                    j_sim = _text_similarity(journal, cjournal) if journal else 0.0
-                    y_bonus = 0.15 if (year and cyear and year == cyear) else 0.0
-                    score = (0.75 * t_sim) + (0.20 * j_sim) + y_bonus
-                    candidates[doi] = {
-                        "score": score,
-                        "title_sim": t_sim,
-                        "journal_sim": j_sim,
-                        "year": cyear,
-                        "crossref_title": ctitle,
-                    }
-
-            if not candidates:
-                return None
-
-            # When PubMed has a year, only consider Crossref candidates with that year
-            # (avoids wrong match for common titles e.g. "Chronic fatigue syndrome" 2008 vs 2016)
-            if year is not None:
-                same_year = {k: v for k, v in candidates.items() if v["year"] == year}
-                if not same_year:
-                    if verbose:
-                        print(
-                            f"  Crossref title lookup: no candidate with year={year} for PMID {pmid}, skipping"
-                        )
-                    return None
-                candidates = same_year
-
-            best_doi, best = max(candidates.items(), key=lambda kv: kv[1]["score"])
-            strong_title = best["title_sim"] >= 0.72
-            year_mismatch = (
-                year is not None
-                and best["year"] is not None
-                and year != best["year"]
-            )
-            plausible = strong_title and not year_mismatch and (
-                (year and best["year"] and year == best["year"])
-                or best["journal_sim"] >= 0.40
-                or best["score"] >= 0.68
-            )
-            if not plausible:
-                if verbose:
-                    print(
-                        f"  Crossref title lookup best match too weak for PMID {pmid}: "
-                        f"sim={best['title_sim']:.2f}, journal={best['journal_sim']:.2f}, score={best['score']:.2f}"
-                    )
-                return None
-            # When PubMed has a year, verify with Crossref works API (search response can be wrong)
-            if year is not None:
-                try:
-                    crossref_params = {}
-                    if _DEFAULT_EMAIL:
-                        crossref_params["mailto"] = _DEFAULT_EMAIL
-                    verify_r = _crossref_raw_get(
-                        f"https://api.crossref.org/works/{quote_plus(best_doi)}",
-                        params=crossref_params,
-                        timeout=10,
-                    )
-                    if verify_r.status_code == 200:
-                        v_item = (verify_r.json() or {}).get("message") or {}
-                        v_year = _crossref_item_year(v_item)
-                        if v_year is not None and v_year != year:
-                            if verbose:
-                                print(
-                                    f"  Crossref title lookup rejecting year mismatch (works API): "
-                                    f"PMID {pmid} PubMed year={year}, {best_doi} year={v_year}"
-                                )
-                            return None
-                except Exception:
-                    pass
-            if verbose:
-                print(
-                    f"  Crossref title lookup matched PMID {pmid} -> DOI {best_doi} "
-                    f"(sim={best['title_sim']:.2f}, score={best['score']:.2f})"
-                )
-            return canonicalize_doi(best_doi)
-        except Exception as e:
-            if verbose:
-                print(f"  Crossref title lookup failed for PMID {pmid}: {str(e)[:100]}")
-            return None
-
-    # 1) NCBI PMC idconv
     try:
-        r = _get_with_retries(
-            _ncbi_url(f"{IDCONV_URL}?ids={pmid}&format=json"),
-            timeout=15,
-        )
-        if r.status_code == 200:
-            records = (r.json() or {}).get("records") or []
-            for rec in records:
-                doi = _clean(rec.get("doi"))
-                if doi:
-                    return doi
-    except Exception as e:
+        response = _get_with_retries(_ncbi_url(f"{IDCONV_URL}?ids={pmid}&format=json"), timeout=15)
+        if response.status_code == 200:
+            candidates = {clean(row.get("doi")) for row in (response.json() or {}).get("records", [])
+                          if str(row.get("pmid", "")) == pmid}
+            candidates.discard(None)
+            if len(candidates) == 1:
+                return candidates.pop()
+    except Exception as exc:
         if verbose:
-            print(f"  PMID->DOI idconv lookup failed for {pmid}: {str(e)[:100]}")
+            print(f"  PMID->DOI idconv lookup failed for {pmid}: {str(exc)[:100]}")
 
-    # 2) PubMed EFetch XML (ArticleId IdType=doi / ELocationID)
     try:
-        xml_text = ""
-        r = _get_with_retries(
-            _ncbi_url(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"),
-            timeout=12,
-        )
-        if r.status_code == 200 and r.text:
-            xml_text = r.text
-            article_ids = re.findall(
-                r'<ArticleId[^>]*IdType=["\']doi["\'][^>]*>([^<]+)</ArticleId>',
-                xml_text,
-                re.IGNORECASE,
-            )
-            for candidate in article_ids:
-                doi = _clean(candidate)
-                if doi:
-                    return doi
-
-            e_location_ids = re.findall(
-                r'<ELocationID[^>]*EIdType=["\']doi["\'][^>]*>([^<]+)</ELocationID>',
-                xml_text,
-                re.IGNORECASE,
-            )
-            for candidate in e_location_ids:
-                doi = _clean(candidate)
-                if doi:
-                    return doi
-
-            fallback_doi = _first_doi_from_text(xml_text)
-            if fallback_doi:
-                return fallback_doi
-
-            # 2b) No DOI field present -> Crossref title-based recovery.
-            title, journal, year = _extract_pubmed_core_fields(xml_text)
-            crossref_doi = _lookup_doi_via_crossref_title(title, journal, year, verbose=verbose)
-            if crossref_doi:
-                return crossref_doi
-    except Exception as e:
+        response = _get_with_retries(_ncbi_url(f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"), timeout=12)
+        if response.status_code == 200 and response.text:
+            candidates = _primary_pubmed_dois(response.text, pmid)
+            if len(candidates) == 1:
+                return candidates.pop()
+    except Exception as exc:
         if verbose:
-            print(f"  PMID->DOI efetch lookup failed for {pmid}: {str(e)[:100]}")
+            print(f"  PMID->DOI efetch lookup failed for {pmid}: {str(exc)[:100]}")
 
-    # 3) Europe PMC
     try:
-        q = f"EXT_ID:{pmid}%20AND%20SRC:MED"
-        r = _get_with_retries(
-            f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={q}&format=json",
-            timeout=20,
-        )
-        if r.status_code == 200:
-            results = ((r.json() or {}).get("resultList") or {}).get("result") or []
-            for result in results:
-                doi = _clean(result.get("doi"))
-                if doi:
-                    return doi
-    except Exception as e:
+        response = _get_with_retries(f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=EXT_ID:{pmid}%20AND%20SRC:MED&format=json", timeout=20)
+        if response.status_code == 200:
+            rows = ((response.json() or {}).get("resultList") or {}).get("result") or []
+            candidates = {clean(row.get("doi")) for row in rows
+                          if str(row.get("id", "")) == pmid and row.get("source") == "MED"}
+            candidates.discard(None)
+            if len(candidates) == 1:
+                return candidates.pop()
+    except Exception as exc:
         if verbose:
-            print(f"  PMID->DOI Europe PMC lookup failed for {pmid}: {str(e)[:100]}")
+            print(f"  PMID->DOI Europe PMC lookup failed for {pmid}: {str(exc)[:100]}")
 
-    # 4) PubMed HTML meta tag fallback
     try:
-        page_text = _get_pubmed_web_html(pmid, verbose=verbose)
-        if page_text:
-            m = re.search(
-                r'<meta[^>]+name=["\']citation_doi["\'][^>]+content=["\']([^"\']+)["\']',
-                page_text,
-                re.IGNORECASE,
-            )
-            if m:
-                doi = _clean(m.group(1))
-                if doi:
-                    return doi
-
-            fallback_doi = _first_doi_from_text(page_text)
-            if fallback_doi:
-                return fallback_doi
-    except Exception as e:
+        from bs4 import BeautifulSoup
+        page = _get_pubmed_web_html(pmid, verbose=verbose)
+        soup = BeautifulSoup(page or "", "html.parser")
+        own_pmid = soup.find("meta", attrs={"name": "citation_pmid"})
+        own_doi = soup.find("meta", attrs={"name": "citation_doi"})
+        if own_pmid and own_pmid.get("content") == pmid and own_doi:
+            doi = clean(own_doi.get("content"))
+            if doi:
+                return doi
+    except Exception as exc:
         if verbose:
-            print(f"  PMID->DOI PubMed HTML lookup failed for {pmid}: {str(e)[:100]}")
-
+            print(f"  PMID->DOI PubMed HTML lookup failed for {pmid}: {str(exc)[:100]}")
     if verbose:
-        print(f"  PMID->DOI resolution exhausted all sources for {pmid}")
+        print(f"  PMID->DOI resolution found no exact report DOI for {pmid}; retaining PMID")
     return None
 
 
@@ -5992,7 +5837,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -6081,6 +5926,8 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             to_markdown=to_markdown,
             extract_images=extract_images,
             pull_figures=pull_figures,
+            generate_html_from_xml=generate_html_from_xml,
+            generate_pdf_from_xml=generate_pdf_from_xml,
             target_task=target_task, upgrade_existing=upgrade_existing,
             want_provenance=want_provenance, pull_supplementary=pull_supplementary,
             refresh_supplementary=refresh_supplementary,
@@ -6105,7 +5952,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -6118,6 +5965,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     from concurrent.futures import TimeoutError as FuturesTimeout
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # A rendering of the XML without its figures is a rendering with holes in
+    # it, so asking for one is asking for the figures pass too.
+    if generate_html_from_xml or generate_pdf_from_xml:
+        pull_figures = True
 
     # If dois is a string, assume it's a CSV file path
     if isinstance(dois, str):
@@ -6143,7 +5995,10 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     # resolver is a separate question.
     ARTIFACT_EXTENSIONS = skip_check_extensions(_tiered)
 
-    if _tiered or pull_supplementary:
+    # The figures pass borrows this resolver's client (_si_http) as the
+    # supplementary pass does; without it --pull-figures alone failed every
+    # record with "'NoneType' object has no attribute 'http'".
+    if _tiered or pull_supplementary or pull_figures:
         from .retrieval.cache import ResolutionCache
         from .retrieval.http import HttpClient
         from .retrieval.ratelimit import HostRateLimiter, shared_host_limiter
@@ -6294,6 +6149,33 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                       f"({summary.refusal or summary.detail or 'no detail'})")
         except Exception as e:
             print(f"   🖼️  {display_id}: figure pass failed ({str(e)[:120]})")
+
+    def _render_xml(display_id, save_path):
+        """{stem}_from_xml.html / .pdf for a record with XML. Never changes the verdict.
+
+        After _pull_figures, which supplies the images, and on the
+        already-exists branch too, for the same reason that pass runs there.
+        """
+        if not (generate_html_from_xml or generate_pdf_from_xml) or not save_path:
+            return
+        from .retrieval.engine import _stem_for
+        xml_path = _stem_for(save_path) + ".xml"
+        if not os.path.exists(xml_path):
+            if verbose:
+                print(f"   🖨️  {display_id}: no .xml to render")
+            return
+        try:
+            from .retrieval.to_html import render_record
+            outcome = render_record(xml_path, html=generate_html_from_xml,
+                                    pdf=generate_pdf_from_xml, verbose=verbose)
+            written = [os.path.basename(p) for p in (outcome["html"], outcome["pdf"]) if p]
+            if written:
+                print(f"   🖨️  {display_id}: {', '.join(written)} "
+                      f"({outcome['figures_embedded']}/{outcome['figures']} figures)")
+            if outcome["error"]:
+                print(f"   🖨️  {display_id}: render: {outcome['error']}")
+        except Exception as e:
+            print(f"   🖨️  {display_id}: render failed ({str(e)[:120]})")
 
     def _pull_si(display_id, raw_id, canonical, save_path):
         """Supplementary pass for one record. Never changes the verdict.
@@ -6484,6 +6366,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             # branch, so a hook inside it would do nothing here.
             _pull_si(display_id, raw_identifier, canonical_doi, save_path)
             _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
+            _render_xml(display_id, save_path)
             _pull_images(existing_file, display_id)
             # Nothing was fetched and nothing re-read the file, so identity
             # stays null: this branch cannot tell a stale artifact from a good
@@ -6541,6 +6424,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # corrupt the format composition tally.
         _pull_si(display_id, raw_identifier, canonical_doi, save_path)
         _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
+        _render_xml(display_id, save_path)
         _pull_images(result or save_path, display_id)
 
         if success:
@@ -7332,6 +7216,55 @@ def _emit_unanswered(json_out, reason: str) -> None:
                                 status=JSON_STATUS_FAILED, reasons=[reason]))
 
 
+def _batch_kwargs(args, json_out):
+    """batch_fetch_pdfs options from the command line, shared by every batch mode
+    and by the end-of-run library retry."""
+    return dict(
+        output_dir=args.output_dir,
+        email=args.email,
+        verbose=args.verbose,
+        delay=args.delay,
+        workers=args.workers,
+        create_missing_report=not args.no_missing_report,
+        track_source=args.tracksource,
+        start_offset=args.start_from_row,
+        abstract_if_no_pdf=args.abstract_if_no_pdf,
+        abstract_only=args.abstract_only,
+        allow_xml_fallback=not args.no_xml_fallback,
+        use_playwright=args.add_playwright,
+        prioritize_xml=args.prioritize_xml,
+        xml_only=args.xml_only,
+        xml_html_only=args.xml_html_only,
+        get_xml_or_html=args.get_xml_or_html,
+        to_markdown=args.to_markdown,
+        extract_images=args.extract_images,
+        pull_figures=args.pull_figures,
+        generate_html_from_xml=args.generate_html_from_xml,
+        generate_pdf_from_xml=args.generate_pdf_from_xml,
+        target_task=args.target_task,
+        upgrade_existing=args.upgrade_existing,
+        want_provenance=args.provenance,
+        pull_supplementary=args.pull_supplementary,
+        refresh_supplementary=args.refresh_supplementary,
+        max_supplementary_bytes=int(args.max_supplementary_mb * 1024 * 1024),
+        record_timeout=args.record_timeout or None,
+        batch_timeout=args.batch_timeout or None,
+        download_data_artifacts=args.download_data_artifacts,
+        max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
+        llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
+        llm_agent_retrieval=args.llm_agent_retrieval,
+        llm_backend=args.llm_backend,
+        max_llm_records=args.max_llm_records,
+        llm_model=args.llm_model,
+        unpack_data_artifacts=args.unpack_data_artifacts,
+        download_related_unverified=args.download_related_unverified,
+        draft_requests=args.draft_requests,
+        make_subfolder=args.make_subfolder,
+        json_out=json_out,
+        cookies_file=args.cookies_file,
+    )
+
+
 def _main(argv=None, json_out=None):
     """Command-line interface for fetchpdf."""
     import argparse
@@ -7348,6 +7281,7 @@ def _main(argv=None, json_out=None):
             "  fetchpdf papers.csv -o ./pdfs --start-from-row 100 # resume from row 100\n"
             "  fetchpdf \"10.1038/nature12373\"                      # single DOI\n"
             "  fetchpdf \"10.1038/nature12373\" -o ./papers          # single DOI, custom dir\n"
+            "  fetchpdf \"10.1038/nature12373,10.1126/science.169.3946.635\"  # list, 8 workers\n"
             "  fetchpdf \"39804400\"                                 # PMID (auto-resolved)\n"
             "  fetchpdf --csv papers.csv --output-dir ./pdfs --workers 4\n"
             "  fetchpdf --pmid-csv pmids.csv -o ./pdfs\n"
@@ -7355,8 +7289,11 @@ def _main(argv=None, json_out=None):
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("input", nargs="?", help="DOI, PMID, or CSV file path (auto-detected)")
-    parser.add_argument("output_pos", nargs="?", help="Output file path for single DOI download")
+    parser.add_argument(
+        "positionals", nargs="*", metavar="input",
+        help=("DOI, PMID, or CSV file path (auto-detected); several DOIs/PMIDs, "
+              "comma- or space-separated, run as a parallel batch; a single "
+              "DOI may be followed by an output file path"))
     parser.add_argument(
         "--csv",
         help="CSV file with DOIs to process (for batch download)"
@@ -7444,8 +7381,9 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--workers", "-w",
         type=int,
-        default=1,
-        help="Number of parallel workers for batch processing (default: 1)"
+        default=None,
+        help=("Number of parallel workers for batch processing (default: "
+              f"{DEFAULT_LIST_WORKERS} for a comma-separated list, 1 for a CSV)")
     )
     parser.add_argument(
         "--record-timeout",
@@ -7553,11 +7491,30 @@ def _main(argv=None, json_out=None):
         action="store_true",
         help="Also fetch the article's published figure images into {stem}_figures/ "
              "with a {stem}_figures.json manifest recording each figure's label, "
-             "caption, source URL and sha256. PMC only: the Open Data mirror when "
-             "the package holds the files, else the article page's blob CDN. These "
+             "caption, source URL and sha256. PMC: the Open Data mirror when "
+             "the package holds the files, else the article page's blob CDN; "
+             "Elsevier: the object API (needs ELSEVIER_TDM_API_KEY). These "
              "are the publisher's image files, not the bitstreams embedded in a PDF "
              "-- see --extract-images for those. Also runs for records already on "
              "disk, and a figure failure never fails the record."
+    )
+    parser.add_argument(
+        "--generate-html-from-xml",
+        action="store_true",
+        help="For every record with an .xml (JATS or Elsevier), write "
+             "{stem}_from_xml.html: one self-contained page with tables and figure "
+             "images embedded, nothing loaded from the network. Implies "
+             "--pull-figures. Only records whose XML was kept are rendered; add "
+             "--get-xml-or-html to keep it beside the PDF. Run fetchpdf-render on "
+             "a directory for XML you already have. Needs: pip install 'fetchpdf[render]'."
+    )
+    parser.add_argument(
+        "--generate-pdf-from-xml",
+        action="store_true",
+        help="Like --generate-html-from-xml, but prints the page to "
+             "{stem}_from_xml.pdf with Chromium. A rendering of the XML, not the "
+             "publisher's PDF, and never written as {stem}.pdf. Give both flags to "
+             "keep both files. Needs: pip install 'fetchpdf[render,browser]'."
     )
     parser.add_argument(
         "--target-task",
@@ -7766,6 +7723,24 @@ def _main(argv=None, json_out=None):
 
     args = parser.parse_args(argv)
 
+    # `fetchpdf DOI [OUTPUT]`, or a list the shell split into several words:
+    # `fetchpdf 10.1/a, 10.2/b` arrives as ["10.1/a,", "10.2/b"]. Read every
+    # word as an identifier first, so that list is not taken for a DOI plus an
+    # output file named 10.2/b; fall back to DOI + OUTPUT only for two words.
+    pos = args.positionals
+    args.input = pos[0] if pos else None
+    args.output_pos = pos[1] if len(pos) > 1 else None
+    if len(pos) > 1:
+        id_words = split_identifier_list(",".join(pos))
+        if id_words:
+            args.input, args.output_pos = ",".join(id_words), None
+        elif len(pos) > 2:
+            parser.error(
+                "several inputs given, but not all are DOIs or PMIDs: "
+                + " ".join(pos)
+                + "\n(quote a DOI containing ( ) < > ; or spaces, e.g. "
+                "fetchpdf '10.1002/(SICI)...;2-1, 10.1021/ar9900820')")
+
     if args.cookies_file and not os.path.isfile(args.cookies_file):
         print(f"❌ --cookies: no such file: {args.cookies_file}")
         return 2
@@ -7806,6 +7781,9 @@ def _main(argv=None, json_out=None):
     # --refresh-supplementary is a modifier on the pass, not a mode of its own.
     if args.refresh_supplementary:
         args.pull_supplementary = True
+    # A rendering's figures come from the figures pass.
+    if args.generate_html_from_xml or args.generate_pdf_from_xml:
+        args.pull_figures = True
     # Likewise: the artifact machinery lives inside the supplementary pass, so
     # asking for artifacts without it would silently do nothing.
     if args.download_data_artifacts:
@@ -7923,13 +7901,30 @@ def _main(argv=None, json_out=None):
             print(f"❌ CSV file not found: {args.input}")
             return 1
 
+    # A comma-separated list on the command line runs as a batch, through the
+    # same path as a CSV.
+    id_list = None
+    if args.input and not args.csv and not args.pmid_csv:
+        id_list = split_identifier_list(args.input)
+        if id_list and args.output_pos:
+            print("❌ An output file path names one file; with a list of "
+                  "identifiers, use -o/--output-dir instead")
+            return 2
+    if args.workers is None:
+        args.workers = DEFAULT_LIST_WORKERS if id_list else 1
+
     # Map positional args to legacy names for compatibility
     args.doi = args.input
     args.output = args.output_pos
 
-    # Batch mode from CSV
-    if args.csv:
-        dois = _read_csv_column(args.csv, args.doi_column)
+    # Batch mode from CSV or a comma-separated list
+    if args.csv or id_list:
+        if id_list:
+            dois = id_list
+            batch_source = "the command line"
+        else:
+            dois = _read_csv_column(args.csv, args.doi_column)
+            batch_source = args.csv
         if dois is None:
             print(f"❌ CSV must have a '{args.doi_column}' column (case-insensitive)")
             return 1
@@ -7942,7 +7937,7 @@ def _main(argv=None, json_out=None):
             print(f"⏭️  Skipping first {args.start_from_row} rows")
             dois = dois[args.start_from_row:]
 
-        print(f"📚 Processing {len(dois)} identifiers from {args.csv}")
+        print(f"📚 Processing {len(dois)} identifiers from {batch_source}")
         print(f"💾 Output directory: {args.output_dir}")
         print(f"⚙️  Workers: {args.workers}")
         print("-" * 60)
@@ -7951,49 +7946,7 @@ def _main(argv=None, json_out=None):
             print("Aborted; nothing downloaded.")
             return 0
 
-        results = batch_fetch_pdfs(
-            dois=dois,
-            output_dir=args.output_dir,
-            email=args.email,
-            verbose=args.verbose,
-            delay=args.delay,
-            workers=args.workers,
-            create_missing_report=not args.no_missing_report,
-            track_source=args.tracksource,
-            start_offset=args.start_from_row,
-            abstract_if_no_pdf=args.abstract_if_no_pdf,
-            abstract_only=args.abstract_only,
-            allow_xml_fallback=not args.no_xml_fallback,
-            use_playwright=args.add_playwright,
-            prioritize_xml=args.prioritize_xml,
-            xml_only=args.xml_only,
-            xml_html_only=args.xml_html_only,
-            get_xml_or_html=args.get_xml_or_html,
-            to_markdown=args.to_markdown,
-            extract_images=args.extract_images,
-            pull_figures=args.pull_figures,
-            target_task=args.target_task,
-            upgrade_existing=args.upgrade_existing,
-            want_provenance=args.provenance,
-            pull_supplementary=args.pull_supplementary,
-            refresh_supplementary=args.refresh_supplementary,
-            max_supplementary_bytes=int(args.max_supplementary_mb * 1024 * 1024),
-            record_timeout=args.record_timeout or None,
-            batch_timeout=args.batch_timeout or None,
-            download_data_artifacts=args.download_data_artifacts,
-            max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
-            llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
-            llm_agent_retrieval=args.llm_agent_retrieval,
-            llm_backend=args.llm_backend,
-            max_llm_records=args.max_llm_records,
-            llm_model=args.llm_model,
-            unpack_data_artifacts=args.unpack_data_artifacts,
-            download_related_unverified=args.download_related_unverified,
-            draft_requests=args.draft_requests,
-            make_subfolder=args.make_subfolder,
-            json_out=json_out,
-            cookies_file=args.cookies_file,
-        )
+        results = batch_fetch_pdfs(dois=dois, **_batch_kwargs(args, json_out))
 
         success_count = sum(1 for r in results if r[1])
         failed = [r[0] for r in results if not r[1]]
@@ -8040,49 +7993,7 @@ def _main(argv=None, json_out=None):
             print("Aborted; nothing downloaded.")
             return 0
 
-        results = batch_fetch_pdfs(
-            dois=identifiers,
-            output_dir=args.output_dir,
-            email=args.email,
-            verbose=args.verbose,
-            delay=args.delay,
-            workers=args.workers,
-            create_missing_report=not args.no_missing_report,
-            track_source=args.tracksource,
-            start_offset=args.start_from_row,
-            abstract_if_no_pdf=args.abstract_if_no_pdf,
-            abstract_only=args.abstract_only,
-            allow_xml_fallback=not args.no_xml_fallback,
-            use_playwright=args.add_playwright,
-            prioritize_xml=args.prioritize_xml,
-            xml_only=args.xml_only,
-            xml_html_only=args.xml_html_only,
-            get_xml_or_html=args.get_xml_or_html,
-            to_markdown=args.to_markdown,
-            extract_images=args.extract_images,
-            pull_figures=args.pull_figures,
-            target_task=args.target_task,
-            upgrade_existing=args.upgrade_existing,
-            want_provenance=args.provenance,
-            pull_supplementary=args.pull_supplementary,
-            refresh_supplementary=args.refresh_supplementary,
-            max_supplementary_bytes=int(args.max_supplementary_mb * 1024 * 1024),
-            record_timeout=args.record_timeout or None,
-            batch_timeout=args.batch_timeout or None,
-            download_data_artifacts=args.download_data_artifacts,
-            max_data_artifact_bytes=int(args.max_data_artifact_mb * 1024 * 1024),
-            llm_adjudicate_artifacts=args.llm_adjudicate_artifacts,
-            llm_agent_retrieval=args.llm_agent_retrieval,
-            llm_backend=args.llm_backend,
-            max_llm_records=args.max_llm_records,
-            llm_model=args.llm_model,
-            unpack_data_artifacts=args.unpack_data_artifacts,
-            download_related_unverified=args.download_related_unverified,
-            draft_requests=args.draft_requests,
-            make_subfolder=args.make_subfolder,
-            json_out=json_out,
-            cookies_file=args.cookies_file,
-        )
+        results = batch_fetch_pdfs(dois=identifiers, **_batch_kwargs(args, json_out))
 
         success_count = sum(1 for r in results if r[1])
         failed = [r[0] for r in results if not r[1]]
@@ -8266,6 +8177,26 @@ def _main(argv=None, json_out=None):
                     print(f"   manifest: {summary.manifest_path}")
             except Exception as e:
                 print(f"\n🖼️  figure pass failed: {str(e)[:200]}")
+
+        if args.generate_html_from_xml or args.generate_pdf_from_xml:
+            from .retrieval.engine import _stem_for
+            xml_path = _stem_for(save_path) + ".xml"
+            if os.path.exists(xml_path):
+                try:
+                    from .retrieval.to_html import render_record
+                    outcome = render_record(xml_path, html=args.generate_html_from_xml,
+                                            pdf=args.generate_pdf_from_xml,
+                                            verbose=args.verbose)
+                    for key in ("html", "pdf"):
+                        if outcome[key]:
+                            print(f"\n🖨️  {outcome[key]}")
+                    if outcome["error"]:
+                        print(f"\n🖨️  render: {outcome['error']}")
+                except Exception as e:
+                    print(f"\n🖨️  render failed: {str(e)[:200]}")
+            else:
+                print("\n🖨️  no .xml was kept for this record, so nothing to render "
+                      "(add --get-xml-or-html)")
 
         if args.extract_images:
             pdf = None

@@ -510,6 +510,11 @@ def extract_directory(directory: str, overwrite: bool = False, verbose: bool = F
         for name in sorted(filenames):
             if not name.endswith(".pdf"):
                 continue
+            # Our own rendering of the XML (to_html.py): its images are the
+            # figures pass's files re-embedded by Chromium, not the publisher's
+            # bitstreams, which is the only thing this dump is for.
+            if name.endswith("_from_xml.pdf"):
+                continue
             if _SI_INFIX in name and not include_supplementary:
                 summary["supplementary_skipped"] += 1
                 continue

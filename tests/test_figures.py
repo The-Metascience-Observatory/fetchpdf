@@ -497,3 +497,121 @@ def test_the_page_is_not_requested_when_the_mirror_covers_everything(tmp_path):
 
     assert run(tmp_path, http).written == 2
     assert not any("pmc.ncbi.nlm.nih.gov/articles" in url for url in http.requests)
+
+
+# --------------------------------------------------------------------------
+# Elsevier: figures from the XML, files from the object API
+# --------------------------------------------------------------------------
+
+ELS_DOI = "10.1016/j.scitotenv.2019.05.070"
+ELS_XML = b"""<full-text-retrieval-response
+    xmlns="http://www.elsevier.com/xml/svapi/article/dtd"
+    xmlns:ce="http://www.elsevier.com/xml/common/dtd"
+    xmlns:ja="http://www.elsevier.com/xml/ja/dtd"
+    xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+  <coredata><prism:doi>10.1016/j.scitotenv.2019.05.070</prism:doi></coredata>
+  <originalText><ja:article>
+    <ce:floats>
+      <ce:figure id="f0005"><ce:label>Fig. 1</ce:label>
+        <ce:caption><ce:simple-para>Ashworth score by group.</ce:simple-para></ce:caption>
+        <ce:link locator="gr1" xlink:href="pii:S0048969719320820/gr1"/></ce:figure>
+      <ce:figure id="f0010"><ce:link locator="ga1" xlink:href="pii:S0048969719320820/ga1"/></ce:figure>
+    </ce:floats>
+    <ja:body><ce:sections><ce:section><ce:section-title>Results</ce:section-title>
+      <ce:para>Scores fell <ce:float-anchor refid="f0005"/> over time.</ce:para>
+    </ce:section></ce:sections></ja:body>
+  </ja:article></originalText>
+</full-text-retrieval-response>"""
+
+#: The object API's choice list, in the shape it served 2026-10-14 for
+#: 10.1016/j.scitotenv.2019.05.070: three renditions per @ref.
+_EID = "https://api.elsevier.com/content/object/eid/1-s2.0-S0048969719320820-"
+ELS_GR1 = _EID + "gr1.jpg?httpAccept=image/jpeg"
+ELS_GA1 = _EID + "ga1.jpg?httpAccept=image/jpeg"
+ELS_OBJECTS = {"choices": {"choice": [
+    {"@ref": "gr1", "@type": "IMAGE-THUMBNAIL", "$": _EID + "gr1.sml?httpAccept=image/gif"},
+    {"@ref": "gr1", "@type": "IMAGE-DOWNSAMPLED", "$": ELS_GR1},
+    {"@ref": "gr1", "@type": "IMAGE-HIGH-RES", "$": _EID + "gr1_lrg.jpg?httpAccept=image/jpeg"},
+    {"@ref": "ga1", "@type": "IMAGE-DOWNSAMPLED", "$": ELS_GA1},
+    {"@ref": "am", "@type": "AAM-PDF", "$": _EID + "am.pdf?httpAccept=application/pdf"},
+]}}
+
+
+def els_routes():
+    return {"content/object/doi/": FakeResponse(
+        content=json.dumps(ELS_OBJECTS).encode(), status=300,
+        content_type="application/json")}
+
+
+def run_elsevier(tmp_path, http, monkeypatch, key="test-key", **kwargs):
+    from fetchpdf import _env
+
+    monkeypatch.setattr(_env, "ELSEVIER_TDM_API_KEY", key)
+    ids = IdentifierSet(doi=ELS_DOI)
+    return figures.pull_for_record(
+        raw_identifier=ELS_DOI, doi=ELS_DOI, save_path=str(tmp_path / "rec.pdf"),
+        resolver=FakeResolver(ids, http), http=http, **kwargs)
+
+
+def test_elsevier_xml_on_disk_takes_the_downsampled_image_per_locator(tmp_path, monkeypatch):
+    (tmp_path / "rec.xml").write_bytes(ELS_XML)
+    http = FakeHttp(routes=els_routes(), payloads={ELS_GR1: JPEG, ELS_GA1: JPEG})
+
+    summary = run_elsevier(tmp_path, http, monkeypatch)
+
+    assert summary.status == "ok"
+    assert http.downloads == [ELS_GR1, ELS_GA1]
+    manifest = manifest_of(tmp_path)
+    assert manifest["figures_from"] == "elsevier_xml"
+    rows = manifest["figures"]
+    assert [r["href"] for r in rows] == ["gr1", "ga1"]
+    assert [r["provenance"] for r in rows] == ["render", "render"]
+
+
+def test_an_unlabelled_graphical_abstract_is_not_numbered_as_a_figure(tmp_path, monkeypatch):
+    (tmp_path / "rec.xml").write_bytes(ELS_XML)
+    run_elsevier(tmp_path, FakeHttp(routes=els_routes(), payloads={ELS_GR1: JPEG, ELS_GA1: JPEG}),
+                 monkeypatch)
+    labels = [r["figure_label"] for r in manifest_of(tmp_path)["figures"]]
+    assert labels == ["Figure 1", "Graphical abstract"]
+
+
+def test_an_elsevier_record_without_xml_or_pmcid_uses_the_object_list(tmp_path, monkeypatch):
+    http = FakeHttp(routes=els_routes(), payloads={ELS_GR1: JPEG})
+
+    summary = run_elsevier(tmp_path, http, monkeypatch)
+
+    assert summary.written == 1
+    assert manifest_of(tmp_path)["figures_from"] == "elsevier_objects"
+    assert http.downloads == [ELS_GR1]          # gr* only: ga1 is no numbered figure
+
+
+def test_an_elsevier_record_without_a_key_is_a_named_refusal(tmp_path, monkeypatch):
+    (tmp_path / "rec.xml").write_bytes(ELS_XML)
+    http = FakeHttp(routes=els_routes())
+
+    summary = run_elsevier(tmp_path, http, monkeypatch, key="")
+
+    assert summary.refusal == "no_elsevier_key"
+    assert http.requests == []
+
+
+def test_an_unentitled_elsevier_image_is_blocked_not_absent(tmp_path, monkeypatch):
+    """Off an entitled network the listing answers and the images 401."""
+    (tmp_path / "rec.xml").write_bytes(ELS_XML)
+    http = FakeHttp(routes=els_routes(), statuses={ELS_GR1: 401, ELS_GA1: 401})
+
+    summary = run_elsevier(tmp_path, http, monkeypatch)
+
+    assert summary.written == 0
+    assert [r["status"] for r in manifest_of(tmp_path)["figures"]] == ["blocked:401"] * 2
+
+
+def test_a_no_pmcid_refusal_from_before_the_elsevier_route_is_re_asked(tmp_path, monkeypatch):
+    (tmp_path / "rec_figures.json").write_text(json.dumps({
+        "schema_version": 1, "counts": {"written": 0},
+        "refusal": {"kind": "no_pmcid", "detail": "old build"}}))
+    http = FakeHttp(routes=els_routes(), payloads={ELS_GR1: JPEG})
+
+    assert run_elsevier(tmp_path, http, monkeypatch).written == 1

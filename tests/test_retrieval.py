@@ -1045,7 +1045,9 @@ def test_sidecar_records_why_the_tier_was_assigned(tmp_path):
                         served_content_type="application/xml", license="cc by")
 
     result = run_engine(
-        tmp_path, {Tier.T1_XML: [("europepmc_xml", xml_source)]}, want_provenance=True
+        tmp_path, {Tier.T1_XML: [("europepmc_xml", xml_source)]},
+        ids=IdentifierSet(doi="10.1371/journal.pone.0000308", pmid="17375194", pmcid="PMC1817752"),
+        want_provenance=True
     )
 
     sidecar = json.loads((tmp_path / "rec.provenance.json").read_text())

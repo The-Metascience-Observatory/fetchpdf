@@ -28,7 +28,6 @@ dependencies = [
     # Imported directly (urllib3.disable_warnings), not just transitively via
     # requests, so it has to be declared.
     "urllib3>=1.26",
-    "playwright>=1.40.0",
     "python-dotenv>=1.0.0",
     # Read publisher login cookies from the user's browser for institutional access.
     "browser_cookie3>=0.19",
@@ -51,6 +50,11 @@ dependencies = [
 html = [
     "lxml>=4.9",
 ]
+# Browser-based retrieval (--add-playwright, SSRN, Atypon SI, Dataverse WAF
+# retries, `fetchpdf cookies`). Also needs `playwright install chromium`.
+browser = [
+    "playwright>=1.40.0",
+]
 images = [
     "pymupdf>=1.24",
 ]
@@ -63,6 +67,11 @@ images = [
 text = [
     "pymupdf>=1.24",
     "pypdf>=4.0",
+]
+# Rendering a retrieved XML as one HTML page (--generate-html-from-xml,
+# fetchpdf-render). The PDF variant also needs [browser].
+render = [
+    "markdown-it-py>=3.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -84,6 +93,9 @@ fetchpdf-md = "fetchpdf.retrieval.to_markdown:main"
 # Embedded-image dump for PDFs already on disk. Original bitstreams, not
 # page renders. pip install 'fetchpdf[images]'.
 fetchpdf-images = "fetchpdf.retrieval.extract_images:main"
+# Renders XML already on disk to {stem}_from_xml.html / .pdf, figures and
+# tables embedded. pip install 'fetchpdf[render]' (+ [browser] for --pdf).
+fetchpdf-render = "fetchpdf.retrieval.to_html:main"
 # Reads back the integrity metadata every manifest already carries. Offline:
 # answers "is what I have what I fetched", not "is there more to fetch".
 fetchpdf-verify = "fetchpdf.retrieval.verify:main"

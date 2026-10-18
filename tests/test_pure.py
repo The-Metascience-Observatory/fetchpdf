@@ -1494,3 +1494,89 @@ class TestReadCsvColumn:
         # reader must hand back the digits exactly as written.
         path = self._csv(tmp_path, "PMID\n12345678\n87654321\n")
         assert fpd._read_csv_column(path, "PMID") == ["12345678", "87654321"]
+
+
+class TestSplitIdentifierList:
+    def test_splits_dois_and_pmids(self):
+        assert fpd.split_identifier_list("10.1/a, 10.2/b,39804400") == [
+            "10.1/a", "10.2/b", "39804400"]
+
+    def test_single_identifier_is_not_a_list(self):
+        assert fpd.split_identifier_list("10.1038/nature12373") is None
+        assert fpd.split_identifier_list("10.1/a,") is None
+        assert fpd.split_identifier_list("10.1/a,10.1/a") is None
+
+    def test_doi_containing_a_comma_stays_whole(self):
+        # The fragment after the comma is neither a DOI nor a PMID.
+        assert fpd.split_identifier_list("10.1002/abc(1,2)3") is None
+
+    def test_blanks_and_duplicates_dropped(self):
+        assert fpd.split_identifier_list(" 10.1/a ,, 10.2/b, 10.1/a") == [
+            "10.1/a", "10.2/b"]
+
+
+class TestCommaSeparatedCli:
+    """A comma-separated list runs as a parallel batch; nothing touches the network."""
+
+    def _run(self, argv, monkeypatch):
+        seen = {}
+
+        def fake_batch(dois, output_dir, **kwargs):
+            seen["dois"] = list(dois)
+            seen["workers"] = kwargs["workers"]
+            return [(d, True) for d in dois]
+
+        monkeypatch.setattr(fpd, "batch_fetch_pdfs", fake_batch)
+        monkeypatch.setattr(fpd, "prompt_on_existing", lambda ids, args: None)
+        return fpd._main(argv), seen
+
+    def test_list_defaults_to_eight_workers(self, tmp_path, monkeypatch):
+        code, seen = self._run(["10.1/a,10.2/b", "-o", str(tmp_path)], monkeypatch)
+        assert code == 0
+        assert seen == {"dois": ["10.1/a", "10.2/b"], "workers": 8}
+
+    def test_explicit_workers_win(self, tmp_path, monkeypatch):
+        _, seen = self._run(["10.1/a,10.2/b", "-o", str(tmp_path), "-w", "3"],
+                            monkeypatch)
+        assert seen["workers"] == 3
+
+    def test_csv_keeps_one_worker(self, tmp_path, monkeypatch):
+        csv = tmp_path / "p.csv"
+        csv.write_text("DOI\n10.1/a\n10.2/b\n", encoding="utf-8")
+        _, seen = self._run([str(csv), "-o", str(tmp_path)], monkeypatch)
+        assert seen["workers"] == 1
+
+    def test_output_file_rejected_for_a_list(self, tmp_path, monkeypatch):
+        code, seen = self._run(["10.1/a,10.2/b", str(tmp_path / "x.pdf")], monkeypatch)
+        assert code == 2 and not seen
+
+    def test_list_split_by_the_shell(self, tmp_path, monkeypatch):
+        # `fetchpdf 10.1/a, 10.2/b, 39804400` unquoted: three argv words.
+        code, seen = self._run(["10.1/a,", "10.2/b,", "39804400", "-o", str(tmp_path)],
+                               monkeypatch)
+        assert code == 0
+        assert seen == {"dois": ["10.1/a", "10.2/b", "39804400"], "workers": 8}
+
+    def test_two_space_separated_dois_are_not_doi_plus_output(self, tmp_path, monkeypatch):
+        _, seen = self._run(["10.1/a", "10.2/b", "-o", str(tmp_path)], monkeypatch)
+        assert seen["dois"] == ["10.1/a", "10.2/b"]
+
+    def test_doi_plus_output_file_still_single(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(fpd, "batch_fetch_pdfs", lambda *a, **k: seen.setdefault("batch", 1))
+        monkeypatch.setattr(fpd, "resolve_identifier_to_doi", lambda d, **k: d)
+        monkeypatch.setattr(fpd, "fetch_pdf",
+                            lambda **k: seen.setdefault("save_path", k["save_path"]) and None)
+        fpd._main(["10.1/a", str(tmp_path / "out.pdf")])
+        assert "batch" not in seen
+        assert seen["save_path"] == str(tmp_path / "out.pdf")
+
+    def test_sici_doi_in_a_quoted_list(self, tmp_path, monkeypatch):
+        sici = "10.1002/(SICI)1521-3773(19981116)37:21<2922::AID-ANIE2922>3.0.CO;2-1"
+        _, seen = self._run([f"10.1021/ja00269a036, {sici}, 10.1021/ar9900820",
+                             "-o", str(tmp_path)], monkeypatch)
+        assert seen["dois"] == ["10.1021/ja00269a036", sici, "10.1021/ar9900820"]
+
+    def test_non_identifiers_among_many_words_rejected(self, tmp_path, monkeypatch):
+        with pytest.raises(SystemExit):
+            self._run(["10.1/a", "10.2/b", "notadoi", "-o", str(tmp_path)], monkeypatch)

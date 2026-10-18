@@ -157,8 +157,74 @@ def parse_xml(content: bytes) -> Tuple[Optional[ET.Element], str]:
         return None, f"not well-formed XML: {str(e)[:120]}"
 
 
+def _is_complete_short_published_abstract(root, doi, pmid) -> bool:
+    """Recognize a short publication, not an abstract-only research-article stub.
+
+    Conference reports may themselves be published as JATS ``article-type=
+    abstract`` with the complete report in ``body``. Keep the normal stub floor
+    and require an exact requested identity, one primary article, and substantive
+    methods/results/conclusions in that body. Never infer this exception from a
+    title mentioning a conference, a DOI in references, or front-matter abstract.
+    """
+    if (_localname(root.tag) != "article" or root.get("article-type") not in
+            {"abstract", "conference-abstract", "meeting-abstract"}):
+        return False
+    if any(_localname(el.tag) in {"article", "sub-article", "response", "error", "error-message"}
+           for el in list(root.iter())[1:]):
+        return False
+
+    def direct(parent, name):
+        return [child for child in parent if _localname(child.tag) == name]
+
+    fronts, bodies = direct(root, "front"), direct(root, "body")
+    if len(fronts) != 1 or len(bodies) != 1:
+        return False
+    metadata = direct(fronts[0], "article-meta")
+    if len(metadata) != 1:
+        return False
+    ids = direct(metadata[0], "article-id")
+    own_dois = {_normalise_doi("".join(el.itertext())) for el in ids
+                if el.get("pub-id-type") == "doi"}
+    own_pmids = {"".join(el.itertext()).strip() for el in ids
+                 if el.get("pub-id-type") in {"pmid", "pubmed"}}
+    if not doi and not pmid:
+        return False
+    if doi and own_dois != {_normalise_doi(doi)}:
+        return False
+    if pmid and own_pmids != {str(pmid)}:
+        return False
+    title_groups = direct(metadata[0], "title-group")
+    titles = direct(title_groups[0], "article-title") if len(title_groups) == 1 else []
+    if len(titles) != 1 or len(_text_of(titles)) < 20:
+        return False
+    # A front abstract copied into a nested <abstract> or error payload does
+    # not become the publication's complete body merely by being long enough.
+    if any(_localname(el.tag) in {"abstract", "ref-list", "ref", "error", "error-message"}
+           for el in bodies[0].iter()):
+        return False
+    sections = set()
+    for element in bodies[0].iter():
+        name = _localname(element.tag)
+        heading = None
+        if name == "sec":
+            headings = direct(element, "title")
+            heading = headings[0] if len(headings) == 1 else None
+        elif name == "p" and len(element) and not (element.text or "").strip():
+            first = element[0]
+            if _localname(first.tag) in {"bold", "label"}:
+                heading = first
+        if heading is None:
+            continue
+        label = re.sub(r"[^a-z]", "", _text_of([heading]).lower())
+        body = _text_of([element])
+        if label in {"methods", "results", "conclusion", "conclusions"} and len(body) - len(_text_of([heading])) >= 80:
+            sections.add("conclusions" if label.startswith("conclusion") else label)
+    return sections == {"methods", "results", "conclusions"}
+
+
 def validate_t1(content: bytes, min_chars: int = 5000,
-                abstract_stub_chars: int = 2500) -> ValidationResult:
+                abstract_stub_chars: int = 2500, doi: Optional[str] = None,
+                pmid: Optional[str] = None) -> ValidationResult:
     """Gate for JATS/TEI structured full text."""
     # Against the raw bytes, before parsing: PMC states the denial in an XML
     # comment, which every parser drops. Checking the tree would report "no
@@ -173,6 +239,25 @@ def validate_t1(content: bytes, min_chars: int = 5000,
     if root is None:
         return ValidationResult.failure(error)
     checks = ["parses", "not-a-denial-stub"]
+
+    # Check only this article's front matter, never identifiers in references
+    # or related-article links. A complete XML document can still be the wrong
+    # report, and must not supersede a correct existing PDF on that basis.
+    own_dois, own_pmids = set(), set()
+    for front in _iterfind(root, "front", "teiHeader", "coredata"):
+        for node in front.iter():
+            name = _localname(node.tag)
+            kind = (node.get("pub-id-type") or node.get("type") or "").lower()
+            value = "".join(node.itertext()).strip()
+            if (name == "article-id" and kind == "doi") or (name == "idno" and kind == "doi") or name == "doi":
+                own_dois.add(_normalise_doi(value))
+            if name == "article-id" and kind in ("pmid", "pubmed"):
+                own_pmids.add(value)
+    if doi and own_dois and own_dois != {_normalise_doi(doi)}:
+        return ValidationResult.failure("XML declares a different or ambiguous article DOI: " + ", ".join(sorted(own_dois)), checks_passed=checks)
+    if pmid and own_pmids and own_pmids != {str(pmid)}:
+        return ValidationResult.failure("XML declares a different or ambiguous article PMID: " + ", ".join(sorted(own_pmids)), checks_passed=checks)
+    checks.append("declared-article-identifiers-consistent")
 
     bodies = _iterfind(root, "body")
     if not bodies:
@@ -201,14 +286,18 @@ def validate_t1(content: bytes, min_chars: int = 5000,
             n_footnotes=n_footnotes,
         )
     if n_chars < min_chars:
-        return ValidationResult.failure(
-            f"below full-text threshold ({n_chars} chars < {min_chars})",
-            checks_passed=checks,
-            n_chars=n_chars,
-            n_tables=n_tables,
-            n_footnotes=n_footnotes,
-        )
-    checks.append(f"min-chars>={min_chars}")
+        if not _is_complete_short_published_abstract(root, doi, pmid):
+            return ValidationResult.failure(
+                f"below full-text threshold ({n_chars} chars < {min_chars})",
+                checks_passed=checks,
+                n_chars=n_chars,
+                n_tables=n_tables,
+                n_footnotes=n_footnotes,
+            )
+        checks.extend(["publisher-declared-short-abstract", "own-article-identity-verified",
+                       "structured-abstract-body", f"abstract-body-chars>={abstract_stub_chars}"])
+    else:
+        checks.append(f"min-chars>={min_chars}")
 
     return ValidationResult(
         ok=True,

@@ -438,6 +438,8 @@ def _validate_for_tier(artifact: Artifact, ctx, ids=None) -> ValidationResult:
             artifact.content,
             min_chars=ctx.threshold("t1_min_chars", 5000),
             abstract_stub_chars=ctx.threshold("abstract_stub_chars", 2500),
+            doi=(ids.doi if ids is not None else None),
+            pmid=(ids.pmid if ids is not None else None),
         )
     if tier == Tier.T2_HTML:
         return validate_t2(
