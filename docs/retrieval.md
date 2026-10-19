@@ -68,7 +68,7 @@ like the one above.
 Because verification is not optional, **a PDF text engine is no longer
 optional**: `pypdf` is a base dependency and the CLI refuses to start without an
 engine rather than rejecting every PDF one at a time. PyMuPDF remains in the
-`text` extra as the faster reader and is preferred when installed.
+`better-text-images` extra as the faster reader and is preferred when installed.
 
 ### The right article, but not all of it
 

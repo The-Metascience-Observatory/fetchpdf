@@ -7593,8 +7593,7 @@ def _main(argv=None, json_out=None):
         "--xml-html-only",
         action="store_true",
         help="Fail the record rather than descending below structured full text: XML, then "
-             "publisher HTML, then stop. Never writes a PDF. Requires lxml for the HTML rung "
-             "(pip install 'fetchpdf[html]'). Implies --prioritize-xml."
+             "publisher HTML, then stop. Never writes a PDF. Implies --prioritize-xml."
     )
     parser.add_argument(
         "--get-xml-or-html",
@@ -7620,7 +7619,7 @@ def _main(argv=None, json_out=None):
         help="Dump every embedded image bitstream from each retrieved PDF into "
              "{stem}_images/ with a {stem}_images.json manifest. Original streams, "
              "not page renders. Also runs for PDFs already on disk (the backfill "
-             "case). Requires: pip install 'fetchpdf[images]'. Or run "
+             "case). Requires: pip install 'fetchpdf[better-text-images]'. Or run "
              "fetchpdf-images on a directory."
     )
     parser.add_argument(
@@ -7908,7 +7907,7 @@ def _main(argv=None, json_out=None):
         parser.error(
             "no PDF text engine is installed, so no retrieved PDF can be "
             "verified as the article it was fetched for -- every PDF would be "
-            "rejected. Install one:  pip install 'fetchpdf[text]'  (or pypdf)"
+            "rejected. Install one:  pip install pypdf  (or 'fetchpdf[better-text-images]')"
         )
 
     # --xml-only and --upgrade-existing are meaningless outside the tier walk.
@@ -7969,18 +7968,6 @@ def _main(argv=None, json_out=None):
             "⚠️  --xml-only and --xml-html-only both given; --xml-only is stricter and wins "
             "(no HTML will be accepted)."
         )
-    elif args.xml_html_only:
-        # Without lxml the HTML rung demotes on every record, so --xml-html-only
-        # silently becomes --xml-only. Better to say so than to let someone
-        # conclude their corpus has no HTML full text.
-        try:
-            import lxml.html  # noqa: F401
-        except ImportError:
-            _print_yellow_warning(
-                "⚠️  --xml-html-only needs lxml for the HTML rung, and it is not installed.\n"
-                "   Every HTML candidate will be demoted, making this equivalent to --xml-only.\n"
-                "   Install it with:  pip install 'fetchpdf[html]'"
-            )
 
     # Short-circuit: migrate legacy folder names and exit. No downloads run.
     if args.migrate_folders:

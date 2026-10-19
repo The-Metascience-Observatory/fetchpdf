@@ -348,7 +348,7 @@ def validate_t2(content: bytes, min_chars: int = 5000,
     tree = _parse_html(text)
     if tree is None:
         return ValidationResult.failure(
-            "lxml not installed; install fetchpdf[html] for T2 HTML support",
+            "lxml not installed (a fetchpdf requirement; reinstall fetchpdf) -- no T2 HTML support",
             checks_passed=checks,
         )
     checks.append("parses")
@@ -440,7 +440,7 @@ def has_empty_table_containers(content: bytes) -> bool:
 def _parse_html(text: str):
     """Parse HTML with lxml if available, else return None.
 
-    lxml is an optional extra (`pip install 'fetchpdf[html]'`). Real publisher
+    lxml is a requirement, so None here means a broken install. Real publisher
     HTML is malformed often enough that stdlib html.parser produces a tree that
     silently loses table rows, which is worse than not parsing at all -- so the
     T2 source demotes rather than guessing.

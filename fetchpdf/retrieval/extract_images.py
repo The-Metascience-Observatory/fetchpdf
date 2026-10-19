@@ -37,7 +37,7 @@ from .http import apply_default_mode
 IMAGES_DIR_SUFFIX = "_images"
 MANIFEST_SUFFIX = "_images.json"
 _SCHEMA_VERSION = 1
-_MISSING_DEP_MSG = ("PyMuPDF not installed; install fetchpdf[images] "
+_MISSING_DEP_MSG = ("PyMuPDF not installed; install fetchpdf[better-text-images] "
                     "to extract embedded images")
 
 #: Files this module owns inside {stem}_images/, and therefore the only files
@@ -46,7 +46,7 @@ _OWNED_FILE_RE = re.compile(r"^xref\d{6}\.")
 
 
 def _pymupdf():
-    """PyMuPDF if installed, else None. Optional extra: fetchpdf[images]."""
+    """PyMuPDF if installed, else None. Optional extra: fetchpdf[better-text-images]."""
     try:
         import pymupdf as module
     except ImportError:

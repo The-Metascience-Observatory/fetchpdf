@@ -203,7 +203,7 @@ def test_missing_pymupdf_reports_and_writes_nothing(tmp_path, monkeypatch):
 
     result = xi.extract_images(str(path))
     assert result.status == "unavailable"
-    assert "fetchpdf[images]" in result.detail
+    assert "fetchpdf[better-text-images]" in result.detail
     assert os.listdir(tmp_path) == ["any.pdf"]
 
 
@@ -324,4 +324,4 @@ def test_main_console_script(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(xi, "_pymupdf", lambda: None)
     assert xi.main([str(tmp_path)]) == 1
-    assert "fetchpdf[images]" in capsys.readouterr().out
+    assert "fetchpdf[better-text-images]" in capsys.readouterr().out

@@ -78,9 +78,7 @@ In practice this is not very useful.
 ### Optional extras
 
 ```bash
-pip install 'fetchpdf[html]'     # publisher HTML full text (T2); without it such pages are rejected with a logged reason
-pip install 'fetchpdf[text]'     # PyMuPDF, a faster PDF text engine (pypdf is always installed)
-pip install 'fetchpdf[images]'   # --extract-images and fetchpdf-images
+pip install 'fetchpdf[better-text-images]'   # PyMuPDF: a faster PDF text engine (pypdf is always installed), plus --extract-images and fetchpdf-images
 ```
 
 ### Configuration: `.env.local`
@@ -270,7 +268,7 @@ If a PMID cannot be resolved to a DOI, the tool still tries PMID-native sources 
 |---|---|
 | `fetchpdf-md ./out` | Render XML/HTML artifacts already on disk to `{stem}_from_xml.md` / `{stem}_from_html.md`, without re-downloading. Reads one directory, not its subfolders — after a `--make-subfolder` run, point it at each record's folder |
 | `fetchpdf-render ./out --pdf` | Render article XML already on disk to `{stem}_from_xml.html` (default) and/or `{stem}_from_xml.pdf`; `--fetch-figures` runs the figures pass first. Walks subfolders (`pip install 'fetchpdf[render]'`, plus `[browser]` for `--pdf`) |
-| `fetchpdf-images` | Dump the original embedded image bitstreams from PDFs already on disk (`pip install 'fetchpdf[images]'`) |
+| `fetchpdf-images` | Dump the original embedded image bitstreams from PDFs already on disk (`pip install 'fetchpdf[better-text-images]'`) |
 | `fetchpdf-verify` | Offline check that supplementary files on disk still match the hashes their `_supplementary_info.json` manifests recorded |
 | `fetchpdf-pubpeer` | Capture a dated record of a paper's PubPeer comments (an empty record when there are none). DOIs only; needs `PUBPEER_DEVKEY` |
 
@@ -553,7 +551,7 @@ retrieved, the PDF is kept and reported as unverified.
 When a PDF is unavailable, FetchPDF tries XML or HTML full text automatically.
 Use `--no-xml-fallback` to disable this fallback.
 
-Publisher HTML (T2) needs the `html` extra — see [Optional extras](#optional-extras).
+Publisher HTML (T2) uses lxml, which is installed with fetchpdf.
 
 Advanced users can customize retrieval order, source capabilities, and host rate
 limits by copying [`ladder.json`](fetchpdf/retrieval/ladder.json) and setting

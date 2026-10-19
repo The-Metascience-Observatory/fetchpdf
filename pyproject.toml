@@ -38,35 +38,26 @@ dependencies = [
     # is AGPL-or-commercial
     # against this package's MIT licence, which is a licensing decision to
     # impose on every install rather than an engineering one. PyMuPDF stays in
-    # the `text` extra as the faster engine; pdf_text prefers it when present.
+    # the `better-text-images` extra as the faster engine; pdf_text prefers it when present.
     "pypdf>=4.0",
+    # T2 publisher HTML. Real publisher markup is malformed often enough that
+    # stdlib html.parser silently loses table rows, which is worse than not
+    # parsing at all, so this is a requirement rather than an extra: without it
+    # every HTML candidate would be demoted.
+    "lxml>=4.9",
 ]
 
 [project.optional-dependencies]
-# T2 publisher-HTML support only. Real publisher markup is malformed often
-# enough that stdlib html.parser silently loses table rows, which is worse than
-# not parsing at all -- so the T2 source demotes rather than guessing when lxml
-# is absent. Every other tier needs nothing beyond the stdlib.
-html = [
-    "lxml>=4.9",
-]
 # Browser-based retrieval (--add-playwright, SSRN, Atypon SI, Dataverse WAF
 # retries, `fetchpdf cookies`). Also needs `playwright install chromium`.
 browser = [
     "playwright>=1.40.0",
 ]
-images = [
+# PyMuPDF, for two jobs: a faster PDF text reader that keeps reading order
+# better than pypdf (pdf_text prefers it when present), and dumping a PDF's
+# embedded images (--extract-images, fetchpdf-images), which pypdf cannot do.
+better-text-images = [
     "pymupdf>=1.24",
-]
-# Reading a PDF's TEXT, which is a different job from dumping its images: the
-# deposit scan and the retrieval agent both have to read the paper's prose, and
-# 606 of 1,491 corpus records have a PDF and no markup at all. Either engine
-# satisfies it -- PyMuPDF is faster and keeps reading order better, pypdf is
-# what `corresponding.from_pdf` already used undeclared -- and with neither
-# installed the scan reports "no PDF text engine" rather than "nothing found".
-text = [
-    "pymupdf>=1.24",
-    "pypdf>=4.0",
 ]
 # Rendering a retrieved XML as one HTML page (--generate-html-from-xml,
 # fetchpdf-render). The PDF variant also needs [browser].
@@ -91,7 +82,7 @@ fetchpdf = "fetchpdf.fetchpdf:main"
 # existed does not need re-downloading.
 fetchpdf-md = "fetchpdf.retrieval.to_markdown:main"
 # Embedded-image dump for PDFs already on disk. Original bitstreams, not
-# page renders. pip install 'fetchpdf[images]'.
+# page renders. pip install 'fetchpdf[better-text-images]'.
 fetchpdf-images = "fetchpdf.retrieval.extract_images:main"
 # Renders XML already on disk to {stem}_from_xml.html / .pdf, figures and
 # tables embedded. pip install 'fetchpdf[render]' (+ [browser] for --pdf).

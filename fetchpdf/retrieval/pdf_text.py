@@ -37,7 +37,7 @@ ENGINE_PYPDF = "pypdf"
 #: the alternative is a silent zero-yield scan that reads like a clean corpus.
 MISSING_DEP_MSG = ("no PDF text engine, so no retrieved PDF can be checked "
                    "against the record it was fetched for; install pypdf, or "
-                   "fetchpdf[text] for the faster PyMuPDF reader")
+                   "fetchpdf[better-text-images] for the faster PyMuPDF reader")
 
 #: A page cap for callers that only need the front or back matter. None reads
 #: the whole document, which is what the deposit scan wants -- a data
@@ -52,7 +52,7 @@ MIN_USEFUL_CHARS = 500
 
 
 def _pymupdf():
-    """PyMuPDF if installed, else None. Optional extra: fetchpdf[text]."""
+    """PyMuPDF if installed, else None. Optional extra: fetchpdf[better-text-images]."""
     try:
         import pymupdf as module
     except ImportError:

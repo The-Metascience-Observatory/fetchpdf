@@ -606,7 +606,7 @@ def html_to_markdown(content: bytes, name: str = "") -> Conversion:
     try:
         import lxml.html
     except ImportError:
-        result.failures.append("lxml not installed; install fetchpdf[html]")
+        result.failures.append("lxml not installed (a fetchpdf requirement; reinstall fetchpdf)")
         return result
 
     text = content.decode("utf-8", errors="replace")
