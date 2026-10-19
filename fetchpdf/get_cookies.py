@@ -655,8 +655,8 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("fetchpdf cookies needs Playwright: pip install playwright && "
-              "playwright install chromium")
+        print("fetchpdf cookies needs Playwright: pip install 'fetchpdf[browser]' "
+              "&& playwright install chromium")
         return 2
     if not os.environ.get("DISPLAY") and sys.platform.startswith("linux"):
         print("fetchpdf cookies opens a browser window for you to sign in; no $DISPLAY here.")
