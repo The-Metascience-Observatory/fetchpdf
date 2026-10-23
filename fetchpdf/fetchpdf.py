@@ -4024,7 +4024,7 @@ def _try_institutional(save_path, resolved, cookies_file=None, verbose=False,
                        _source_out=None):
     """The institutional-access route. Returns the saved path, or None.
 
-    Off unless the user opted in -- `fetchpdf cookies setup`, or --cookies FILE --
+    Off unless the user opted in -- `fetchpdf fetchcookies`, or --cookies FILE --
     and silent for a publisher the route does not cover, so a run over APA or
     Elsevier DOIs carries no extra noise.
     """
@@ -5131,7 +5131,7 @@ def _fetch_pdf_chain(doi,
     # tail (Crossref landing pages, CORE, DOAJ, DataCite, PMID, Elsevier) that
     # rarely finds what a subscription serves in a second or two. Grey sources
     # (fetchpdf_grey) still run after the whole walk. A no-op unless the user
-    # ran `fetchpdf cookies setup` or passed --cookies, and for publishers it does
+    # ran `fetchpdf fetchcookies` or passed --cookies, and for publishers it does
     # not cover. Once per record: not on related-DOI re-entries.
     if _top_level and not (xml_only or xml_html_only):
         institutional_path = _try_institutional(
@@ -7012,7 +7012,7 @@ def _ask_yes(question: str) -> bool:
 
 
 def _import_cookies(cfg, publishers) -> bool:
-    """Run `fetchpdf cookies setup` (no config yet) or `refresh` in-process,
+    """Run `fetchpdf fetchcookies` (no config yet) or `refresh` in-process,
     for *publishers* only -- the ones the failed papers are at.
 
     True when the retry is worth making: setup succeeded, or refresh found a
@@ -7076,7 +7076,7 @@ def _offer_cookie_import(failed, retry):
     if cfg is None:
         print(f"🔐 {n} failed {noun} ({where}) may be available through your "
               f"library's subscriptions, by importing your browser's cookies.")
-        command = f"fetchpdf cookies setup --publishers {','.join(publishers)}"
+        command = f"fetchpdf fetchcookies --publishers {','.join(publishers)}"
     else:
         print(f"🔐 {n} failed {noun} ({where}) are at publishers your library access "
               f"covers. If your library sign-in there has lapsed, signing in again may get them.")
@@ -7331,6 +7331,9 @@ def main(argv=None):
     if argv and argv[0] == "cookies":
         from .get_cookies import main as cookies_main
         return cookies_main(argv[1:])
+    if argv and argv[0] == "fetchcookies":
+        from .get_cookies import main as cookies_main
+        return cookies_main(["setup"] + argv[1:])
 
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--json", action="store_true")
@@ -7422,7 +7425,7 @@ def _main(argv=None, json_out=None):
         description="Download PDFs from DOIs using multiple fallback sources.",
         epilog=(
             "Institutional access:\n"
-            "  fetchpdf cookies setup    # sign in through your library\n"
+            "  fetchpdf fetchcookies    # sign in through your library\n"
             "  fetchpdf cookies --help   # all cookie commands\n\n"
             "Examples:\n"
             "  fetchpdf papers.csv -o ./pdfs                      # batch from CSV\n"
@@ -7836,7 +7839,7 @@ def _main(argv=None, json_out=None):
         metavar="FILE",
         default=None,
         help="Institutional access from this cookie file instead of the one "
-             "`fetchpdf cookies setup` configured. Without it, access is used only "
+             "`fetchpdf fetchcookies` configured. Without it, access is used only "
              "if setup has been run. Covers publishers whose PDF URL follows "
              "from the DOI (Wiley, T&F, SAGE, Springer, Royal Society, Hogrefe, "
              "INFORMS); tried after the fast open-access lookups. Only cookies "
@@ -7902,7 +7905,7 @@ def _main(argv=None, json_out=None):
     if args.cookies_only:
         if args.no_cookies or not _institutional.active_cookies_file():
             print("❌ --cookies-only: institutional access is not set up. Run "
-                  "`fetchpdf cookies setup` (or pass --cookies FILE).")
+                  "`fetchpdf fetchcookies` (or pass --cookies FILE).")
             return 2
         _institutional.set_cookies_only(True)
         # "Alone" includes the grey last resorts an installed fetchpdf_grey adds.

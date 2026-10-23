@@ -17,7 +17,7 @@ from fetchpdf.retrieval import institutional as inst
 
 @pytest.fixture(autouse=True)
 def _isolated_access(monkeypatch, tmp_path_factory):
-    """No test sees the developer's real `fetchpdf cookies setup`, or another test's choices."""
+    """No test sees the developer's real `fetchpdf fetchcookies`, or another test's choices."""
     cfg_dir = tmp_path_factory.mktemp("fetchpdf_config")
     monkeypatch.setattr(inst, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(inst, "ACCESS_CONFIG", cfg_dir / "access.json")

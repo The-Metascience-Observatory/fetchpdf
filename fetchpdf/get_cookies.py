@@ -1,12 +1,12 @@
 """fetchpdf cookies: set up institutional access for fetchpdf, once.
 
-    fetchpdf cookies setup        # one-time wizard
+    fetchpdf fetchcookies        # one-time wizard
     fetchpdf cookies check        # which publishers your sessions currently open
     fetchpdf cookies refresh      # re-open sign-in tabs for the ones that lapsed
     fetchpdf cookies disable      # stop using institutional access
 
 Institutional access lets fetchpdf download a paper your library subscribes to
-when no open-access copy exists. It is OFF until you run ``fetchpdf cookies setup``.
+when no open-access copy exists. It is OFF until you run ``fetchpdf fetchcookies``.
 
 How it works. Each publisher keeps your library sign-in as a cookie on its own
 site (wiley.com, tandfonline.com, ...). The wizard opens one subscription
@@ -378,7 +378,7 @@ def cmd_setup(args) -> int:
         import browser_cookie3  # noqa: F401
     except ImportError:
         print("  A required dependency is missing: browser_cookie3.\n"
-              "  Run pip install 'browser_cookie3>=0.19', then run fetchpdf cookies setup again.")
+              "  Run pip install 'browser_cookie3>=0.19', then run fetchpdf fetchcookies again.")
         return 2
 
     # 1. Library
@@ -443,7 +443,7 @@ def cmd_setup(args) -> int:
 
     if not any(st == "ok" for st in status.values()):
         print("  No publisher served a PDF, so institutional access is NOT turned on.\n"
-              "  Check you can open a PDF in your browser, then run fetchpdf cookies setup again.")
+              "  Check you can open a PDF in your browser, then run fetchpdf fetchcookies again.")
         return 1
 
     cfg["publishers"] = status
@@ -463,7 +463,7 @@ def cmd_setup(args) -> int:
 def _require_config() -> Optional[dict]:
     cfg = inst.load_access_config()
     if not cfg:
-        print("Institutional access is not set up. Run:  fetchpdf cookies setup")
+        print("Institutional access is not set up. Run:  fetchpdf fetchcookies")
     return cfg
 
 
@@ -516,7 +516,7 @@ def cmd_disable(args) -> int:
         return 0
     cfg["enabled"] = False
     _write_private_json(ACCESS_CONFIG, cfg)
-    print(f"Institutional access is OFF. Turn it back on with: fetchpdf cookies setup")
+    print(f"Institutional access is OFF. Turn it back on with: fetchpdf fetchcookies")
     return 0
 
 

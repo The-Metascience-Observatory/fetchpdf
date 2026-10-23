@@ -63,7 +63,7 @@ def test_non_interactive_prints_the_command_and_does_not_ask(capsys, monkeypatch
     out = capsys.readouterr().out
     assert not asked
     assert "Wiley 1" in out and "--cookies-only" in out
-    assert "fetchpdf cookies setup --publishers wiley`" in out
+    assert "fetchpdf fetchcookies --publishers wiley`" in out
 
 
 @pytest.mark.parametrize("choice", ["no_cookies", "explicit_file"])

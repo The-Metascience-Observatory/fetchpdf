@@ -17,7 +17,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Supplementary Material](#supplementary-material)
 - [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
 - [Figure Images](#figure-images)
-- [Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions) — papers your library subscribes to (`fetchpdf cookies setup`)
+- [Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions) — papers your library subscribes to (`fetchpdf fetchcookies`)
 - [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
 - [API Reference](#api-reference)
 - [Download Sources](#download-sources-in-order-of-priority)
@@ -46,7 +46,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🖨️ **[XML to HTML / PDF](#rendering-the-xml-as-html-or-pdf)**: `--generate-html-from-xml` / `--generate-pdf-from-xml` render a retrieved XML as one self-contained page, figures and tables embedded
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
 - 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
-- 🔐 **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** (opt-in): a one-time `fetchpdf cookies setup` lets fetchpdf download papers your library subscribes to
+- 🔐 **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** (opt-in): a one-time `fetchpdf fetchcookies` lets fetchpdf download papers your library subscribes to
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
 
@@ -145,7 +145,7 @@ fetchpdf '10.1002/(SICI)1521-3773(19981116)37:21<2922::AID-ANIE2922>3.0.CO;2-1, 
 #   ...but single-quote any list holding ( ) < > ; -- the shell would read them as syntax
 ```
 
-**At a university?** Run `fetchpdf cookies setup` once and fetchpdf will also fetch
+**At a university?** Run `fetchpdf fetchcookies` once and fetchpdf will also fetch
 papers your library subscribes to. See
 [Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions).
 
@@ -993,7 +993,7 @@ library, for the papers that have no open-access copy.
 Browser cookie support is included in the standard fetchpdf installation.
 
 ```bash
-fetchpdf cookies setup
+fetchpdf fetchcookies
 ```
 
 The wizard asks two questions, then opens some tabs:
@@ -1025,7 +1025,7 @@ session exists but the test article was refused: the session lapsed, or your
 library does not take that particular journal. Access is turned on only if at
 least one publisher works.
 
-**Cookies often expire within hours**. You likely will have to rerun `fetchpdf cookies setup` periodically to restore access.
+**Cookies often expire within hours**. You likely will have to rerun `fetchpdf fetchcookies` periodically to restore access.
 
 ### Living with it
 
@@ -1059,7 +1059,7 @@ run. This works the same for a single DOI and for a batch:
 ```
 
 Runs that cannot be asked (pipes, cron, `--json`) print the command instead
-(`fetchpdf cookies setup --publishers wiley,tandf`, or `refresh --publishers ...`).
+(`fetchpdf fetchcookies --publishers wiley,tandf`, or `refresh --publishers ...`).
 `--no-cookies` and `--cookies FILE` turn the offer off. Royal Society papers are
 not offered, because there is no test article to sign in on.
 

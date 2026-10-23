@@ -88,7 +88,7 @@ def test_cookie_cli_without_action_preserves_exit_status(capsys):
 def test_cookie_cli_reads_process_arguments(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["fetchpdf", "cookies", "check"])
     assert fp.main() == 2
-    assert "fetchpdf cookies setup" in capsys.readouterr().out
+    assert "fetchpdf fetchcookies" in capsys.readouterr().out
 
 
 def test_an_unreadable_browser_never_overwrites_the_last_export(monkeypatch, tmp_path):

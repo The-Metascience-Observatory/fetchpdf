@@ -48,7 +48,7 @@ SOURCE = "institutional_cookies"
 # --------------------------------------------------------------------------
 # Off until the user opts in. Two ways to opt in:
 #
-# * `fetchpdf cookies setup` writes ACCESS_CONFIG (library + everyday browser). From
+# * `fetchpdf fetchcookies` writes ACCESS_CONFIG (library + everyday browser). From
 #   then on every fetchpdf run re-reads the publisher cookies straight from that
 #   browser, once per process, so sessions the user keeps alive by ordinary
 #   browsing are picked up without re-exporting anything.
@@ -69,7 +69,7 @@ _live_resolved = False
 
 
 def load_access_config() -> Optional[dict]:
-    """The `fetchpdf cookies setup` configuration, or None if access is not set up."""
+    """The `fetchpdf fetchcookies` configuration, or None if access is not set up."""
     try:
         cfg = json.loads(ACCESS_CONFIG.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -132,7 +132,7 @@ def cookies_user_managed() -> bool:
 def active_cookies_file() -> Optional[str]:
     """The cookie file this process should use, or None when access is off.
 
-    An explicit ``--cookies`` wins. Otherwise, if `fetchpdf cookies setup` has been
+    An explicit ``--cookies`` wins. Otherwise, if `fetchpdf fetchcookies` has been
     run, the configured browser's cookies are exported once per process to the
     config dir and that file is used; if the browser cannot be read (locked
     store, keyring prompt declined) the last export is used instead.
