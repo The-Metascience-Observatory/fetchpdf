@@ -3281,9 +3281,12 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
             print("  Elsevier: XML suppressed (--no-xml-fallback), trying PDF")
         return _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
 
-    api_url = f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml&apiKey={api_key}"
+    # Key in the header, as the PDF variant sends it: in the URL it would
+    # surface in any exception text printed below.
+    api_url = f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml"
     try:
-        r = requests.get(api_url, timeout=45, headers={"User-Agent": headers["User-Agent"]})
+        r = requests.get(api_url, timeout=45, headers={"User-Agent": headers["User-Agent"],
+                                                       "X-ELS-APIKey": api_key})
         if r.status_code != 200:
             if verbose:
                 print(f"  Elsevier API status {r.status_code} for {pii}")

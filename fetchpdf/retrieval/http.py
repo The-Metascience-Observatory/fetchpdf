@@ -89,6 +89,16 @@ def redact(url: Optional[str]) -> Optional[str]:
     return _SECRET_IN_PATH_RE.sub(r"\1=REDACTED", url)
 
 
+def _error_text(error: BaseException) -> str:
+    """An exception's message, safe to log or persist.
+
+    urllib3 puts the request path and query in its messages ("Max retries
+    exceeded with url: /...?apiKey=..."), so the raw text would carry a key
+    into verbose output and Download.detail.
+    """
+    return _SECRET_IN_PATH_RE.sub(r"\1=REDACTED", str(error))[:200]
+
+
 @dataclass
 class Response:
     """A completed request, with everything provenance needs to explain it."""
@@ -296,12 +306,12 @@ class HttpClient:
                     elapsed=elapsed,
                 )
             except self._TRANSIENT as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except Exception as e:  # malformed URL, bad encoding, ...
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 break
 
         if self.verbose:
@@ -377,12 +387,12 @@ class HttpClient:
                     elapsed=elapsed,
                 )
             except self._TRANSIENT as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except Exception as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 break
 
         if self.verbose:
@@ -522,14 +532,14 @@ class HttpClient:
                 # mismatched offset is silent corruption of exactly the kind the
                 # no-truncation rule above exists to prevent.
                 _unlink(temp_path)
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except BaseException as e:
                 _unlink(temp_path)
                 if isinstance(e, Exception):
-                    last_error = str(e)[:200]
+                    last_error = _error_text(e)
                     break
                 raise
 

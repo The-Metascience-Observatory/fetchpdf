@@ -435,7 +435,8 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
                 if verbose and abstract:
                     print("  ✅ Abstract from Scopus")
         except Exception as e:
-            if verbose: print(f"  Scopus error: {e}")
+            # The exception text can carry the request URL, and with it the key.
+            if verbose: print(f"  Scopus error: {type(e).__name__}")
         time.sleep(delay)
         if _done(): return result
 

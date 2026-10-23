@@ -503,7 +503,10 @@ def html_to_pdf(page_html: str, out_path: str, timeout_ms: int = 120000) -> str:
         except Exception:                       # noqa: BLE001 - Playwright's build absent
             browser = p.chromium.launch(channel="chrome", **launch)
         try:
-            page = browser.new_page()
+            # The page is built to carry no script. Text from the XML reaches
+            # it through Markdown with raw HTML allowed, so JavaScript off
+            # keeps anything that slips through inert in a --no-sandbox browser.
+            page = browser.new_page(java_script_enabled=False)
             page.set_default_timeout(timeout_ms)
             page.set_content(page_html, wait_until="load")
             page.pdf(
