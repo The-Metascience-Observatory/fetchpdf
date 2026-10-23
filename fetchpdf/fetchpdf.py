@@ -4040,7 +4040,7 @@ def _try_institutional(save_path, resolved, cookies_file=None, verbose=False,
     if not resolved:
         return None
     from .retrieval import institutional as _institutional
-    if not _institutional.publisher_pdf_urls(resolved):
+    if not _institutional.covers(resolved):
         return None
     cookies_file = cookies_file or _institutional.active_cookies_file()
     if not cookies_file:

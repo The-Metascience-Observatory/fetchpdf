@@ -1072,8 +1072,22 @@ your browser's cookies signs fetchpdf out as well.
 Publishers whose PDF address follows from the DOI: **Wiley** (`10.1002`,
 `10.1111`), **Taylor & Francis** (`10.1080`), **SAGE** (`10.1177`),
 **Springer** (`10.1007`, `10.1057`), the **Royal Society** (`10.1098`),
-**Hogrefe** (`10.1027`) and **INFORMS** (`10.1287`). Other DOIs are untouched
-and produce no extra output.
+**Hogrefe** (`10.1027`), **INFORMS** (`10.1287`), **PNAS** (`10.1073`),
+**Science** (`10.1126`), **ASCO** (`10.1200`), **AHA** (`10.1161`), **APS**
+(`10.1152`), **ASM** (`10.1128`), **ATS** (`10.1164`), **ACS** (`10.1021`) and
+**FASEB** (`10.1096`).
+
+Publishers whose PDF address is not derivable from the DOI are reached through
+the DOI link, and the PDF the landing page declares is fetched: **AACR**
+(`10.1158`), **Cold Spring Harbor** (`10.1101`), **Oncotarget** (`10.18632`),
+**Oxford** (`10.1093`, `10.1210`, `10.4049`), **JAMA** (`10.1001`), **ASH**
+(`10.1182`), **Company of Biologists** (`10.1242`), **ERS** (`10.1183`),
+**BMJ** (`10.1136`), **Bioscientifica** (`10.1530`) and **LWW** (`10.1097`).
+
+Several of these are open access but sit behind a Cloudflare bot check that a
+plain download cannot pass. Opening any article on the site once in your
+everyday browser earns the clearance cookie, and the next run reuses it.
+Other DOIs are untouched and produce no extra output.
 
 It runs right after the fast open-access lookups (repositories, PMC,
 Unpaywall), so a paper that is free anywhere is fetched from there and never

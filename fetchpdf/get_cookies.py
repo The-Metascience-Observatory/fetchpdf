@@ -171,8 +171,7 @@ def export_from_browser(browser: str, out_path: Path, label: str,
     """
     import browser_cookie3
     loader = getattr(browser_cookie3, browser)
-    sites = sorted({_site(t.format(doi="x/y"))
-                    for t in inst.PUBLISHER_ARTICLE_TEMPLATES.values()})
+    sites = inst.cookie_sites()
     cookies, per_site, unreadable = [], {}, []
     for site in sites:
         try:
