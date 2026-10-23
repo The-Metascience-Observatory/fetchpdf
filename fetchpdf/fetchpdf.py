@@ -5809,6 +5809,14 @@ def _prune_empty_record_dir(record_dir):
     """
     if not record_dir:
         return
+    # The resolution cache is written beside the artifact, so a record that got
+    # nothing still holds one; alone, it is not something the record wrote.
+    from .retrieval.cache import CACHE_FILENAME
+    try:
+        if os.listdir(record_dir) == [CACHE_FILENAME]:
+            os.unlink(os.path.join(record_dir, CACHE_FILENAME))
+    except OSError:
+        pass
     try:
         os.rmdir(record_dir)
     except OSError:
@@ -6423,7 +6431,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # path, or a record with four supplementary PDFs would report "pdf 5" and
         # corrupt the format composition tally.
         _pull_si(display_id, raw_identifier, canonical_doi, save_path)
-        _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
+        # Unlike the supplements, figures belong to an article we have: with no
+        # artifact there is nothing for them to illustrate, and the pass would
+        # leave an empty `_figures/` and manifest in a record that failed.
+        if success:
+            _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
         _render_xml(display_id, save_path)
         _pull_images(result or save_path, display_id)
 
@@ -8295,7 +8307,9 @@ def _main(argv=None, json_out=None):
             except Exception as e:
                 print(f"\n📎 supplementary pass failed: {str(e)[:200]}")
 
-        if args.pull_figures:
+        # Only for a record that was retrieved: figures with no article to go
+        # with them are an empty `_figures/` and manifest in a failed record.
+        if args.pull_figures and result:
             # A separate call above fetch_pdf, for the same reason the
             # supplementary pass is one: the tiered engine re-enters the chain
             # at T5 with a temporary save_path, and a flag threaded through
@@ -8337,6 +8351,8 @@ def _main(argv=None, json_out=None):
                         print(f"\n🖨️  render: {outcome['error']}")
                 except Exception as e:
                     print(f"\n🖨️  render failed: {str(e)[:200]}")
+            elif not result:
+                print("\n🖨️  no XML could be retrieved for this record, so nothing to render")
             else:
                 print("\n🖨️  no .xml was kept for this record, so nothing to render "
                       "(add --get-xml-or-html)")
@@ -8391,7 +8407,8 @@ def _main(argv=None, json_out=None):
             return 0
         else:
             _prune_empty_record_dir(made_record_dir)
-            print(f"\n❌ Failed to download PDF for {args.doi}")
+            wanted = "XML" if args.xml_only else ("XML or HTML" if args.xml_html_only else "PDF")
+            print(f"\n❌ Failed to download {wanted} for {args.doi}")
             _emit_json(json_out, args.doi, resolved_identifier, None,
                        JSON_STATUS_FAILED, identity=identity,
                        reasons=reasons or ["no source produced a usable artifact"],

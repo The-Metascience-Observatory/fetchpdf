@@ -966,11 +966,17 @@ fetchpdf-render ./out --html --pdf --fetch-figures   # XML you already have
 
 **A rendering, not the publisher's PDF**, and never written as `{stem}.pdf`:
 that name means the typeset article to the skip check and the validators. The
-page opens with a banner naming the source file, the DOI, and how many figures
-were embedded. A figure whose image could not be had keeps a visible
+page opens with a banner naming the source file, the fetchpdf version and the
+DOI, plus a note for anything that could not be shown: figures without an image,
+tables published only as an image that is missing, or no reference list. A figure whose image could not be had keeps a visible
 placeholder, so an incomplete rendering looks incomplete. The prose and
-tables come from the same walker as `--to-markdown`, so the two agree;
-references are omitted and formulas stay as text.
+tables come from the same walker as `--to-markdown`, so the two agree, except
+that the page ends with the reference list (with DOI links), which the Markdown
+leaves out. Formulas stay as text. The XML never says how large a figure was
+typeset, so each is given about the same area (a square figure ~10.5 cm across),
+shaped by its aspect ratio and capped at the column width. Under the title come
+the authors, their affiliations and the journal citation (volume, issue, pages).
+Tables always fit the page width in the PDF; very wide ones print smaller.
 
 Only records whose XML was kept are rendered — add `--get-xml-or-html` to keep
 the XML beside the PDF.

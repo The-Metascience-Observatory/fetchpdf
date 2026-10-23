@@ -2394,6 +2394,30 @@ def test_make_subfolder_leaves_no_directory_when_nothing_was_downloaded(tmp_path
         "a failed record left an empty per-record directory behind"
 
 
+def test_a_failed_record_gets_no_figures_folder_and_no_cache_only_folder(tmp_path, monkeypatch):
+    """--generate-pdf-from-xml implies --pull-figures; a record that got no XML
+    was left holding an empty `_figures/`, its manifest and the resolution cache."""
+    module = batch_module()
+    from fetchpdf.retrieval import figures
+    from fetchpdf.retrieval.cache import CACHE_FILENAME
+    calls = []
+
+    def fake_fetch(doi, save_path, *a, **k):
+        with open(os.path.join(os.path.dirname(save_path), CACHE_FILENAME), "w") as f:
+            f.write("{}")
+        return None
+
+    monkeypatch.setattr(module, "resolve_identifier_to_doi", lambda d, **k: d)
+    monkeypatch.setattr(module, "fetch_pdf", fake_fetch)
+    monkeypatch.setattr(figures, "pull_for_record", lambda *a, **k: calls.append(a))
+
+    run_batch(dois=["10.1234/x"], output_dir=str(tmp_path), make_subfolder=True,
+              pull_figures=True)
+
+    assert calls == [], "the figures pass ran for a record that retrieved nothing"
+    assert not (tmp_path / "10.1234--x").exists()
+
+
 def test_make_subfolder_keeps_a_directory_that_has_anything_in_it(tmp_path, monkeypatch):
     """The cleanup tests emptiness, not the success flag: whatever the record
     did write -- here a partial the engine left behind after reporting failure

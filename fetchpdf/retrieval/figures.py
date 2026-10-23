@@ -403,6 +403,12 @@ def _run(manifest, manifest_path, directory, stem, ids, ctx, http,
 
     def finish() -> FiguresSummary:
         manifest["completed_at"] = _iso(time.time())
+        # The directory is made before each download; when every one failed it
+        # is left empty, and an empty `_figures/` reads as "figures here".
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass                                # holds figures, or never made
         path = write_manifest(manifest_path, manifest, ctx.verbose)
         refusal = (manifest.get("refusal") or {}).get("kind", "")
         rows = manifest["figures"]
