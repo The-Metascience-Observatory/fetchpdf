@@ -7132,7 +7132,7 @@ def _and_list(names) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
-def _offer_cookie_import(failed, retry):
+def _offer_cookie_import(failed, retry, xml_only=False):
     """End of run: offer to import library cookies for failures they could fetch.
 
     *failed* is the run's failed DOIs; *retry(dois)* re-runs those through the
@@ -7141,6 +7141,7 @@ def _offer_cookie_import(failed, retry):
     signed in to -- one paper at Wiley opens one Wiley tab, not six. Interactive
     runs are asked; pipes, cron and --json get the command to run instead.
     --no-cookies and --cookies FILE are left alone. Returns the recovered DOIs.
+    *xml_only*: the papers came back as full-text XML, not as nothing.
     """
     from .retrieval import institutional as _institutional
     from .get_cookies import PUBLISHER_NAMES, publisher_for_site
@@ -7159,16 +7160,17 @@ def _offer_cookie_import(failed, retry):
     covered = [d for p in publishers for d in by_publisher[p]]
     n = len(covered)
     noun = "paper" if n == 1 else "papers"
+    failed_noun = f"{noun} with no PDF (XML only)" if xml_only else f"failed {noun}"
     where = ", ".join(f"{PUBLISHER_NAMES[p]} {len(by_publisher[p])}" for p in publishers)
     who = _and_list([PUBLISHER_NAMES[p] for p in publishers])
     cfg = _institutional.load_access_config()
     print()
     if cfg is None:
-        print(f"🔐 {n} failed {noun} ({where}) may be available through your "
+        print(f"🔐 {n} {failed_noun} ({where}) may be available through your "
               f"library's subscriptions, by importing your browser's cookies.")
         command = f"fetchpdf fetchcookies --publishers {','.join(publishers)}"
     else:
-        print(f"🔐 {n} failed {noun} ({where}) are at publishers your library access "
+        print(f"🔐 {n} {failed_noun} ({where}) are at publishers your library access "
               f"covers. If your library sign-in there has lapsed, signing in again may get them.")
         command = f"fetchpdf cookies refresh --publishers {','.join(publishers)}"
     question = f"   Sign in to {who} through your library and retry them? [y/N]: "
@@ -8355,14 +8357,17 @@ def _main(argv=None, json_out=None):
             want_provenance=args.provenance,
             cookies_file=args.cookies_file,
         )
-        if not result and _cookie_offer_applies(args):
+        # XML-only counts too: the library route may still have the PDF.
+        if ((not result or _is_xml_fallback(result, _tiered))
+                and _cookie_offer_applies(args)):
             retried = []
 
             def _retry_single(dois):
                 retried.append(fetch_pdf(doi=dois[0], save_path=save_path,
                                          _source_out=source_out, verbose=args.verbose))
                 return dois[:1] if retried[-1] else []
-            if _offer_cookie_import([resolved_identifier or args.doi], _retry_single):
+            if _offer_cookie_import([resolved_identifier or args.doi], _retry_single,
+                                    xml_only=bool(result)):
                 result = retried[-1]
 
         # No PDF, only the XML: give it a folder, its figures, and a rendering.

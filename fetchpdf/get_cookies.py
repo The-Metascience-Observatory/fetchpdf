@@ -68,10 +68,13 @@ PROBES: Dict[str, str] = {
     "springer": "10.1007/s10823-025-09558-5",
     "hogrefe": "10.1027/1618-3169/a000636",
     "informs": "10.1287/mnsc.2023.4866",
+    "science": "10.1126/science.abn1725",
+    "aha": "10.1161/circulationaha.121.058901",
 }
 
 PUBLISHER_NAMES = {"wiley": "Wiley", "tandf": "Taylor & Francis", "sage": "SAGE",
-                   "springer": "Springer", "hogrefe": "Hogrefe", "informs": "INFORMS"}
+                   "springer": "Springer", "hogrefe": "Hogrefe", "informs": "INFORMS",
+                   "science": "Science", "aha": "AHA Journals"}
 
 CONFIG_DIR = inst.CONFIG_DIR
 ACCESS_CONFIG = inst.ACCESS_CONFIG
