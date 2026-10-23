@@ -2721,10 +2721,6 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
                 if verbose:
                     print(f"✅ PMID native PMCID route success for PMID {pmid}")
                 return True
-        if allow_xml:
-            xml_got = try_pmc_xml_fallback(pmcid, save_path, verbose=verbose, doi=f"pmid:{pmid}")
-            if xml_got:
-                return xml_got
 
     # Europe PMC record full-text URLs.
     try:
@@ -2796,6 +2792,12 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
     except Exception as e:
         if verbose:
             print(f"  PMID native PubMed provider lookup failed for {pmid}: {str(e)[:100]}")
+
+    # XML only after every PDF route above has failed.
+    if allow_xml and pmcid:
+        xml_got = try_pmc_xml_fallback(pmcid, save_path, verbose=verbose, doi=f"pmid:{pmid}")
+        if xml_got:
+            return xml_got
 
     return False
 
@@ -4372,6 +4374,12 @@ def _fetch_pdf_chain(doi,
     # Defer Elsevier XML fallback until all PDF-oriented fallbacks have failed.
     elsevier_crossref_message = None
     _pmid_cache = [None]  # Cached from PMC idconv when available; used for DOI->PMID fallback
+    # XML copies found mid-chain (PMC, eLife, Crossref text-mining links) are
+    # queued here, not returned: an open PDF later in the chain beats them.
+    # PLOS ONE 10.1371/journal.pone.0000308 came back as XML because Europe
+    # PMC's ?pdf=render 403'd and the PMC step took the JATS, while PLOS
+    # itself serves the PDF. Each entry is (source, callable -> path or None).
+    deferred_xml = []
 
     # Skip if PDF or XML already exists
     xml_path = os.path.splitext(save_path)[0] + ".xml"
@@ -5055,12 +5063,9 @@ def _fetch_pdf_chain(doi,
                     # pdf=render 404s for OA records Europe PMC holds only as
                     # JATS (eLife 34573, PLOS Currents). The XML is the paper.
                     if allow_xml_fallback:
-                        xml_got = try_pmc_xml_fallback(
+                        deferred_xml.append(("pmc", lambda pmcid=pmcid: try_pmc_xml_fallback(
                             pmcid, save_path, verbose=verbose, doi=doi
-                        )
-                        if xml_got:
-                            _record_source(_source_out, "pmc")
-                            return xml_got
+                        )))
                         # Europe PMC serves fullTextXML only for records inside
                         # its OA subset. NIH author manuscripts are not in it --
                         # free to read on the PMC website, not redistributable --
@@ -5075,26 +5080,17 @@ def _fetch_pdf_chain(doi,
                         # A non-OA record's efetch reply is a well-formed
                         # <article> with no <body> and the refusal in an XML
                         # comment; _looks_like_jats_fulltext already rejects it.
-                        xml_got = try_pmc_efetch_xml_fallback(
+                        deferred_xml.append(("pmc_efetch", lambda pmcid=pmcid: try_pmc_efetch_xml_fallback(
                             pmcid, save_path, verbose=verbose, doi=doi
-                        )
-                        if xml_got:
-                            _record_source(_source_out, "pmc_efetch")
-                            return xml_got
+                        )))
     except Exception as e:
         if verbose: print(f"Error with PMC: {e}")
         pass
 
     # ---------------- eLife CDN / API XML (HTML site 406s) ----------------
     if allow_xml_fallback and _elife_article_id(doi):
-        try:
-            xml_got = try_elife_xml_fallback(doi, save_path, verbose=verbose)
-            if xml_got:
-                _record_source(_source_out, "elife")
-                return xml_got
-        except Exception as e:
-            if verbose:
-                print(f"Error with eLife XML: {e}")
+        deferred_xml.append(("elife", lambda: try_elife_xml_fallback(
+            doi, save_path, verbose=verbose)))
 
     # ---------------- eScholarship via PubMed LinkOut ----------------
     # UC and other universities deposit in eScholarship; PubMed abstract lists these
@@ -5165,12 +5161,9 @@ def _fetch_pdf_chain(doi,
             # is the CDN JATS file the HTML site 406s would have pointed at.
             if allow_xml_fallback:
                 for xml_url in _crossref_tdm_xml_urls(m):
-                    xml_got = _try_save_jats_xml(
+                    deferred_xml.append(("crossref", lambda xml_url=xml_url: _try_save_jats_xml(
                         xml_url, save_path, verbose=verbose, doi=doi
-                    )
-                    if xml_got:
-                        _record_source(_source_out, "crossref")
-                        return xml_got
+                    )))
             # Landing page fallback
             landing = m.get("URL")
             if try_download(landing, save_path, verbose):
@@ -5199,13 +5192,14 @@ def _fetch_pdf_chain(doi,
                 elsevier_crossref_message = m
             # A published paper's PsyArXiv/bioRxiv copy is a Crossref relation,
             # not Unpaywall's "best" location. Re-enter the chain on that DOI;
-            # _visited stops a cycle.
+            # _visited stops a cycle. PDF only: the related chain returning its
+            # XML here would beat every PDF source still ahead of this one.
             for related in _crossref_related_dois(m, doi):
                 if verbose:
                     print(f"  Trying Crossref related DOI: {related}")
                 related_path = fetch_pdf(
                     related, save_path, email, verbose, delay=0,
-                    allow_xml_fallback=allow_xml_fallback,
+                    allow_xml_fallback=False,
                     use_playwright=use_playwright,
                     _source_out=_source_out, _visited=_visited,
                 )
@@ -5496,12 +5490,19 @@ def _fetch_pdf_chain(doi,
         if pmid:
             pmid_str = str(pmid).strip()
             pmid_got = try_pmid_direct_pdf_fallback(
-                pmid_str, save_path, verbose, allow_xml=allow_xml_fallback
+                pmid_str, save_path, verbose, allow_xml=False
             )
             if pmid_got:
                 _record_source(_source_out, "pmid_direct")
                 return pmid_got if isinstance(pmid_got, str) else save_path
-
+            # The PMID route's own PMC XML, unless the PMC step above already
+            # queued XML for this record. Re-running the route repeats its PDF
+            # attempts before the XML, but only once every PDF source has failed.
+            if allow_xml_fallback and not any(
+                source in ("pmc", "pmc_efetch") for source, _ in deferred_xml
+            ):
+                deferred_xml.append(("pmid_direct", lambda: try_pmid_direct_pdf_fallback(
+                    pmid_str, save_path, verbose, allow_xml=True)))
 
     # ---------------- Google Scholar via SerpApi ---------------------------
     # Preserve search credits until the ordinary PDF sources are exhausted.
@@ -5529,6 +5530,20 @@ def _fetch_pdf_chain(doi,
         except Exception as e:
             if verbose:
                 print(f"Error with deferred Elsevier fallback: {e}")
+
+    # ---------------- Deferred XML (every PDF source has failed) -----------
+    # Last of all, after SerpApi too: XML is the last-ditch format, so a PDF
+    # from any source -- even one that spends a search credit -- comes first.
+    for xml_source, attempt in deferred_xml:
+        try:
+            xml_got = attempt()
+        except Exception as e:
+            if verbose:
+                print(f"Error with deferred {xml_source} XML: {e}")
+            continue
+        if xml_got:
+            _record_source(_source_out, xml_source)
+            return xml_got if isinstance(xml_got, str) else save_path
 
 
 def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
