@@ -2248,7 +2248,7 @@ def _is_plausible_http_url(url: str) -> bool:
     u = url.strip()
     if not (u.startswith("http://") or u.startswith("https://")):
         return False
-    if any(ch in u for ch in [" ", "{", "}", "<", ">", "\\n", "\\r", "\\t"]):
+    if any(ch in u for ch in [" ", "{", "}", "<", ">", "\n", "\r", "\t"]):
         return False
     return True
 
@@ -2505,6 +2505,7 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
     if landing_resp.status_code == 200 and "pdf" in (landing_resp.headers.get("content-type", "").lower()):
         with open(save_path, "wb") as f:
             f.write(landing_resp.content)
+        _note_download_url(save_path, landing_resp.url)
         if verbose:
             print(f"✅ Landing page resolved directly to PDF for {doi}")
         return True
@@ -2682,10 +2683,14 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
 
 
 @_timed("pmid_direct")
-def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow_xml=True) -> bool:
+def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow_xml=True,
+                                 try_pdf=True) -> bool:
     """
     Try PMID-native PDF retrieval when DOI is unavailable.
     Uses PMCID routes + Europe PMC full-text links.
+
+    try_pdf=False goes straight to the PMC XML, for a caller that has already
+    run the PDF routes and only wants the XML once every other source failed.
     """
     if not pmid:
         return False
@@ -2707,6 +2712,11 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
     except Exception as e:
         if verbose:
             print(f"  PMID native idconv lookup failed for {pmid}: {str(e)[:100]}")
+
+    if not try_pdf:
+        if allow_xml and pmcid:
+            return try_pmc_xml_fallback(pmcid, save_path, verbose=verbose, doi=f"pmid:{pmid}")
+        return False
 
     # PMCID-derived direct PDF endpoints.
     if pmcid:
@@ -4635,8 +4645,9 @@ def _fetch_pdf_chain(doi,
                             else:
                                 if verbose:
                                     print(f"    OSF page returned error status: {resp.status if resp else 'No response'}")
-                                _quiet_close(browser)
-                                return None
+                                # Fall through: the browser is closed below and
+                                # the rest of the chain still runs. Only a 429
+                                # (above) ends the record.
 
                             if resp and resp.status < 400:
                                 # If buttons didn't work, look for PDF links in page content
@@ -5044,7 +5055,7 @@ def _fetch_pdf_chain(doi,
     # endpoint reliably serves PDFs (NCBI PMC uses JS redirects).
     try:
         r = _get_with_retries(
-            _ncbi_url(f"{IDCONV_URL}?ids={doi}&format=json&tool=replication_search&email={email}"),
+            _ncbi_url(f"{IDCONV_URL}?ids={doi}&format=json&tool=replication_search&email={quote_plus(email or '')}"),
             timeout=15,
         )
         if r.status_code == 200:
@@ -5104,7 +5115,7 @@ def _fetch_pdf_chain(doi,
 
     # ---------------- Unpaywall ----------------
     try:
-        r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={email}", timeout=10)
+        r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={quote_plus(email or '')}", timeout=10)
         if r.status_code == 200:
             data = r.json()
             _remember_title(doi, data.get("title"))
@@ -5359,6 +5370,7 @@ def _fetch_pdf_chain(doi,
             if "application/pdf" in r.headers.get("content-type", "").lower():
                 with open(save_path, "wb") as f:
                     f.write(r.content)
+                _note_download_url(save_path, r.url)
                 if (verbose):  print(f"✅ Direct DOI PDF success for {doi}")
                 _record_source(_source_out, "direct_doi")
                 return save_path
@@ -5467,14 +5479,20 @@ def _fetch_pdf_chain(doi,
                                 )
                             if verbose:
                                 print(f"  Trying {label}: {alt_doi}")
+                            # PDF only, as for the Crossref related DOIs: the
+                            # related chain's XML would beat every PDF source
+                            # still ahead of this one.
                             alt_result = fetch_pdf(
-                                alt_doi, save_path, email, verbose, delay=0, use_playwright=use_playwright, _source_out=_source_out, _visited=_visited
+                                alt_doi, save_path, email, verbose, delay=0,
+                                allow_xml_fallback=False,
+                                use_playwright=use_playwright,
+                                _source_out=_source_out, _visited=_visited,
                             )
                             if alt_result:
                                 if verbose:
                                     print(f"✅ {label} success for {doi}")
                                 _record_source(_source_out, "datacite_related")
-                                return save_path
+                                return alt_result
                             break  # only try first match per type
     except Exception as e:
         if verbose:
@@ -5496,13 +5514,13 @@ def _fetch_pdf_chain(doi,
                 _record_source(_source_out, "pmid_direct")
                 return pmid_got if isinstance(pmid_got, str) else save_path
             # The PMID route's own PMC XML, unless the PMC step above already
-            # queued XML for this record. Re-running the route repeats its PDF
-            # attempts before the XML, but only once every PDF source has failed.
+            # queued XML for this record. try_pdf=False: its PDF routes have
+            # just failed, so the deferred call goes straight to the XML.
             if allow_xml_fallback and not any(
                 source in ("pmc", "pmc_efetch") for source, _ in deferred_xml
             ):
                 deferred_xml.append(("pmid_direct", lambda: try_pmid_direct_pdf_fallback(
-                    pmid_str, save_path, verbose, allow_xml=True)))
+                    pmid_str, save_path, verbose, allow_xml=True, try_pdf=False)))
 
     # ---------------- Google Scholar via SerpApi ---------------------------
     # Preserve search credits until the ordinary PDF sources are exhausted.
@@ -8020,6 +8038,7 @@ def _main(argv=None, json_out=None):
         return 0
 
     # Batch from an existing corpus dir (decode folder names → DOIs).
+    dois_from_folders = None
     if args.input_from_dirs:
         if not os.path.isdir(args.input_from_dirs):
             print(f"❌ --input-from-dirs target is not a directory: {args.input_from_dirs}")
@@ -8030,23 +8049,13 @@ def _main(argv=None, json_out=None):
         if not dois_from_folders:
             print(f"❌ No safe-DOI-shaped subdirectories found under {args.input_from_dirs}")
             return 1
-        # Feed the discovered list through the same batch path used by --csv,
-        # by writing a temporary in-memory CSV. Keeps a single code path for
-        # start_from_row / workers / everything else the batch already handles.
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".csv", delete=False, encoding="utf-8",
-        )
-        tmp.write("DOI\n")
-        for d in dois_from_folders:
-            tmp.write(d + "\n")
-        tmp.close()
-        args.csv = tmp.name
+        # The discovered list goes through the same batch path as --csv, so
+        # start_from_row / workers / everything else the batch handles apply.
         print(f"📁 --input-from-dirs: discovered {len(dois_from_folders)} DOI(s) "
               f"from subdirectories of {args.input_from_dirs}")
 
     # Auto-detect CSV from positional input arg
-    if args.input and not args.csv and not args.pmid_csv:
+    if args.input and not args.csv and not args.pmid_csv and not dois_from_folders:
         if args.input.lower().endswith('.csv') and os.path.isfile(args.input):
             args.csv = args.input
             args.input = None
@@ -8058,7 +8067,7 @@ def _main(argv=None, json_out=None):
     # A comma-separated list on the command line runs as a batch, through the
     # same path as a CSV.
     id_list = None
-    if args.input and not args.csv and not args.pmid_csv:
+    if args.input and not args.csv and not args.pmid_csv and not dois_from_folders:
         id_list = split_identifier_list(args.input)
         if id_list and args.output_pos:
             print("❌ An output file path names one file; with a list of "
@@ -8072,10 +8081,13 @@ def _main(argv=None, json_out=None):
     args.output = args.output_pos
 
     # Batch mode from CSV or a comma-separated list
-    if args.csv or id_list:
+    if args.csv or id_list or dois_from_folders:
         if id_list:
             dois = id_list
             batch_source = "the command line"
+        elif dois_from_folders:
+            dois = list(dois_from_folders)
+            batch_source = args.input_from_dirs
         else:
             dois = _read_csv_column(args.csv, args.doi_column)
             batch_source = args.csv
@@ -8111,7 +8123,7 @@ def _main(argv=None, json_out=None):
             success_count += len(recovered)
 
         print("\n" + "=" * 60)
-        print(f"✅ Success: {success_count}/{len(dois)} ({success_count/len(dois)*100:.1f}%)")
+        print(f"✅ Success: {success_count}/{len(dois)} ({success_count/max(len(dois), 1)*100:.1f}%)")
         _report_unverified_keeps()
 
         if failed:
@@ -8163,7 +8175,7 @@ def _main(argv=None, json_out=None):
             success_count += len(recovered)
 
         print("\n" + "=" * 60)
-        print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/len(identifiers)*100:.1f}%)")
+        print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/max(len(identifiers), 1)*100:.1f}%)")
         _report_unverified_keeps()
 
         if failed:

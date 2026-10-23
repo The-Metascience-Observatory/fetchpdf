@@ -117,8 +117,14 @@ def publisher_for_site(site: str) -> Optional[str]:
 
 def _write_private_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    # Only fetchpdf's own config folders are made private. A --out pointing
+    # at the home directory or the working directory must not lock it down.
+    parent, config = path.parent.resolve(), CONFIG_DIR.resolve()
+    if parent == config or config in parent.parents:
+        os.chmod(path.parent, 0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_CREAT's mode applies only to a new file; tighten an existing one too.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
 
@@ -594,10 +600,6 @@ def main(argv=None) -> int:
     return args.func(args)
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 # --------------------------------------------------------------------------
 # Advanced: sign in inside a browser this tool drives
 # --------------------------------------------------------------------------
@@ -758,3 +760,6 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
     print(f"Use it with:  fetchpdf <dois.csv> -o <dir> --cookies {out_path}")
     return 0 if any(s.startswith("ok") for s in results.values()) else 1
 
+
+if __name__ == "__main__":
+    sys.exit(main())

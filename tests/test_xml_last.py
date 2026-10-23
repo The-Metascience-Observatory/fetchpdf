@@ -63,14 +63,15 @@ def test_pmid_route_tries_pdf_before_its_xml(monkeypatch, chain):
     monkeypatch.setattr(fpd, "doi_to_pmid", lambda *a, **kw: "17327915")
     calls = []
 
-    def pmid_route(pmid, save_path, verbose=False, allow_xml=True):
-        calls.append(allow_xml)
+    def pmid_route(pmid, save_path, verbose=False, allow_xml=True, try_pdf=True):
+        calls.append((allow_xml, try_pdf))
         return chain.xml if allow_xml else False
 
     monkeypatch.setattr(fpd, "try_pmid_direct_pdf_fallback", pmid_route)
     source = [None]
     assert fpd._fetch_pdf_chain(DOI, chain.pdf, email="test@example.org", delay=0,
                                 _source_out=source) == chain.xml
-    assert calls == [False, True]
+    # The deferred XML call skips the PDF routes the first call already ran.
+    assert calls == [(False, True), (True, False)]
     fpd.try_serpapi_scholar_fallback.assert_called_once()
     assert source == ["pmid_direct"]

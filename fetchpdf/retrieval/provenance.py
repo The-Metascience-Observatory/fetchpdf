@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .http import redact
+from .http import apply_default_mode, redact
 from ._util import iso as _iso
 
 SIDECAR_SUFFIX = ".provenance.json"
@@ -168,6 +168,7 @@ def write_sidecar(record: ProvenanceRecord, artifact_path: str, verbose: bool = 
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(record.to_dict(), f, indent=2, ensure_ascii=False)
+            apply_default_mode(tmp)
             os.replace(tmp, path)
         except BaseException:
             try:

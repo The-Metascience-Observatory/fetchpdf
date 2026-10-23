@@ -261,7 +261,7 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
                 "title":    d.get("title"),
                 "abstract": abstract,
                 "authors":  authors,
-                "journal":  (d.get("primary_location") or {}).get("source", {}).get("display_name"),
+                "journal":  ((d.get("primary_location") or {}).get("source") or {}).get("display_name"),
                 "year":     d.get("publication_year"),
             })
             if verbose and abstract:

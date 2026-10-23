@@ -29,6 +29,7 @@ from typing import List, Optional, Tuple
 
 from .artifact import ValidationResult
 from ._util import localname as _localname
+from ._util import normalise_doi as _normalise_doi
 
 #: Documents that parse but carry no full text. Matched against raw bytes, not
 #: the parsed tree: PMC puts this in an XML comment (see module docstring).
@@ -105,12 +106,6 @@ def _meta_content(tree, name: str) -> str:
     return ""
 
 
-def _normalise_doi(doi: str) -> str:
-    doi = doi.strip().lower()
-    for prefix in ("doi:", "https://doi.org/", "http://doi.org/", "doi.org/"):
-        if doi.startswith(prefix):
-            doi = doi[len(prefix):]
-    return doi
 
 
 def _citation_doi_mismatch(tree, requested_doi: Optional[str]) -> Optional[str]:
@@ -453,5 +448,12 @@ def _parse_html(text: str):
         return None
     try:
         return lxml.html.fromstring(text)
+    except ValueError:
+        # lxml refuses a str that carries an <?xml encoding=...?> declaration
+        # (common on XHTML publisher pages); the same text as bytes parses.
+        try:
+            return lxml.html.fromstring(text.encode("utf-8"))
+        except Exception:
+            return None
     except Exception:
         return None

@@ -418,7 +418,7 @@ def _route(entry: dict, ids, ctx, paper=None):
             return []
     if _GITHUB_HINT in lowered:
         repo = lowered.split(_GITHUB_HINT, 1)[1].strip("/")
-        repo = "/".join(repo.split("/")[:2])
+        repo = "/".join(repo.split("/")[:2]).rstrip(".").removesuffix(".git")
         if repo.count("/") == 1:
             return _github_tarball(repo, ctx) or []
         return None

@@ -291,7 +291,11 @@ def strip_boilerplate(html_text: str) -> Tuple[str, float, List[str]]:
         return html_text, 1.0, failures
 
     try:
-        tree = lxml.html.fromstring(html_text)
+        try:
+            tree = lxml.html.fromstring(html_text)
+        except ValueError:
+            # A str with an <?xml encoding=...?> declaration parses as bytes.
+            tree = lxml.html.fromstring(html_text.encode("utf-8"))
     except Exception as e:
         failures.append(f"HTML unparseable: {str(e)[:80]}")
         return html_text, 1.0, failures

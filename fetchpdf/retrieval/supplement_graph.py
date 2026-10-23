@@ -185,17 +185,15 @@ def _files_in_repository(related_doi: str, ids, ctx,
     routed.add(key)
 
     proxy = IdentifierSet(doi=related_doi)
-    if related_doi.startswith("10.5281") or "zenodo" in related_doi:
-        enumerator, provider = enumerate_zenodo, "zenodo_files"
-    elif related_doi.startswith("10.6084") or "figshare" in related_doi:
-        enumerator, provider = enumerate_figshare, "figshare_files"
-    elif "osf.io" in related_doi or related_doi.startswith("10.17605"):
-        enumerator, provider = enumerate_osf, "osf_files"
-    elif related_doi.startswith("10.5061") or "dryad" in related_doi:
-        enumerator, provider = enumerate_dryad, "dryad_files"
-    elif related_doi.startswith("10.7910/dvn"):
-        enumerator, provider = enumerate_dataverse, "dataverse_files"
-    else:
+    provider = _repo_provider(key)
+    enumerator = {
+        "zenodo_files": enumerate_zenodo,
+        "figshare_files": enumerate_figshare,
+        "osf_files": enumerate_osf,
+        "dryad_files": enumerate_dryad,
+        "dataverse_files": enumerate_dataverse,
+    }.get(provider)
+    if enumerator is None:
         # The long tail (institutional repos, subject databases) has no
         # enumerator; the link still lands in the linked-artifacts sidecar.
         ctx.log(f"    {via}: no enumerator for {related_doi}")
@@ -745,11 +743,27 @@ def _has_repo_enumerator(target_doi: Optional[str]) -> bool:
     Gates the ownership lookup: a DOI that cannot be downloaded anyway is not
     worth a DataCite request to classify more finely.
     """
-    if not target_doi:
-        return False
-    doi = target_doi.strip().lower()
-    return (doi.startswith(("10.5281", "10.6084", "10.17605", "10.5061", "10.7910/dvn"))
-            or "zenodo" in doi or "figshare" in doi or "osf.io" in doi or "dryad" in doi)
+    return bool(target_doi) and _repo_provider(target_doi) is not None
+
+
+# (DOI prefix, substring, provider) in routing order. One table for both
+# _files_in_repository and _has_repo_enumerator, so the two cannot disagree.
+_REPO_ROUTES = (
+    ("10.5281", "zenodo", "zenodo_files"),
+    ("10.6084", "figshare", "figshare_files"),
+    ("10.17605", "osf.io", "osf_files"),
+    ("10.5061", "dryad", "dryad_files"),
+    ("10.7910/dvn", None, "dataverse_files"),
+)
+
+
+def _repo_provider(doi: str) -> Optional[str]:
+    """The provider tag of the repository a data DOI routes to, or None."""
+    doi = (doi or "").strip().lower()
+    for prefix, marker, provider in _REPO_ROUTES:
+        if doi.startswith(prefix) or (marker and marker in doi):
+            return provider
+    return None
 
 
 # -- E17: Europe PMC datalinks ------------------------------------------------

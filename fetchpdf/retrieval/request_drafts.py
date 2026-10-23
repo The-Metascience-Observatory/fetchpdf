@@ -178,8 +178,8 @@ def render(group: _Group, purpose: str = _DEFAULT_PURPOSE) -> str:
     if group.alternates:
         others = ", ".join(
             f"{c.email}" + (f" ({c.paper_year})" if c.paper_year else "")
-            for c in dict.fromkeys(
-                (c for c in group.alternates if c.email != group.contact.email)))
+            for c in {c.email: c for c in group.alternates
+                      if c.email != group.contact.email}.values())
         if others:
             lines.append(f"*Other addresses seen for this author: {others}*")
     manual = [a for a in asks if a.block == MANUAL_LIKELY and a.url]
@@ -272,10 +272,16 @@ def write_drafts(groups: Dict[str, _Group], unresolved: List[Ask],
     """
     directory = directory or os.getcwd()
     written = []
+    used = set()
     for group in sorted(groups.values(), key=lambda g: -len(g.asks)):
-        path = os.path.join(
-            directory, FILENAME_PREFIX + _slug(group.contact.email,
-                                               group.contact.name) + ".md")
+        # Two authors can share a slug (same name, or same local part at two
+        # domains); a numeric suffix keeps the second from overwriting the first.
+        slug = base = _slug(group.contact.email, group.contact.name)
+        n = 2
+        while slug in used:
+            slug, n = f"{base}-{n}", n + 1
+        used.add(slug)
+        path = os.path.join(directory, FILENAME_PREFIX + slug + ".md")
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(render(group, purpose))

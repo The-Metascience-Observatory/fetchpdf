@@ -336,9 +336,12 @@ def scan_text(text: str) -> List[Candidate]:
             ident = match.group(1)
             if not ident:
                 continue
+            # A sentence-final period is prose, not part of the identifier.
+            ident = ident.rstrip(".")
             if repo == "github":
-                # Strip a trailing ".git" and any path fragment beyond owner/repo.
-                ident = ident.rsplit(".git", 1)[0]
+                # A clone URL's ".git" is not part of the repo name. Only as a
+                # suffix: rsplit cut "owner/name.github.io" down to "owner/name".
+                ident = ident.removesuffix(".git")
             start = match.start()
             context = text[max(0, start - CONTEXT_CHARS):start + CONTEXT_CHARS]
             context = " ".join(context.split())
