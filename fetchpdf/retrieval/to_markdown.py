@@ -55,6 +55,12 @@ _PARA_BLOCKS = (
     "float-anchor", "textbox", "enunciation",
 )
 
+#: JATS blocks a <p> may hold. PMC's conversions of Elsevier articles put every
+#: <fig> (and some <table-wrap>s) inside the paragraph that cites it; read as
+#: inline text, the figure vanished and its label, caption and alt text were
+#: spliced into the sentence (10.1016/j.radcr.2026.07.028, 2026-10-23).
+_JATS_PARA_BLOCKS = ("fig", "fig-group", "table-wrap", "table-wrap-group")
+
 #: Emitted above every table so a reader (human or model) knows the format is
 #: deliberate and that the span attributes carry meaning.
 TABLE_FORMAT_NOTE = (
@@ -318,9 +324,12 @@ def _emit_one(child, parent, parts: List[str], result: Conversion, depth: int,
         return  # already consumed by the enclosing <sec>
 
     elif tag == "p":
-        text = _inline_text(child)
+        text = _inline_text(child, skip=_JATS_PARA_BLOCKS)
         if text:
             parts.append(text + "\n")
+        for block in child:
+            if localname(block.tag) in _JATS_PARA_BLOCKS:
+                _emit_one(block, child, parts, result, depth, floats)
 
     elif tag == "table-wrap":
         parts.append(_table_block(child, result))

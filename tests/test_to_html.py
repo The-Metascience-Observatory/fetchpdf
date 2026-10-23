@@ -75,6 +75,25 @@ def test_a_figure_is_found_by_its_file_name_without_a_manifest(tmp_path):
     assert to_html.xml_to_html(xml).conversion.n_figures_embedded == 1
 
 
+def test_a_figure_inside_a_paragraph_is_a_figure_not_prose(tmp_path):
+    """PMC's JATS for Elsevier articles nests each <fig> in the <p> citing it."""
+    xml = tmp_path / "rec.xml"
+    xml.write_text(
+        '<article xmlns:xlink="http://www.w3.org/1999/xlink"><body><sec><title>Case</title>'
+        '<p>Imaging showed hemorrhage (<xref rid="f1">Fig. 1</xref>).'
+        '<fig id="f1"><label>Fig. 1</label><caption><p>CT scan.</p></caption>'
+        '<alt-text>dummy alt text</alt-text><graphic xlink:href="gr1.webp"/></fig>'
+        ' It resolved.</p></sec></body></article>')
+    (tmp_path / "rec_figures").mkdir()
+    (tmp_path / "rec_figures" / "gr1.png").write_bytes(PNG)
+
+    rendering = to_html.xml_to_html(str(xml))
+
+    assert rendering.conversion.n_figures == rendering.conversion.n_figures_embedded == 1
+    assert "Imaging showed hemorrhage (Fig. 1). It resolved." in rendering.conversion.markdown
+    assert "dummy alt text" not in rendering.html
+
+
 def test_tables_keep_their_spans(tmp_path):
     rendering = to_html.xml_to_html(record(tmp_path))
     assert rendering.html.count("<table") == rendering.conversion.n_tables > 0
