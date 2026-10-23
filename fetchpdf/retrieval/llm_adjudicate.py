@@ -30,12 +30,11 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 from typing import List, Optional
 
-from .fulltext_scan import ACCEPT, REFUSE, UNCERTAIN, Candidate
+from .fulltext_scan import ACCEPT, REFUSE, Candidate
 
 #: Default model. Haiku is the right tier for a one-sentence classification,
 #: and measured at ~2.3s / $0.009 per call.

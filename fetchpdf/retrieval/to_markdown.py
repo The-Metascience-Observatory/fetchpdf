@@ -901,10 +901,11 @@ def record_stem_for(artifact_path: str) -> str:
 
 
 def write_markdown(artifact_path: str, overwrite: bool = False,
-                   verbose: bool = False) -> Optional[str]:
+                   verbose: bool = False, conversion=None) -> Optional[str]:
     """Convert one artifact and write `{stem}_from_xml.md` / `{stem}_from_html.md`.
 
-    Returns the path, or None.
+    Returns the path, or None. `conversion`, when the caller already has it,
+    saves parsing the document a second time.
 
     Never raises into a batch: a document that will not convert is one bad
     record, not a dead run.
@@ -913,7 +914,8 @@ def write_markdown(artifact_path: str, overwrite: bool = False,
     if os.path.exists(out_path) and not overwrite:
         return out_path
     try:
-        conversion = convert_file(artifact_path)
+        if conversion is None:
+            conversion = convert_file(artifact_path)
     except Exception as e:
         if verbose:
             print(f"  markdown: {os.path.basename(artifact_path)} raised {type(e).__name__}: {str(e)[:90]}")
@@ -975,7 +977,8 @@ def convert_directory(directory: str, overwrite: bool = False, verbose: bool = F
             conversion = convert_file(path)
         except Exception:
             pass
-        written = write_markdown(path, overwrite=overwrite, verbose=verbose)
+        written = write_markdown(path, overwrite=overwrite, verbose=verbose,
+                                 conversion=conversion)
         if written is None:
             summary["failed"] += 1
         elif existed and not overwrite:

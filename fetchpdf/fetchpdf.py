@@ -5,7 +5,6 @@ import os
 import re
 import sys
 import time
-import difflib
 import html
 import shutil
 import tempfile
@@ -28,6 +27,7 @@ from ._env import (
 )
 from ._http import (USER_AGENT, POLITE_USER_AGENT, headers_for,
                     elsevier_first_page_only)
+from .retrieval._util import unlink as _unlink_quietly
 
 # The ID Converter moved: www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ now 301s
 # here. requests follows the redirect, so the old URL still worked -- it just
@@ -826,14 +826,6 @@ def _artifact_snapshot(save_path: str) -> dict:
     return snapshot
 
 
-def _unlink_quietly(path: str) -> None:
-    try:
-        if path and os.path.exists(path):
-            os.unlink(path)
-    except OSError:
-        pass
-
-
 def _looks_like_no_fulltext_item(html_text: str) -> bool:
     """True when a landing page is a news/editorial item with no PDF to get.
 
@@ -956,7 +948,6 @@ DOI_URL_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
 FILENAME_SAFE_DOI_RE = re.compile(r"^(10\.\d{4,9})--(.+)$", re.IGNORECASE)
 PMID_URL_RE = re.compile(r"^https?://(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?", re.IGNORECASE)
 PMID_INPUT_RE = re.compile(r"^(?:pmid[\s:._-]*)?(\d{4,10})$", re.IGNORECASE)
-DOI_CANDIDATE_RE = re.compile(r"10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
 
 
 def _ncbi_url(base_url):
@@ -1523,15 +1514,18 @@ def pmid_to_doi(pmid: str, verbose=False):
             print(f"  PMID->DOI Europe PMC lookup failed for {pmid}: {str(exc)[:100]}")
 
     try:
-        from bs4 import BeautifulSoup
+        # lxml, not bs4: bs4 was never a declared dependency, so without it
+        # this fallback was silently off. lxml is required.
+        import lxml.html
         page = _get_pubmed_web_html(pmid, verbose=verbose)
-        soup = BeautifulSoup(page or "", "html.parser")
-        own_pmid = soup.find("meta", attrs={"name": "citation_pmid"})
-        own_doi = soup.find("meta", attrs={"name": "citation_doi"})
-        if own_pmid and own_pmid.get("content") == pmid and own_doi:
-            doi = clean(own_doi.get("content"))
-            if doi:
-                return doi
+        if page:
+            tree = lxml.html.fromstring(page.encode("utf-8") if isinstance(page, str) else page)
+            own_pmid = tree.xpath('//meta[@name="citation_pmid"]/@content')
+            own_doi = tree.xpath('//meta[@name="citation_doi"]/@content')
+            if own_pmid and own_pmid[0] == pmid and own_doi:
+                doi = clean(own_doi[0])
+                if doi:
+                    return doi
     except Exception as exc:
         if verbose:
             print(f"  PMID->DOI PubMed HTML lookup failed for {pmid}: {str(exc)[:100]}")
@@ -1730,7 +1724,6 @@ def _crossref_doi_exists(doi: str, email: str | None = None,
     if not doi or not doi.startswith("10."):
         return None
     try:
-        params = {}
         h = dict(headers)
         if email:
             h["User-Agent"] = f"{h.get('User-Agent','fetchpdf/1.0')} (mailto:{email})"
@@ -2799,13 +2792,7 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
                 if any(k in ul for k in [".pdf", "pdf", "/article/", "fulltext", "/doi/", "springer", "wiley", "tandfonline", "sagepub", "sciencedirect", "nature.com"]):
                     candidates.append(u)
 
-            # Deduplicate while preserving order.
-            deduped = []
-            seen = set()
-            for c in candidates:
-                if c and c not in seen:
-                    seen.add(c)
-                    deduped.append(c)
+            deduped = _dedupe_keep_order(c for c in candidates if c)
 
             if verbose:
                 print(f"  PMID native PubMed provider candidates: {len(deduped)}")
@@ -3508,13 +3495,6 @@ def _render_osf_page_to_pdf(osf_id: str, save_path: str, verbose=False, page=Non
 
 
 #-----------------------------------------------------------------------------------------
-def _text_similarity(a: str, b: str) -> float:
-    """Return normalized similarity score for two strings."""
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
 def _extract_pdf_links_from_doaj_record(record: dict):
     """Extract candidate full-text links from a DOAJ API record."""
     candidates = []
@@ -3839,13 +3819,7 @@ def _collect_datacite_candidate_urls(datacite_attributes: dict):
             if relation in {"issupplementto", "isversionof", "isidenticalto", "iscitedby", "references"}:
                 urls.append(identifier)
 
-    deduped = []
-    seen = set()
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            deduped.append(u)
-    return deduped
+    return _dedupe_keep_order(urls)
 
 
 def _is_datacite_prefix(doi: str) -> bool:
@@ -4382,7 +4356,7 @@ def _fetch_pdf_chain(doi,
     if not doi:
         if pmid_input:
             # Fallback path when PMID has no DOI in metadata indexes.
-            xml_path = os.path.splitext(save_path)[0] + ".xml"
+            xml_path = _xml_path_for_pdf_path(save_path)
             if os.path.exists(save_path) or os.path.exists(xml_path):
                 existing = save_path if os.path.exists(save_path) else xml_path
                 if verbose:
@@ -4415,7 +4389,7 @@ def _fetch_pdf_chain(doi,
     deferred_xml = []
 
     # Skip if PDF or XML already exists
-    xml_path = os.path.splitext(save_path)[0] + ".xml"
+    xml_path = _xml_path_for_pdf_path(save_path)
     if os.path.exists(save_path) or os.path.exists(xml_path):
         existing = save_path if os.path.exists(save_path) else xml_path
         if verbose:
@@ -4456,8 +4430,7 @@ def _fetch_pdf_chain(doi,
                         return save_path
 
                 # Method 2: Use Playwright to scrape OSF page for download links
-                if use_playwright:
-                  if verbose:
+                if use_playwright and verbose:
                     print(f"  Trying OSF Playwright scraping for {osf_id}...")
                 try:
                     if not use_playwright:
@@ -4528,8 +4501,10 @@ def _fetch_pdf_chain(doi,
                                     page.wait_for_timeout(2000)
 
                                 # Debug: Save page screenshot and HTML
-                                if verbose:
-                                    debug_dir = "./test_downloads/debug"
+                                # Opt-in only: --verbose used to drop these into
+                                # ./test_downloads/debug of whatever directory ran it.
+                                debug_dir = os.environ.get("FETCHPDF_DEBUG_DIR")
+                                if verbose and debug_dir:
                                     os.makedirs(debug_dir, exist_ok=True)
                                     screenshot_path = os.path.join(debug_dir, f"osf_{osf_id}.png")
                                     html_path = os.path.join(debug_dir, f"osf_{osf_id}.html")
@@ -4760,9 +4735,9 @@ def _fetch_pdf_chain(doi,
 
                         _quiet_close(browser)
 
-                except ImportError:
-                    if verbose:
-                        print("    Playwright not available for OSF download")
+                except ImportError as e:
+                    if verbose and use_playwright:
+                        print(f"    Playwright not available for OSF download: {e}")
                 except Exception as e:
                     if verbose:
                         print(f"    OSF Playwright failed: {e}")
@@ -6022,10 +5997,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     Everything below is unchanged; the only reason for the split is that the
     wrapper above needs a try/finally around the whole thing.
     """
-    import os
-    import sys
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
     from concurrent.futures import TimeoutError as FuturesTimeout
 
     os.makedirs(output_dir, exist_ok=True)
@@ -6065,7 +6037,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     if _tiered or pull_supplementary or pull_figures:
         from .retrieval.cache import ResolutionCache
         from .retrieval.http import HttpClient
-        from .retrieval.ratelimit import HostRateLimiter, shared_host_limiter
+        from .retrieval.ratelimit import shared_host_limiter
         from .retrieval.resolve import BatchResolver
         from .retrieval.tiers import load_ladder
 
@@ -8474,5 +8446,4 @@ def _main(argv=None, json_out=None):
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

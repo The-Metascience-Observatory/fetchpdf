@@ -401,7 +401,7 @@ def cmd_setup(args) -> int:
         print(f"     {len(keys) + 1}. Another library: I have its OpenAthens sign-in link")
         print(f"     {len(keys) + 2}. Another library: I'll use each publisher's "
               f"'Access through your institution' button")
-        choice = _ask(f"     Choose [1]: ", "1")
+        choice = _ask("     Choose [1]: ", "1")
         n = int(choice) if choice.isdigit() else 1
         if 1 <= n <= len(keys):
             key, inst_cfg = keys[n - 1], INSTITUTIONS[keys[n - 1]]
@@ -522,7 +522,7 @@ def cmd_disable(args) -> int:
         return 0
     cfg["enabled"] = False
     _write_private_json(ACCESS_CONFIG, cfg)
-    print(f"Institutional access is OFF. Turn it back on with: fetchpdf fetchcookies")
+    print("Institutional access is OFF. Turn it back on with: fetchpdf fetchcookies")
     return 0
 
 

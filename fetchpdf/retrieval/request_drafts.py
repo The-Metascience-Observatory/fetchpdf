@@ -33,7 +33,6 @@ page reprints other articles' author blocks.
 
 import os
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -163,8 +162,8 @@ def render(group: _Group, purpose: str = _DEFAULT_PURPOSE) -> str:
              (f"Dear Dr. {group.contact.name}," if group.contact.name
               else "Dear Author,"), "",
              purpose, "",
-             f"I was unable to obtain the following from the published record, "
-             f"and would be grateful for a copy:", ""]
+             "I was unable to obtain the following from the published record, "
+             "and would be grateful for a copy:", ""]
 
     for ask in asks:
         year = f" ({ask.year})" if ask.year else ""

@@ -301,8 +301,9 @@ def enumerate_llm_agent(ids, ctx) -> List[SupplementFile]:
 
     from .fulltext_scan import record_text
     from .linked_artifacts import record_query
+    from .engine import _stem_for
 
-    stem = os.path.splitext(ctx.save_path)[0] if ctx.save_path else ""
+    stem = _stem_for(ctx.save_path) if ctx.save_path else ""
     if not stem:
         return []
 

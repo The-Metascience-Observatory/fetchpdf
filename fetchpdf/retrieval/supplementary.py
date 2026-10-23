@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from . import blocked
-from .http import apply_default_mode, redact
+from .http import apply_default_mode, redact, write_bytes_atomic
 from .linked_artifacts import write_linked_sidecar
 from .supplement_index import (
     ROLE_ARTICLE,
@@ -51,6 +51,7 @@ from .supplement_index import (
     provider_rank,
 )
 from .tiers import ARTIFACT_EXTENSIONS
+from ._util import iso as _iso, unlink as _unlink
 
 _SCHEMA_VERSION = 1
 
@@ -1584,16 +1585,7 @@ def _is_zip(path: str) -> bool:
 
 
 def _write_bytes_atomic(path: str, payload: bytes) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    handle, temp_path = tempfile.mkstemp(prefix=".fetchpdf-si-", dir=directory)
-    try:
-        with os.fdopen(handle, "wb") as f:
-            f.write(payload)
-        apply_default_mode(temp_path)
-        os.replace(temp_path, path)
-    except BaseException:
-        _unlink(temp_path)
-        raise
+    write_bytes_atomic(path, payload, prefix=".fetchpdf-si-")
 
 
 # -- naming -----------------------------------------------------------------
@@ -1733,7 +1725,7 @@ def _wire(resolver, http, ladder, save_path, email, verbose):
         http = getattr(resolver, "http", None)
     if http is None:
         from .http import HttpClient
-        from .ratelimit import HostRateLimiter, shared_host_limiter
+        from .ratelimit import shared_host_limiter
 
         http = HttpClient(shared_host_limiter(ladder.rate_limits), email=email, verbose=verbose)
 
@@ -1824,16 +1816,3 @@ def _digest_of(checksum: str) -> str:
     return str(checksum).split(":", 1)[-1].strip().lower()
 
 
-def _iso(timestamp: float) -> str:
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _unlink(path: Optional[str]) -> None:
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass

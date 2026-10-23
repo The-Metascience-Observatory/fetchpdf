@@ -686,7 +686,6 @@ def _providers() -> Tuple[Tuple[str, Any], ...]:
         enumerate_pmc_s3,
     )
     from .supplement_jci import enumerate_jci
-    from .supplement_atypon import fetch_atypon_supplements
     from .supplement_publishers import (
         enumerate_apa_supplemental,
         enumerate_elsevier_objects,

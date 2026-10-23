@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -569,7 +570,7 @@ _xvfb_proc = None
 def _browser_display() -> Optional[str]:
     """An X display for headed Chromium: a shared private Xvfb, else $DISPLAY."""
     global _xvfb_display, _xvfb_proc
-    if os.name == "nt" or os.sys.platform == "darwin":
+    if os.name == "nt" or sys.platform == "darwin":
         return ""
     if os.environ.get("FETCHPDF_INSTITUTIONAL_VISIBLE") and os.environ.get("DISPLAY"):
         return os.environ["DISPLAY"]

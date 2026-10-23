@@ -36,7 +36,6 @@ already said it is withholding.
 """
 
 import os
-import re
 import shutil
 import tempfile
 from typing import List, Optional

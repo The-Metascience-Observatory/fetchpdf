@@ -26,13 +26,12 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from ._util import iso, unlink
-from .http import apply_default_mode
+from .http import write_bytes_atomic
 
 IMAGES_DIR_SUFFIX = "_images"
 MANIFEST_SUFFIX = "_images.json"
@@ -297,16 +296,7 @@ def enumerate_pdf_images(pdf_path: str) -> ImagesResult:
 
 
 def _write_bytes_atomic(path: str, payload: bytes) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    handle, temp_path = tempfile.mkstemp(prefix=".fetchpdf-img-", dir=directory)
-    try:
-        with os.fdopen(handle, "wb") as f:
-            f.write(payload)
-        apply_default_mode(temp_path)
-        os.replace(temp_path, path)
-    except BaseException:
-        unlink(temp_path)
-        raise
+    write_bytes_atomic(path, payload, prefix=".fetchpdf-img-")
 
 
 def _sha256_file(path: str) -> Tuple[int, str]:

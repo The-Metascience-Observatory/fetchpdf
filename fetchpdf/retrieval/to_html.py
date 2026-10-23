@@ -207,7 +207,8 @@ def _tiff_to_png(content: bytes) -> Optional[bytes]:
     try:
         import fitz
 
-        return fitz.open(stream=content, filetype="tiff")[0].get_pixmap().tobytes("png")
+        with fitz.open(stream=content, filetype="tiff") as doc:
+            return doc[0].get_pixmap().tobytes("png")
     except Exception:                           # noqa: BLE001 - no converter
         return None
 
@@ -422,7 +423,7 @@ def _page(xml_path: str, content: bytes, conversion: Conversion, doi: str,
     return (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        f"<meta name=\"generator\" content=\"fetchpdf to_html\">\n"
+        "<meta name=\"generator\" content=\"fetchpdf to_html\">\n"
         + (f"<meta name=\"citation_doi\" content=\"{_esc(doi)}\">\n" if doi else "")
         + f"<title>{_esc(title)}</title>\n<style>{_CSS}</style>\n</head>\n<body>\n"
         f"<aside class=\"provenance\">{banner}</aside>\n<main>\n{body}"

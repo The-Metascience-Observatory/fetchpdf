@@ -33,7 +33,6 @@ found nothing on an older clinical-trial corpus, which is a fact worth a sidecar
 entry rather than a silence (see linked_artifacts.py).
 """
 
-import os
 import re
 from typing import List, Optional
 
@@ -51,6 +50,7 @@ from .supplement_index import (
     classify_role,
     jats_sets,
 )
+from ._util import titles_match
 
 DATACITE_REVERSE = "https://api.datacite.org/dois"
 CROSSREF_COMPONENTS = "https://api.crossref.org/works"
@@ -298,6 +298,35 @@ _PAPER_DOI_PREFIXES = (
 _REPLICATION_TITLE_RE = re.compile(r"(?i)^(?:replication\s+)?(data|code|materials?)\s+(?:for|from):?\s*(.+)")
 
 
+def _datacite_attributes(doi: str, ctx) -> Optional[dict]:
+    """A deposit's DataCite record attributes, or None when it could not be had.
+
+    One fetch per DOI per record: the ownership and other-article checks both
+    read the same record, and used to request it once each.
+    """
+    import urllib.parse
+
+    cache = ctx.scratch.setdefault("_datacite_attributes", {})
+    key = (doi or "").strip().lower()
+    if key in cache:
+        return cache[key]
+    attributes = None
+    try:
+        response = ctx.http.get(
+            "https://api.datacite.org/dois/" + urllib.parse.quote(key, safe=""),
+            timeout=30, polite=False,
+        )
+        if response.ok:
+            try:
+                attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
+            except ValueError:
+                attributes = {}
+    except Exception:
+        attributes = None
+    cache[key] = attributes
+    return attributes
+
+
 def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
     """Whether the deposit's own metadata declares it belongs to this article.
 
@@ -326,17 +355,9 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
     if key in cache:
         return cache[key]
 
-    import urllib.parse
-    response = ctx.http.get(
-        "https://api.datacite.org/dois/" + urllib.parse.quote(key, safe=""),
-        timeout=30, polite=False,
-    )
+    attributes = _datacite_attributes(key, ctx)
     verdict = False
-    if response.ok:
-        try:
-            attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
-        except ValueError:
-            attributes = {}
+    if attributes is not None:
         needle = article_doi.strip().lower()
         for relation in attributes.get("relatedIdentifiers") or []:
             if not isinstance(relation, dict):
@@ -354,7 +375,8 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
 
 
 #: How close a "Replication Data for: <title>" remainder must sit to the
-#: article's own title. Exact containment is too strict by exactly one letter:
+#: article's own title: _util.TITLE_MATCH_RATIO, via titles_match. Exact
+#: containment is too strict by exactly one letter:
 #: a Harvard Dataverse deposit titled "...ESCAS randomised pilot study" against
 #: a journal title reading "...ESCAS Randomized Pilot Study" agrees for 108
 #: characters and then diverges on British vs American spelling, which sent a
@@ -362,27 +384,17 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
 #:
 #: The margin is not delicate. That pair scores 0.99; an unrelated replication
 #: title scores 0.12. Anything in between is not a near-miss worth arguing over.
-_TITLE_MATCH_RATIO = 0.93
 
 
 def _replication_title_matches(attributes: dict, article_doi: str, ctx) -> bool:
     """Route 2: 'Replication Data for: <title>' against the article's title."""
-    import difflib
-
     for entry in attributes.get("titles") or []:
         title = str((entry or {}).get("title") or "")
         matched = _REPLICATION_TITLE_RE.match(title.strip())
         if not matched:
             continue
-        claimed = _squash(matched.group(2))
-        actual = _squash(_article_title(article_doi, ctx))
-        if not claimed or not actual:
-            continue
-        if claimed in actual or actual in claimed:
-            return True
-        # Containment first (cheap, and the common case); near-identity only
-        # for the spelling-variant tail it would otherwise drop.
-        if difflib.SequenceMatcher(None, claimed, actual).ratio() >= _TITLE_MATCH_RATIO:
+        # Containment first, then near-identity for the spelling-variant tail.
+        if titles_match(matched.group(2), _article_title(article_doi, ctx)):
             return True
     return False
 
@@ -404,12 +416,6 @@ def _article_title(article_doi: str, ctx) -> str:
             pass
     cache[key] = title
     return title
-
-
-def _squash(text: str) -> str:
-    """Lowercased alphanumerics only, so punctuation and casing differences
-    between a deposit title and a journal title cannot break the match."""
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def enumerate_scholix_related(ids, ctx) -> List[SupplementFile]:
@@ -543,9 +549,9 @@ def enumerate_fulltext_scan(ids, ctx) -> List[SupplementFile]:
         return []
 
     from .fulltext_scan import ACCEPT, scan_record
-    from .linked_artifacts import record_link, record_query
+    from .engine import _stem_for
 
-    stem = os.path.splitext(ctx.save_path)[0] if ctx.save_path else ""
+    stem = _stem_for(ctx.save_path) if ctx.save_path else ""
     if not stem:
         return []
     try:
@@ -702,10 +708,8 @@ def _deposit_claims_another_article(target_doi: str, article_doi: str, ctx) -> b
 
     verdict = False
     try:
-        response = ctx.http.get(f"https://api.datacite.org/dois/{key}",
-                                timeout=25, polite=False)
-        if response.ok:
-            attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
+        attributes = _datacite_attributes(key, ctx)
+        if attributes is not None:
             mine = (article_doi or "").strip().lower()
             for relation in attributes.get("relatedIdentifiers") or []:
                 if not isinstance(relation, dict):

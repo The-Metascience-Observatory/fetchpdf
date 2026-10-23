@@ -52,7 +52,6 @@ _ELSEVIER_PREFIX = "10.1016"
 _PREPRINT_PREFIX = "10.1101"      # bioRxiv and medRxiv share it; the API disambiguates
 
 _ARXIV_FROM_DOI_RE = re.compile(r"10\.48550/arxiv\.(.+)$", re.IGNORECASE)
-_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)", re.IGNORECASE)
 _PII_RE = re.compile(r"PII:([A-Z0-9]+)", re.IGNORECASE)
 
 #: An arXiv id sitting in a URL we already have.

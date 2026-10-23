@@ -675,6 +675,23 @@ def apply_default_mode(path: str) -> None:
         pass
 
 
+def write_bytes_atomic(path: str, payload: bytes, prefix: str = ".fetchpdf-w-") -> None:
+    """Write payload to path whole or not at all, with delivered-file permissions."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle, temp_path = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(handle, "wb") as f:
+            f.write(payload)
+        apply_default_mode(temp_path)
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _unlink(path: Optional[str]) -> None:
     if not path:
         return

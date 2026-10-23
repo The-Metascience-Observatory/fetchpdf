@@ -160,8 +160,6 @@ PAGE_COUNT_MIN_SPAN = 2
 
 _PAGE_RANGE_RE = re.compile(r"^\s*(?:[A-Za-z]*)(\d+)\s*(?:[-–—]\s*(?:[A-Za-z]*)(\d+))?\s*$")
 
-_DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
-
 #: Embedded titles that carry no identity: a converter's leftovers, a filename,
 #: a template default. Present in a large minority of real PDFs, and treating
 #: them as "declares a different article" would reject correct files.
