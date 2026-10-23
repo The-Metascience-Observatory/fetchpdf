@@ -59,6 +59,10 @@ class _Resp:
         yield self._body
     def close(self):
         pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
 
 
 def _run(url, responder):

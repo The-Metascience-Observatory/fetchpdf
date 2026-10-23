@@ -721,8 +721,14 @@ class _Run:
                 staged_member = self._stage()
                 if staged_member is None:
                     return
-                with open(staged_member, "wb") as f:
-                    f.write(payload)
+                try:
+                    with open(staged_member, "wb") as f:
+                        f.write(payload)
+                except OSError as e:
+                    _unlink(staged_member)
+                    self._refuse(member_entry, "unwritable", detail=str(e)[:120],
+                                 container=entry.basename)
+                    continue
                 apply_default_mode(staged_member)
                 self._commit(member_entry, staged_member,
                              hashlib.sha256(payload).hexdigest(), len(payload),

@@ -1446,6 +1446,9 @@ def test_the_url_a_pdf_came_from_is_recorded(tmp_path, monkeypatch):
         def iter_content(self, n):
             yield b"%PDF-1.4 " + b"x" * 2000
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(fpd.requests, "get", lambda *a, **k: _Resp())
     assert fpd.try_download("https://p.example/real.pdf", str(save))
     assert fpd.download_url_for(str(save)) == "https://p.example/real.pdf"

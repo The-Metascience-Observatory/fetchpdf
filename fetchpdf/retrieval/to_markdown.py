@@ -37,7 +37,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional
 
-from ._util import iso, localname
+from ._util import iso, localname, unlink
 from .normalize import html_table_to_canonical, jats_table_to_canonical, token_count
 
 _WS_RE = re.compile(r"\s+")
@@ -931,6 +931,7 @@ def write_markdown(artifact_path: str, overwrite: bool = False,
             f.write(text)
         os.replace(tmp, out_path)
     except OSError as e:
+        unlink(tmp)
         if verbose:
             print(f"  markdown: could not write {out_path}: {e}")
         return None

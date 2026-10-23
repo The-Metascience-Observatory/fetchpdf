@@ -55,7 +55,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ._util import iso
+from ._util import iso, unlink
 from .byline import byline_from_xml
 from .references import Reference, references_from_xml, references_section
 from .to_markdown import Conversion, image_keys, jats_to_markdown, record_stem_for
@@ -574,6 +574,7 @@ def render_record(xml_path: str, html: bool = True, pdf: bool = False,
             os.replace(tmp, html_out)
             result["html"] = html_out
         except OSError as e:
+            unlink(tmp)
             result["error"] = f"could not write {html_out}: {e}"
     if want_pdf:
         try:

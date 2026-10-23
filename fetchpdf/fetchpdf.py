@@ -664,10 +664,23 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
     # the same paths and have already passed _looks_like_jats_fulltext.
     try:
         with open(save_path, "rb") as f:
-            if f.read(4) != b"%PDF":
-                return True
+            head = f.read(1024)
     except OSError:
         return False
+    if not head.startswith(b"%PDF"):
+        if not save_path.lower().endswith(".pdf"):
+            return True
+        # Readers accept junk before the header within the first 1 KB. No %PDF
+        # anywhere in it at a .pdf path is an HTML login wall or interstitial
+        # served as application/pdf -- not a document to keep.
+        if b"%PDF" not in head:
+            _note_rejected(doi, url)
+            _print_yellow_warning(
+                f"⚠️  Discarded a non-PDF saved as PDF for {doi}"
+                + (f"\n     source: {url[:110]}" if url else "")
+            )
+            _unlink_quietly(save_path)
+            return False
 
     from .retrieval.pdf_identity import TRUNCATED, WALL, WRONG, verify_pdf_identity
     from .retrieval.resolve import arxiv_id_from_doi
@@ -869,8 +882,9 @@ def _unregister_pool_from_atexit(executor) -> bool:
     None sentinel, so it stays parked in its socket read and the interpreter's
     normal teardown is not gated on it.
 
-    Writes are atomic (os.replace), so a worker abandoned mid-download costs a
-    temp file, not a corrupt artifact.
+    Streamed downloads go through a .part file and os.replace (see
+    _stream_pdf_to), so a worker abandoned mid-download costs a temp file,
+    not a corrupt artifact.
 
     Returns False if CPython's internals have moved, in which case the caller
     still works -- it just keeps the old blocking-at-exit behaviour.
@@ -2091,6 +2105,35 @@ def _stdio_is_interactive() -> bool:
 
 
 #-----------------------------------------------------------------------------------------
+def _stream_pdf_to(r, save_path: str, url: str, require_magic: bool) -> bool:
+    """Stream a response body to save_path; True when the file was written.
+
+    require_magic: refuse (writing nothing) unless the first bytes are %PDF.
+    Checked on the first chunk, so a multi-GB octet-stream that is not a PDF
+    is dropped after 8 KB instead of being buffered whole.
+
+    The body goes to a .part file that replaces save_path only once complete:
+    a stream cut off midway used to leave a truncated .pdf that the next run
+    took for a finished download.
+    """
+    chunks = (c for c in r.iter_content(8192) if c)
+    first = next(chunks, b"")
+    if require_magic and first[:4] != b"%PDF":
+        return False
+    part = save_path + ".part"
+    try:
+        with open(part, "wb") as f:
+            f.write(first)
+            for chunk in chunks:
+                f.write(chunk)
+        os.replace(part, save_path)
+    except BaseException:
+        _unlink_quietly(part)
+        raise
+    _note_download_url(save_path, url)
+    return True
+
+
 def try_download(url, save_path, verbose=False):
     """Try downloading PDF from URL and save to save_path."""
 
@@ -2143,22 +2186,12 @@ def try_download(url, save_path, verbose=False):
             # Accept application/pdf or application/octet-stream with PDF magic bytes
             # (PsychArchives, DSpace, etc. often use octet-stream)
             if "pdf" in content_type:
-                with open(save_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        if chunk:
-                            f.write(chunk)
-                _note_download_url(save_path, url)
-                if verbose:
-                    print("PDF downloaded OK from direct URL.")
-                return True
+                if _stream_pdf_to(r, save_path, url, require_magic=False):
+                    if verbose:
+                        print("PDF downloaded OK from direct URL.")
+                    return True
             if "octet-stream" in content_type:
-                chunks = list(r.iter_content(8192))
-                if chunks and chunks[0][:4] == b"%PDF":
-                    with open(save_path, "wb") as f:
-                        for chunk in chunks:
-                            if chunk:
-                                f.write(chunk)
-                    _note_download_url(save_path, url)
+                if _stream_pdf_to(r, save_path, url, require_magic=True):
                     if verbose:
                         print("PDF downloaded OK (octet-stream).")
                     return True
@@ -2176,18 +2209,12 @@ def try_download(url, save_path, verbose=False):
                 retry_headers = {**request_headers,
                                  "User-Agent": POLITE_USER_AGENT}
                 try:
-                    r2 = requests.get(url, headers=retry_headers, timeout=20,
-                                      allow_redirects=True, stream=True)
-                    ctype2 = r2.headers.get("content-type", "").lower()
-                    if r2.status_code == 200 and ("pdf" in ctype2
-                                                  or "octet-stream" in ctype2):
-                        chunks = list(r2.iter_content(8192))
-                        if chunks and chunks[0][:4] == b"%PDF":
-                            with open(save_path, "wb") as f:
-                                for chunk in chunks:
-                                    if chunk:
-                                        f.write(chunk)
-                            _note_download_url(save_path, url)
+                    with requests.get(url, headers=retry_headers, timeout=20,
+                                      allow_redirects=True, stream=True) as r2:
+                        ctype2 = r2.headers.get("content-type", "").lower()
+                        if (r2.status_code == 200
+                                and ("pdf" in ctype2 or "octet-stream" in ctype2)
+                                and _stream_pdf_to(r2, save_path, url, require_magic=True)):
                             if verbose:
                                 print("PDF downloaded OK (polite-UA retry after "
                                       "HTML interstitial).")
@@ -2200,6 +2227,9 @@ def try_download(url, save_path, verbose=False):
     except Exception as e:
         if verbose:
             print(f"Failed downloading from {url[:80]}: {str(e)[:100]}")
+    finally:
+        if r is not None:
+            r.close()
     return False
 
 
@@ -2208,34 +2238,24 @@ def try_download_with_session(url: str, save_path: str, referer: str = None, ver
     if not url:
         return False
     try:
-        session = requests.Session()
-        session.headers.update(headers)
-        if referer:
-            session.headers["Referer"] = referer
-            session.get(referer, headers=HTML_HEADERS, timeout=15)
-        r = session.get(url, timeout=20, allow_redirects=True, stream=True)
-        content_type = r.headers.get("content-type", "").lower()
-        if r.status_code == 200:
-            if "pdf" in content_type:
-                with open(save_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        if chunk:
-                            f.write(chunk)
-                _note_download_url(save_path, url)
-                if verbose:
-                    print("PDF downloaded OK (session).")
-                return True
-            if "octet-stream" in content_type:
-                chunks = list(r.iter_content(8192))
-                if chunks and chunks[0][:4] == b"%PDF":
-                    with open(save_path, "wb") as f:
-                        for chunk in chunks:
-                            if chunk:
-                                f.write(chunk)
-                    _note_download_url(save_path, url)
-                    if verbose:
-                        print("PDF downloaded OK (session, octet-stream).")
-                    return True
+        with requests.Session() as session:
+            session.headers.update(headers)
+            if referer:
+                session.headers["Referer"] = referer
+                session.get(referer, headers=HTML_HEADERS, timeout=15).close()
+            with session.get(url, timeout=20, allow_redirects=True, stream=True) as r:
+                content_type = r.headers.get("content-type", "").lower()
+                if r.status_code == 200:
+                    if "pdf" in content_type:
+                        if _stream_pdf_to(r, save_path, url, require_magic=False):
+                            if verbose:
+                                print("PDF downloaded OK (session).")
+                            return True
+                    if "octet-stream" in content_type:
+                        if _stream_pdf_to(r, save_path, url, require_magic=True):
+                            if verbose:
+                                print("PDF downloaded OK (session, octet-stream).")
+                            return True
     except Exception as e:
         if verbose:
             print(f"Session download failed: {e}")
@@ -3472,12 +3492,12 @@ def _render_osf_page_to_pdf(osf_id: str, save_path: str, verbose=False, page=Non
                 return False
             page.pdf(path=save_path, format="A4", print_background=True)
 
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-            with open(save_path, "rb") as f:
-                if f.read(4) == b"%PDF":
-                    if verbose:
-                        print(f"✅ OSF rendered page fallback success for {osf_id}")
-                    return True
+        if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                and _starts_with_pdf_magic(save_path)):
+            if verbose:
+                print(f"✅ OSF rendered page fallback success for {osf_id}")
+            return True
+        _unlink_quietly(save_path)       # a render that failed the check
     except Exception as e:
         if verbose:
             print(f"  OSF rendered fallback error: {str(e)[:120]}")
@@ -4018,12 +4038,12 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
             page.pdf(path=save_path, format="A4", print_background=True)
             _quiet_close(browser)
 
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-            with open(save_path, "rb") as f:
-                if f.read(4) == b"%PDF":
-                    if verbose:
-                        print(f"✅ Wiley rendered PDF fallback success for {doi}")
-                    return True
+        if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                and _starts_with_pdf_magic(save_path)):
+            if verbose:
+                print(f"✅ Wiley rendered PDF fallback success for {doi}")
+            return True
+        _unlink_quietly(save_path)       # a render that failed the check
     except Exception as e:
         if verbose:
             print(f"Error with Wiley rendered fallback: {e}")
@@ -4574,14 +4594,14 @@ def _fetch_pdf_chain(doi,
                                                     download = download_info.value
                                                     download.save_as(save_path)
 
-                                                    if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-                                                        with open(save_path, "rb") as f:
-                                                            if f.read(4) == b"%PDF":
-                                                                if verbose:
-                                                                    print("✅ OSF PDF downloaded via button click")
-                                                                _record_source(_source_out, "osf")
-                                                                _quiet_close(browser)
-                                                                return save_path
+                                                    if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                                                            and _starts_with_pdf_magic(save_path)):
+                                                        if verbose:
+                                                            print("✅ OSF PDF downloaded via button click")
+                                                        _record_source(_source_out, "osf")
+                                                        _quiet_close(browser)
+                                                        return save_path
+                                                    _unlink_quietly(save_path)
                                                     if verbose:
                                                         print("    Download file check failed")
                                                 except PlaywrightTimeout:
@@ -4816,14 +4836,14 @@ def _fetch_pdf_chain(doi,
                                                 download = download_info.value
                                                 download.save_as(save_path)
 
-                                                if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-                                                    with open(save_path, "rb") as f:
-                                                        if f.read(4) == b"%PDF":
-                                                            if verbose:
-                                                                print("✅ SSRN PDF downloaded via Playwright download")
-                                                            _record_source(_source_out, "ssrn")
-                                                            _quiet_close(browser)
-                                                            return save_path
+                                                if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                                                        and _starts_with_pdf_magic(save_path)):
+                                                    if verbose:
+                                                        print("✅ SSRN PDF downloaded via Playwright download")
+                                                    _record_source(_source_out, "ssrn")
+                                                    _quiet_close(browser)
+                                                    return save_path
+                                                _unlink_quietly(save_path)
                                                 if verbose:
                                                     print("    Download file check failed")
                                             except PlaywrightTimeout:
@@ -6754,8 +6774,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # naive version prints its summary and then hangs forever at exit, which
         # is precisely the "stalled at the end" symptom. Daemon threads are not
         # joined, so the interpreter can leave them behind. Safe here because
-        # every artifact is written atomically via os.replace: a worker killed
-        # mid-flight leaves a temp file, never a half-written PDF.
+        # streamed downloads are written via a .part file and os.replace: a
+        # worker killed mid-flight leaves a temp file, never a half-written PDF.
         executor = _DaemonThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="fetchpdf"
         )

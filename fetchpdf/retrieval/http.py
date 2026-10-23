@@ -568,8 +568,11 @@ def _adopt_local_file_impl(url, dest, max_bytes) -> Download:
 
     hasher = hashlib.sha256()
     written = 0
+    # Staged beside dest and moved into place whole, so an interrupt mid-copy
+    # leaves no partial file at dest.
+    part = dest + ".part"
     try:
-        with open(source, "rb") as src, open(dest, "wb") as out:
+        with open(source, "rb") as src, open(part, "wb") as out:
             while True:
                 chunk = src.read(65536)
                 if not chunk:
@@ -577,11 +580,14 @@ def _adopt_local_file_impl(url, dest, max_bytes) -> Download:
                 hasher.update(chunk)
                 out.write(chunk)
                 written += len(chunk)
-    except OSError as error:
+        os.replace(part, dest)
+    except BaseException as error:
         try:
-            os.unlink(dest)
+            os.unlink(part)
         except OSError:
             pass
+        if not isinstance(error, OSError):
+            raise
         return Download(url=redact(url), request_url=redact(url), status=0,
                         outcome="unreachable", detail=str(error)[:120])
 
