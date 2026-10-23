@@ -551,6 +551,12 @@ retrieved, the PDF is kept and reported as unverified.
 When a PDF is unavailable, FetchPDF tries XML or HTML full text automatically.
 Use `--no-xml-fallback` to disable this fallback.
 
+A record that comes back as XML only is filed in its own folder,
+`{output_dir}/{stem}/`, with its figure images in `{stem}_figures/` and a
+rendering at `{stem}_from_xml.pdf` (figures embedded; a rendering of the XML,
+not the publisher's PDF). A later flat run finds it there. Use
+`--no-xml-fallback-extras` to leave the bare `.xml` instead.
+
 Publisher HTML (T2) uses lxml, which is installed with fetchpdf.
 
 Advanced users can customize retrieval order, source capabilities, and host rate

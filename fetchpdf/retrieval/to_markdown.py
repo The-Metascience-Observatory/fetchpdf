@@ -230,6 +230,9 @@ class _FloatMap:
     (715/764 tables and 705/748 figures across 240 inbox files, 2026-09-02);
     the body only carries a `<ce:float-anchor refid>` where each belongs. A
     body-only walk therefore sees almost no tables at all.
+
+    JATS `<floats-group>` is the same arrangement: PMC author manuscripts keep
+    every figure there, after `<back>`, so they come out as leftovers at the end.
     """
 
     def __init__(self, root):
@@ -237,7 +240,7 @@ class _FloatMap:
         self.in_order = []
         self.emitted = set()
         for container in root.iter():
-            if localname(container.tag) != "floats":
+            if localname(container.tag) not in ("floats", "floats-group"):
                 continue
             for el in container:
                 self.in_order.append(el)

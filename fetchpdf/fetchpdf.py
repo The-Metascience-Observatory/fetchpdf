@@ -1969,7 +1969,10 @@ def count_existing_records(identifiers, output_dir, make_subfolder=False,
         safe_doi = doi_to_safe_filename(display_id)
         record_dir = (os.path.join(output_dir, safe_doi)
                       if make_subfolder else output_dir)
-        stem = os.path.join(record_dir, safe_doi)
+        save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+        if not make_subfolder:
+            save_path = _xml_fallback_save_path(save_path)
+        stem = os.path.splitext(save_path)[0]
         if any(os.path.exists(stem + ext) for ext in extensions):
             existing += 1
     return existing, total
@@ -2847,6 +2850,52 @@ def _print_yellow_warning(message: str):
 def _xml_path_for_pdf_path(save_path: str) -> str:
     base, _ = os.path.splitext(save_path)
     return f"{base}.xml"
+
+
+#: Per-record files that travel with an XML-only result into its own folder.
+_XML_FALLBACK_SIBLINGS = (".xml", ".provenance.json", "_from_xml.md",
+                          "_linked_artifacts.json")
+
+
+def _is_xml_fallback(result, tiered: bool) -> bool:
+    """True when the chain settled for full-text XML because no PDF could be had.
+
+    Not in the tiered modes (--prioritize-xml, --xml-only, ...): there the XML
+    is what was asked for, and the caller's own flags decide what follows.
+    """
+    return bool(result) and not tiered and str(result).lower().endswith(".xml")
+
+
+def _xml_fallback_save_path(save_path: str) -> str:
+    """save_path inside {dir}/{stem}/ when an earlier run filed an XML fallback there.
+
+    So a flat re-run finds that record instead of fetching it again.
+    """
+    folder, name = os.path.split(save_path)
+    stem = os.path.splitext(name)[0]
+    nested = os.path.join(folder, stem, name)
+    if not os.path.exists(save_path) and os.path.exists(_xml_path_for_pdf_path(nested)):
+        return nested
+    return save_path
+
+
+def _move_xml_fallback_to_own_folder(result: str, save_path: str):
+    """Move an XML-only result into {dir}/{stem}/, where its figures and the
+    rendered PDF will go. Returns ``(result, save_path)`` at the new location;
+    unchanged when the record already has its own folder.
+    """
+    folder, name = os.path.split(save_path)
+    stem = os.path.splitext(name)[0]
+    if os.path.basename(os.path.abspath(folder or ".")) == stem:
+        return result, save_path
+    record_dir = os.path.join(folder, stem)
+    os.makedirs(record_dir, exist_ok=True)
+    for suffix in _XML_FALLBACK_SIBLINGS:
+        src = os.path.join(folder, stem + suffix)
+        if os.path.exists(src):
+            os.replace(src, os.path.join(record_dir, stem + suffix))
+    new_save = os.path.join(record_dir, name)
+    return _xml_path_for_pdf_path(new_save), new_save
 
 
 _ELIFE_DOI_RE = re.compile(r"^10\.7554/elife\.(\d+)$", re.IGNORECASE)
@@ -5876,7 +5925,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None, xml_fallback_extras=True):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5984,6 +6033,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             download_related_unverified=download_related_unverified,
             draft_requests=draft_requests,
             make_subfolder=make_subfolder,
+            xml_fallback_extras=xml_fallback_extras,
             json_out=json_out,
             cookies_file=cookies_file,
         )
@@ -5991,7 +6041,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None, xml_fallback_extras=True):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
@@ -6119,6 +6169,10 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     _image_statuses = {}
 
     def _si_http():
+        if _resolver is None:
+            # An XML-fallback figure pass in a run that built no resolver; the
+            # figures module then makes its own client.
+            return None
         client = getattr(_si_local, "client", None)
         if client is None:
             from .retrieval.http import HttpClient
@@ -6152,7 +6206,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             if verbose:
                 print(f"  images: {os.path.basename(pdf)} failed ({e})")
 
-    def _pull_figures(display_id, raw_id, canonical, save_path):
+    def _pull_figures(display_id, raw_id, canonical, save_path, force=False):
         """Published figure images for one record. Never changes the verdict.
 
         Wrapped whole for the same reason as _pull_si, and run on the
@@ -6160,7 +6214,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         fetched before this flag existed is the main thing anyone points it at,
         and fetch_pdf is never called there.
         """
-        if not pull_figures or not save_path:
+        if not (pull_figures or force) or not save_path:
             return
         try:
             from .retrieval.figures import pull_for_record as pull_figures_for_record
@@ -6186,13 +6240,13 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         except Exception as e:
             print(f"   🖼️  {display_id}: figure pass failed ({str(e)[:120]})")
 
-    def _render_xml(display_id, save_path):
+    def _render_xml(display_id, save_path, force_pdf=False):
         """{stem}_from_xml.html / .pdf for a record with XML. Never changes the verdict.
 
         After _pull_figures, which supplies the images, and on the
         already-exists branch too, for the same reason that pass runs there.
         """
-        if not (generate_html_from_xml or generate_pdf_from_xml) or not save_path:
+        if not (generate_html_from_xml or generate_pdf_from_xml or force_pdf) or not save_path:
             return
         from .retrieval.engine import _stem_for
         xml_path = _stem_for(save_path) + ".xml"
@@ -6203,7 +6257,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         try:
             from .retrieval.to_html import render_record
             outcome = render_record(xml_path, html=generate_html_from_xml,
-                                    pdf=generate_pdf_from_xml, verbose=verbose)
+                                    pdf=generate_pdf_from_xml or force_pdf, verbose=verbose)
             written = [os.path.basename(p) for p in (outcome["html"], outcome["pdf"]) if p]
             if written:
                 print(f"   🖨️  {display_id}: {', '.join(written)} "
@@ -6337,6 +6391,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             if made_dir is not None:
                 made_dir.append(record_dir)
         save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+        if not make_subfolder:
+            save_path = _xml_fallback_save_path(save_path)
 
         # Always allocated, not just under --tracksource: the success line names
         # the acquiring source, and that should not depend on an unrelated flag.
@@ -6451,6 +6507,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
 
         success = result is not None
 
+        # No PDF, only the XML: give it a folder, its figures, and a rendering.
+        xml_fallback = xml_fallback_extras and _is_xml_fallback(result, _tiered)
+        if xml_fallback:
+            result, save_path = _move_xml_fallback_to_own_folder(result, save_path)
+
         # Deliberately after `success` is decided and never folded into it. Run
         # unconditionally, including when the paper could not be had: a paywalled
         # article with three retrievable .xlsx files is a better outcome than
@@ -6463,8 +6524,9 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # artifact there is nothing for them to illustrate, and the pass would
         # leave an empty `_figures/` and manifest in a record that failed.
         if success:
-            _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
-        _render_xml(display_id, save_path)
+            _pull_figures(display_id, raw_identifier, canonical_doi, save_path,
+                          force=xml_fallback)
+        _render_xml(display_id, save_path, force_pdf=xml_fallback)
         _pull_images(result or save_path, display_id)
 
         if success:
@@ -7440,6 +7502,7 @@ def _batch_kwargs(args, json_out):
         download_related_unverified=args.download_related_unverified,
         draft_requests=args.draft_requests,
         make_subfolder=args.make_subfolder,
+        xml_fallback_extras=not args.no_xml_fallback_extras,
         json_out=json_out,
         cookies_file=args.cookies_file,
     )
@@ -7694,6 +7757,14 @@ def _main(argv=None, json_out=None):
              "{stem}_from_xml.pdf with Chromium. A rendering of the XML, not the "
              "publisher's PDF, and never written as {stem}.pdf. Give both flags to "
              "keep both files. Needs: pip install 'fetchpdf[render,browser]'."
+    )
+    parser.add_argument(
+        "--no-xml-fallback-extras",
+        action="store_true",
+        help="When a record comes back as full-text XML only (no PDF could be had), "
+             "leave the .xml where it is. By default it is moved into its own "
+             "{stem}/ folder, its figures are fetched (as --pull-figures) and it is "
+             "rendered to {stem}_from_xml.pdf (as --generate-pdf-from-xml)."
     )
     parser.add_argument(
         "--target-task",
@@ -8243,6 +8314,8 @@ def _main(argv=None, json_out=None):
                 os.makedirs(record_dir, exist_ok=True)
                 made_record_dir = record_dir
             save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+            if not args.make_subfolder:
+                save_path = _xml_fallback_save_path(save_path)
             print(f"💾 No output path provided; using: {save_path}")
 
         # Allocated the way the batch worker allocates them, and for the same
@@ -8292,6 +8365,11 @@ def _main(argv=None, json_out=None):
             if _offer_cookie_import([resolved_identifier or args.doi], _retry_single):
                 result = retried[-1]
 
+        # No PDF, only the XML: give it a folder, its figures, and a rendering.
+        xml_fallback = _is_xml_fallback(result, _tiered) and not args.no_xml_fallback_extras
+        if xml_fallback and not args.output:
+            result, save_path = _move_xml_fallback_to_own_folder(result, save_path)
+
         # A separate call rather than a parameter on fetch_pdf, and that
         # is the recursion guard: the tiered engine re-enters the chain at T5 via
         # retrieval/sources/legacy_pdf.py, which calls fetch_pdf with a
@@ -8334,7 +8412,7 @@ def _main(argv=None, json_out=None):
 
         # Only for a record that was retrieved: figures with no article to go
         # with them are an empty `_figures/` and manifest in a failed record.
-        if args.pull_figures and result:
+        if (args.pull_figures or xml_fallback) and result:
             # A separate call above fetch_pdf, for the same reason the
             # supplementary pass is one: the tiered engine re-enters the chain
             # at T5 with a temporary save_path, and a flag threaded through
@@ -8360,14 +8438,14 @@ def _main(argv=None, json_out=None):
             except Exception as e:
                 print(f"\n🖼️  figure pass failed: {str(e)[:200]}")
 
-        if args.generate_html_from_xml or args.generate_pdf_from_xml:
+        if args.generate_html_from_xml or args.generate_pdf_from_xml or xml_fallback:
             from .retrieval.engine import _stem_for
             xml_path = _stem_for(save_path) + ".xml"
             if os.path.exists(xml_path):
                 try:
                     from .retrieval.to_html import render_record
                     outcome = render_record(xml_path, html=args.generate_html_from_xml,
-                                            pdf=args.generate_pdf_from_xml,
+                                            pdf=args.generate_pdf_from_xml or xml_fallback,
                                             verbose=args.verbose)
                     for key in ("html", "pdf"):
                         if outcome[key]:
