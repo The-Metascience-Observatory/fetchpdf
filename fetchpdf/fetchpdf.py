@@ -7088,6 +7088,14 @@ def _print_institutional_report():
             print(f"    {line}")
 
 
+def _playwright_installed() -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _cookie_offer_applies(args) -> bool:
     """The library route only ever yields a PDF; these modes would not keep one."""
     return not (args.abstract_only or args.xml_only or args.xml_html_only)
@@ -7659,7 +7667,13 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--add-playwright",
         action="store_true",
-        help="Enable Playwright-based scrapers (publisher browser sessions, OSF browser). Disabled by default."
+        help="Enable Playwright-based scrapers (publisher browser sessions, OSF browser). "
+             "On by default whenever Playwright is installed; kept for old scripts."
+    )
+    parser.add_argument(
+        "--no-playwright",
+        action="store_true",
+        help="Skip the Playwright-based scrapers even when Playwright is installed."
     )
     parser.add_argument(
         "--start-from-row",
@@ -7974,6 +7988,10 @@ def _main(argv=None, json_out=None):
     )
 
     args = parser.parse_args(argv)
+    # On whenever Playwright is installed; each browser route falls back
+    # quietly if Chromium itself is missing.
+    args.add_playwright = not args.no_playwright and (
+        args.add_playwright or _playwright_installed())
 
     # `fetchpdf DOI [OUTPUT]`, or a list the shell split into several words:
     # `fetchpdf 10.1/a, 10.2/b` arrives as ["10.1/a,", "10.2/b"]. Read every

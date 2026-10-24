@@ -66,7 +66,7 @@ pip install -e .
 
 ### Optional: Install Playwright and Chromium for Browser Automation
 
-Install Playwright and Chromium only if you want to try additional scrapers enabled by `--add-playwright`. The scapers are for SSRN, OSF (if direct download fails), Wiley 10.1111/ DOIs, HTML table retrieval (second route), and Atypon supplementary material (PNAS, Science, SAGE, T&F, Annual Reviews).
+Install Playwright and Chromium to enable additional browser-based scrapers. They are used automatically once Playwright is installed (pass `--no-playwright` to skip them). The scrapers are for SSRN, OSF (if direct download fails), Wiley 10.1111/ DOIs, HTML table retrieval (second route), and Atypon supplementary material (PNAS, Science, SAGE, T&F, Annual Reviews).
 
 ```bash
 pip install -e ".[browser]"   # or: pip install playwright
@@ -1383,7 +1383,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 9. **CORE** (core.ac.uk) — 40M+ repository papers; needs `COREAPIKEY`
 10. **DOAJ** — open-access full-text links
 11. **DataCite content URLs** — direct content and related resource links
-12. **Wiley rendered PDF** — only with `--add-playwright`
+12. **Wiley rendered PDF** — only when Playwright is installed
 13. **APA supplemental** — APA supplemental files, converting `.doc`/`.docx` to PDF when available
 14. **Direct DOI resolver**
     - Follows `https://doi.org/{doi}` to the landing page
