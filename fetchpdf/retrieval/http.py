@@ -34,7 +34,8 @@ from .ratelimit import HostRateLimiter
 
 #: Query parameters whose values must never appear in a log line or a sidecar.
 _SECRET_PARAMS = {"apikey", "api_key", "key", "token", "access_token", "auth"}
-_SECRET_HEADERS = {"authorization", "x-api-key", "apikey"}
+_SECRET_HEADERS = {"authorization", "x-api-key", "apikey",
+                   "x-els-apikey", "x-els-insttoken"}
 
 #: Headers that carry a credential, i.e. the ones worth REMOVING and retrying
 #: when a host rejects them. Same membership as `_SECRET_HEADERS` today but a
@@ -219,6 +220,30 @@ class HttpClient:
                 headers.setdefault("Authorization", f"Bearer {key}")
         return headers
 
+    @staticmethod
+    def elsevier_token_headers(host: str, headers: Optional[dict] = None) -> dict:
+        """Add the Elsevier institutional token to a request for api.elsevier.com.
+
+        Separate from `polite_headers` on purpose. That one is skipped for
+        `polite=False`, which every Elsevier object and supplement call passes
+        (the mailto/identification it adds is for other APIs), and it is also
+        the path on which a 401/403 strips credentials and retries unkeyed --
+        neither is right for this token. It must ride on EVERY request to the
+        host or the subscription entitlement it carries applies to some of a
+        record's files and not others.
+
+        Exact-host match, so the token cannot leave for a redirect-adjacent or
+        look-alike host. A no-op when ELSEVIER_INSTTOKEN is unset.
+        """
+        if host != "api.elsevier.com":
+            return headers if headers is not None else {}
+        from .. import _env
+
+        out = dict(headers or {})
+        if _env.ELSEVIER_INSTTOKEN:
+            out.setdefault("X-ELS-Insttoken", _env.ELSEVIER_INSTTOKEN)
+        return out
+
     # -- the request --------------------------------------------------------
 
     def get(self, url, params=None, headers=None, timeout=None, retries=3,
@@ -234,6 +259,7 @@ class HttpClient:
         if polite:
             params = self.polite_params(host, params)
             headers = self.polite_headers(host, headers)
+        headers = self.elsevier_token_headers(host, headers)
 
         backoff = 0.5
         last_error = ""
@@ -431,6 +457,7 @@ class HttpClient:
         if polite:
             params = self.polite_params(host, params)
             headers = self.polite_headers(host, headers)
+        headers = self.elsevier_token_headers(host, headers)
 
         directory = os.path.dirname(os.path.abspath(dest)) or "."
         backoff = 0.5

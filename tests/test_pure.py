@@ -437,11 +437,11 @@ class TestElsevierFirstPagePreviewIsRejected:
         assert save.read_bytes().startswith(b"%PDF")
 
     def test_elsevier_stays_after_every_other_fallback_in_the_chain(self):
-        """Deferral is what makes discarding the preview safe in the legacy
-        chain: every other PDF route has already run by the time Elsevier is
-        consulted, so a rejected preview leaves nothing untried. If someone
-        moves the Elsevier block earlier, a preview would once again be able
-        to preempt fallbacks that might hold the full PDF."""
+        """The DEFERRED block (XML for entitled-XML records, and every
+        ScienceDirect DOI outside 10.1016) stays last. The PDF itself is also
+        asked for early on 10.1016 DOIs -- see test_elsevier_routing.py -- which
+        is safe only because a first-page preview is discarded before anything
+        is written; the preview rejection tests above are what hold that up."""
         import inspect
 
         source = inspect.getsource(fpd._fetch_pdf_chain)

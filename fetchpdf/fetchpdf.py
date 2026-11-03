@@ -26,7 +26,7 @@ from ._env import (
     S2_API_KEY as _S2_API_KEY,
 )
 from ._http import (USER_AGENT, POLITE_USER_AGENT, headers_for,
-                    elsevier_first_page_only)
+                    elsevier_first_page_only, elsevier_headers)
 from .retrieval._util import unlink as _unlink_quietly
 
 # The ID Converter moved: www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ now 301s
@@ -3226,9 +3226,9 @@ def _try_elsevier_pdf_by_pii(pii: str, save_path: str, api_key: str, verbose=Fal
     try:
         r = requests.get(
             url,
-            headers={"X-ELS-APIKey": api_key,
-                     "Accept": "application/pdf",
-                     "User-Agent": headers["User-Agent"]},
+            headers=elsevier_headers(api_key, {
+                "Accept": "application/pdf",
+                "User-Agent": headers["User-Agent"]}),
             timeout=90,
         )
     except Exception as e:
@@ -3264,15 +3264,106 @@ def _try_elsevier_pdf_by_pii(pii: str, save_path: str, api_key: str, verbose=Fal
     return save_path
 
 
+def _elsevier_xml_body_verdict(xml_text: str):
+    """(True, "") when Elsevier's XML carries real body markup, else (False, why).
+
+    The one gate for "is this full text", shared by the deferred fallback and
+    the PDF-first step's companion XML so they can never disagree about it. The
+    reasoning behind the marker list is in `try_elsevier_fulltext_api_fallback`.
+    """
+    lowered = xml_text.lower()
+    if any(marker in lowered for marker in ("<ja:body", "<ce:para", "<ce:sections")):
+        return True, ""
+    reason = ("flat rawtext only, no structure" if "<xocs:rawtext" in lowered
+              else "abstract only" if "<ce:abstract" in lowered
+              else "metadata only")
+    return False, reason
+
+
+@_timed("elsevier_early")
+def try_elsevier_pdf_first(doi: str, save_path: str, verbose=False, allow_xml=True,
+                           asked_out=None):
+    """Elsevier's PDF (and its XML, when entitled), asked for EARLY.
+
+    For a 10.1016 DOI with a key, this is one request that either returns the
+    typeset article or is refused -- against a long tail of landing-page scans
+    and repository probes that, on an Elsevier record, almost never find what a
+    subscription serves directly. Measured 2026-10-31 on 10.1016/j.cell.2020.04.015:
+    ~3 minutes with Elsevier last (most of it retries against a dead repository
+    host), seconds with it asked first.
+
+    It takes only a FULL PDF. A first-page preview is discarded by
+    `_try_elsevier_pdf_by_pii`, so moving Elsevier ahead of the other routes
+    cannot let a preview pre-empt a source that holds the whole paper. And it
+    writes nothing unless a PDF was obtained: an XML-only result is left to the
+    deferred call, because an .xml on disk mid-chain would satisfy the chain's
+    skip-if-exists check in every related-DOI re-entry and end the search before
+    the PDF sources behind it had run.
+
+    On a PDF, the XML is fetched too (unless `allow_xml` is off), so the record
+    still ends with both slots filled, as the deferred path has always done.
+    Returns the XML path when both were written, the PDF path otherwise, or None.
+    `asked_out`, if given, receives True once the PDF request has actually been
+    made: a Crossref hiccup before that point is not "Elsevier refused", and the
+    deferred call must still ask.
+    DOIs outside 10.1016 are not asked here -- they are only recognisable as
+    Elsevier from Crossref's landing page, which the deferred call still handles.
+    """
+    api_key = _ELSEVIER_TDM_API_KEY
+    if not api_key or not str(doi).lower().startswith("10.1016/"):
+        return None
+
+    crossref_params = {"mailto": _DEFAULT_EMAIL} if _DEFAULT_EMAIL else {}
+    r = _crossref_raw_get(f"https://api.crossref.org/works/{doi}",
+                          params=crossref_params, timeout=12)
+    if r.status_code != 200:
+        return None
+    pii = _extract_elsevier_pii_from_crossref((r.json() or {}).get("message", {}))
+    if not pii:
+        return None
+
+    if asked_out is not None:
+        asked_out.append(True)
+    pdf_path = _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
+    if not pdf_path:
+        return None
+    if not allow_xml:
+        return pdf_path
+
+    # Best effort and guarded: the PDF is already on disk and is a real result,
+    # so nothing about the companion may take it away.
+    try:
+        xr = requests.get(
+            f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml",
+            timeout=45,
+            headers=elsevier_headers(api_key, {"User-Agent": headers["User-Agent"]}))
+        if xr.status_code == 200 and _elsevier_xml_body_verdict(xr.text)[0]:
+            xml_path = _xml_path_for_pdf_path(save_path)
+            with open(xml_path, "w", encoding="utf-8") as f:
+                f.write(xr.text)
+            if verbose:
+                print(f"✅ Elsevier PDF+XML for {doi}")
+            return xml_path
+    except Exception as e:
+        if verbose:
+            print(f"  Elsevier XML companion failed: {str(e)[:100]}")
+    return pdf_path
+
+
 @_timed("elsevier")
 def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_message=None,
-                                       verbose=False, allow_xml=True):
+                                       verbose=False, allow_xml=True, try_pdf=True):
     """Elsevier Full-Text Retrieval API: PDF if entitled, else raw XML.
 
     Helpful when ScienceDirect PDF endpoints are bot-blocked. `allow_xml=False`
     (from --no-xml-fallback) suppresses only the XML half -- the PDF attempt
     still runs, because a caller that wants PDFs has no reason to skip a route
     that returns one.
+
+    `try_pdf=False` is the converse, and is for the deferred call that follows
+    `try_elsevier_pdf_first`: that step has already asked for this record's PDF
+    and been refused, so asking again would spend the same requests for the same
+    answer. Only the XML half runs.
     """
     api_key = _ELSEVIER_TDM_API_KEY
     if not api_key:
@@ -3313,6 +3404,8 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
     if not allow_xml:
         # --no-xml-fallback: caller ingests PDFs and cannot read .xml, so the
         # PDF is the only acceptable answer from this route.
+        if not try_pdf:
+            return None         # nothing left to ask: no XML wanted, PDF already refused
         if verbose:
             print("  Elsevier: XML suppressed (--no-xml-fallback), trying PDF")
         return _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
@@ -3321,8 +3414,8 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
     # surface in any exception text printed below.
     api_url = f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml"
     try:
-        r = requests.get(api_url, timeout=45, headers={"User-Agent": headers["User-Agent"],
-                                                       "X-ELS-APIKey": api_key})
+        r = requests.get(api_url, timeout=45, headers=elsevier_headers(
+            api_key, {"User-Agent": headers["User-Agent"]}))
         if r.status_code != 200:
             if verbose:
                 print(f"  Elsevier API status {r.status_code} for {pii}")
@@ -3350,19 +3443,16 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
         #
         # Only real body markup counts now. The tiered path reaches the same verdict
         # by classifying rawtext as T6 and refusing it for extraction.
-        lowered = xml_text.lower()
-        has_body = any(marker in lowered for marker in ("<ja:body", "<ce:para", "<ce:sections"))
+        has_body, stub_reason = _elsevier_xml_body_verdict(xml_text)
         if not has_body:
             if verbose:
-                reason = ("flat rawtext only, no structure"
-                          if "<xocs:rawtext" in lowered
-                          else "abstract only" if "<ce:abstract" in lowered
-                          else "metadata only")
-                print(f"  Elsevier API returned {reason} (no full text) for {pii}; "
-                      f"trying PDF representation")
+                print(f"  Elsevier API returned {stub_reason} (no full text) for {pii}"
+                      + ("; trying PDF representation" if try_pdf else ""))
             # The XML is a stub, but entitlement is per-representation -- the
             # PDF of this same PII is very often the complete article. This is
             # the case that used to end the record as "Nothing worked".
+            if not try_pdf:
+                return None     # the PDF-first step already asked, and was refused
             return _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
 
         xml_path = _xml_path_for_pdf_path(save_path)
@@ -3379,9 +3469,8 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
         # away. (Without this, any error here fell into the outer handler and
         # the whole call returned None, discarding the saved XML.)
         try:
-            companion = _try_elsevier_pdf_by_pii(
-                pii, save_path, api_key, verbose=verbose
-            )
+            companion = (_try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
+                         if try_pdf else None)
         except Exception as e:
             companion = None
             if verbose:
@@ -4297,6 +4386,7 @@ def _fetch_pdf_chain(doi,
                        _paths_out=None,
                        _visited=None,
                        _resolver=None,
+                       _elsevier_first=True,
                       ):
     """
     Try to download a PDF for a DOI (or PMID resolved to DOI) using multiple fallbacks:
@@ -4314,6 +4404,9 @@ def _fetch_pdf_chain(doi,
      11. DOI→PMID fallback
      12. Google Scholar via SerpApi (optional API key)
      13. Elsevier XML API (last resort)
+     (Elsevier 10.1016 DOIs with a key also try the Elsevier PDF API FIRST,
+     ahead of PMC and Unpaywall -- see "Elsevier PDF first" below; `_elsevier_first=False` turns that
+     off for the tiered engine's T5 rung, which asks Elsevier itself.)
 
     Saves PDF to save_dir as: doi.replace('/', '--') + '.pdf'
     Returns the path if successful, else None.
@@ -5097,6 +5190,29 @@ def _fetch_pdf_chain(doi,
             if verbose:
                 print(f"Error with Zenodo: {e}")
 
+    # ---------------- Elsevier PDF first (10.1016 DOIs, keyed) ----------------
+    # Ahead of PMC and Unpaywall, not merely ahead of the slow tail: Unpaywall's
+    # best location for an Elsevier paper is routinely a repository copy, and a
+    # dead repository host costs ~80s of connect retries before any later step
+    # runs (measured 2026-10-31 on 10.1016/j.cell.2020.04.015, www.zora.uzh.ch).
+    # An Elsevier record the key is entitled to is one request here; asked last
+    # it waited behind every landing-page scan and repository probe in the chain.
+    # Only a full PDF ends the search -- see try_elsevier_pdf_first -- and when
+    # it is refused the deferred call below still gets the XML, without asking
+    # for the PDF a second time.
+    elsevier_asked = []
+    if _elsevier_first:
+        try:
+            early = try_elsevier_pdf_first(doi, save_path, verbose=verbose,
+                                           allow_xml=allow_xml_fallback,
+                                           asked_out=elsevier_asked)
+            if early:
+                _record_source(_source_out, "elsevier")
+                return early
+        except Exception as e:
+            if verbose:
+                print(f"Error with Elsevier PDF-first: {e}")
+
     # ---------------- PubMed Central (PMC) via Europe PMC ----------------
     # Many OA papers are freely available via PMC. Europe PMC's pdf=render
     # endpoint reliably serves PDFs (NCBI PMC uses JS redirects).
@@ -5588,6 +5704,7 @@ def _fetch_pdf_chain(doi,
             elsevier_path = try_elsevier_fulltext_api_fallback(
                 doi, save_path, crossref_message=elsevier_crossref_message,
                 verbose=verbose, allow_xml=allow_xml_fallback,
+                try_pdf=not elsevier_asked,
             )
             if elsevier_path:
                 _record_source(_source_out, "elsevier")
@@ -7602,8 +7719,9 @@ def _main(argv=None, json_out=None):
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default="./pdfs",
-        help="Output directory for downloads (default: ./pdfs)"
+        default=None,
+        help="Output directory for downloads (default: ./pdfs; the current "
+             "directory with --make-subfolder)"
     )
     parser.add_argument(
         "--email",
@@ -7885,10 +8003,11 @@ def _main(argv=None, json_out=None):
              "warning, if the CLI is absent or errors. Requires --download-data-artifacts."
     )
     parser.add_argument(
-        "--pull-everything",
+        "--fetch-everything", "--pull-everything", dest="fetch_everything",
         action="store_true",
-        help="Both retrieval layers at once: every API route (--pull-supplementary "
-             "--download-data-artifacts) plus an AI agent that reads the paper itself "
+        help="Everything possible at once: the PDF plus its XML/HTML (--get-xml-or-html) "
+             "and the publisher's figure images (--pull-figures), every API route "
+             "(--pull-supplementary --download-data-artifacts) plus an AI agent that reads the paper itself "
              "and goes after the supplementary files and datasets those routes did "
              "not get. SI lands beside the PDF as numbered siblings; linked deposits "
              "land in {stem}_data_artifacts/. NOT literally everything -- Wiley, ACS "
@@ -7931,14 +8050,14 @@ def _main(argv=None, json_out=None):
         "--llm-model",
         default="haiku",
         help="Model for --llm-adjudicate-artifacts and the retrieval agent "
-             "(--llm-agent-retrieval, --pull-everything). Claude names such as haiku "
+             "(--llm-agent-retrieval, --fetch-everything). Claude names such as haiku "
              "or sonnet; translated to OpenRouter slugs under --llm-backend openrouter "
              "(default: haiku)."
     )
     parser.add_argument(
         "--make-subfolder",
         action="store_true",
-        help="Give each record its own directory, {output_dir}/{safe_doi}/, named by the same "
+        help="Give each record its own directory, {output_dir}/{safe_doi}/ (output_dir defaults to the current directory here, not ./pdfs), named by the same "
              "DOI encoding used for the filenames, so folder and file stems match. Every "
              "artifact for a record (PDF, XML, abstract, provenance, linked artifacts, "
              "supplementary files) lands inside it; run-level files (failed_dois.csv, "
@@ -7988,6 +8107,9 @@ def _main(argv=None, json_out=None):
     )
 
     args = parser.parse_args(argv)
+    if args.output_dir is None:
+        # Per-record folders go straight into the cwd rather than under ./pdfs.
+        args.output_dir = "." if args.make_subfolder else "./pdfs"
     # On whenever Playwright is installed; each browser route falls back
     # quietly if Chromium itself is missing.
     args.add_playwright = not args.no_playwright and (
@@ -8044,6 +8166,13 @@ def _main(argv=None, json_out=None):
             "rejected. Install one:  pip install pypdf  (or 'fetchpdf[better-text-images]')"
         )
 
+    # --fetch-everything also keeps the structured copy beside the PDF and the
+    # publisher's figure images beside that. The stricter --xml-only variants
+    # already keep XML, so they are left to say so themselves.
+    if args.fetch_everything:
+        if not (args.xml_only or args.xml_html_only):
+            args.get_xml_or_html = True
+        args.pull_figures = True
     # --xml-only and --upgrade-existing are meaningless outside the tier walk.
     if args.xml_only or args.xml_html_only or args.upgrade_existing or args.get_xml_or_html:
         args.prioritize_xml = True
@@ -8062,7 +8191,7 @@ def _main(argv=None, json_out=None):
         parser.error("--max-supplementary-mb must be a positive number of megabytes")
     if args.max_data_artifact_mb <= 0:
         parser.error("--max-data-artifact-mb must be a positive number of megabytes")
-    if args.pull_everything:
+    if args.fetch_everything:
         # One flag, both layers. Set before the checks below so it cannot trip
         # the error its own implications satisfy.
         args.pull_supplementary = True

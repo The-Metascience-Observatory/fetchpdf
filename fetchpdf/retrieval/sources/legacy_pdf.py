@@ -59,6 +59,10 @@ def fetch_via_legacy_chain(ids, ctx) -> Optional[Artifact]:
             verbose=ctx.verbose,
             delay=ctx.delay,
             use_playwright=ctx.use_playwright,
+            # The ladder lists elsevier_pdf AHEAD of this rung, so Elsevier has
+            # already been asked for this record's PDF. The chain's own PDF-first
+            # step would repeat the request for the same answer.
+            _elsevier_first=False,
             _source_out=source_out,
         )
         if not written or not os.path.exists(written):

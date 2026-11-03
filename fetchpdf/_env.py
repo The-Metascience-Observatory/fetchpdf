@@ -59,6 +59,13 @@ PUBPEER_DEVKEY = os.getenv("PUBPEER_DEVKEY")
 
 # Elsevier full-text (TDM) retrieval.
 ELSEVIER_TDM_API_KEY = os.getenv("ELSEVIER_TDM_API_KEY")
+# Elsevier institutional token. Optional, and only meaningful alongside the key:
+# it is issued by Elsevier (developer portal / your library) and tells the API
+# to grant the key your institution's subscription entitlements even when the
+# request does not come from an institutional IP -- off campus, behind a
+# non-subscribing VPN, on a cloud host. Without it entitlement is decided by the
+# requesting IP alone.
+ELSEVIER_INSTTOKEN = os.getenv("ELSEVIER_INSTTOKEN")
 
 
 if not EMAIL:

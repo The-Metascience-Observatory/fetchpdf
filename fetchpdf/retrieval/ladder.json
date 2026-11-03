@@ -60,8 +60,8 @@
       "osf_files"
     ],
     "T5_PDF": [
-      "legacy_pdf_chain",
-      "elsevier_pdf"
+      "elsevier_pdf",
+      "legacy_pdf_chain"
     ],
     "T6_PLAINTEXT": [
       "core_fulltext"
@@ -189,7 +189,7 @@
       "requires": [
         "elsevier_pii"
       ],
-      "notes": "Same endpoint as elsevier_tdm, asked with Accept: application/pdf. Entitlement is per-representation at Elsevier, so a record whose XML view is coredata-only or a 400-char corrigendum often still serves the full typeset PDF. Ordered after legacy_pdf_chain because the chain's routes cost no Elsevier quota."
+      "notes": "Same endpoint as elsevier_tdm, asked with Accept: application/pdf. Entitlement is per-representation at Elsevier, so a record whose XML view is coredata-only or a 400-char corrigendum often still serves the full typeset PDF. Ordered BEFORE legacy_pdf_chain: it requires an Elsevier PII, so it costs a request only on Elsevier records, where one entitled request replaces a long walk of landing pages and repositories (the chain's own PDF-first step is switched off for this rung so the request is not made twice). A first-page preview is discarded, so asking first cannot pre-empt a source that holds the full PDF."
     },
     "core_fulltext": {
       "callable": "core_text:fetch_core_fulltext",
