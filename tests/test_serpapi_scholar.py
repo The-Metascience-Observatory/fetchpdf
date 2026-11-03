@@ -193,7 +193,9 @@ def test_wrong_pdf_is_rejected_and_next_copy_is_tried(monkeypatch, tmp_path):
                                       "doi:10.9999/wrong"] + ["Sedimentary rocks form in layers."] * 20))
         else:
             assert not path.exists(), "Rejected PDF must be removed"
-            path.write_bytes(text_pdf(doi=DOI))
+            # The correct copy prints its title, as a real article does: a
+            # DOI alone on legible pages is what a citing paper also prints.
+            path.write_bytes(text_pdf([TITLE, f"doi:{DOI}"] + ["Full text of the trial report."] * 250))
         return True
 
     monkeypatch.setattr(fpd, "try_download", download)
