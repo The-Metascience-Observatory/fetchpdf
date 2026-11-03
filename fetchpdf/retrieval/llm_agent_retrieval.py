@@ -301,8 +301,9 @@ def enumerate_llm_agent(ids, ctx) -> List[SupplementFile]:
 
     from .fulltext_scan import record_text
     from .linked_artifacts import record_query
+    from .engine import _stem_for
 
-    stem = os.path.splitext(ctx.save_path)[0] if ctx.save_path else ""
+    stem = _stem_for(ctx.save_path) if ctx.save_path else ""
     if not stem:
         return []
 
@@ -418,7 +419,7 @@ def _route(entry: dict, ids, ctx, paper=None):
             return []
     if _GITHUB_HINT in lowered:
         repo = lowered.split(_GITHUB_HINT, 1)[1].strip("/")
-        repo = "/".join(repo.split("/")[:2])
+        repo = "/".join(repo.split("/")[:2]).rstrip(".").removesuffix(".git")
         if repo.count("/") == 1:
             return _github_tarball(repo, ctx) or []
         return None

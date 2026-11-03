@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from . import blocked
-from .http import apply_default_mode, redact
+from .http import apply_default_mode, redact, write_bytes_atomic
 from .linked_artifacts import write_linked_sidecar
 from .supplement_index import (
     ROLE_ARTICLE,
@@ -51,6 +51,7 @@ from .supplement_index import (
     provider_rank,
 )
 from .tiers import ARTIFACT_EXTENSIONS
+from ._util import iso as _iso, unlink as _unlink
 
 _SCHEMA_VERSION = 1
 
@@ -721,8 +722,14 @@ class _Run:
                 staged_member = self._stage()
                 if staged_member is None:
                     return
-                with open(staged_member, "wb") as f:
-                    f.write(payload)
+                try:
+                    with open(staged_member, "wb") as f:
+                        f.write(payload)
+                except OSError as e:
+                    _unlink(staged_member)
+                    self._refuse(member_entry, "unwritable", detail=str(e)[:120],
+                                 container=entry.basename)
+                    continue
                 apply_default_mode(staged_member)
                 self._commit(member_entry, staged_member,
                              hashlib.sha256(payload).hexdigest(), len(payload),
@@ -988,27 +995,8 @@ class _Run:
         # speculatively and endpoints say "nothing here" in strange ways -- but
         # "did we get what the paper itself declares it has".
         declared = _declared_check(self.ctx, self.kept)
-
-        # "partial" means something the record has was not obtained. A duplicate
-        # is not that: the same file reachable three ways and stored once is a
-        # complete result, and the overwhelming majority of skips are duplicates.
-        lost = [s for s in self.skipped if s.get("reason") in _LOST_REASONS]
-        if declared.get("missing"):
-            # A file the article's own JATS names was not obtained by any
-            # provider. Worse than "partial": this is known, named data loss.
-            status = "incomplete"
-        elif lost:
-            # "partial" whether or not anything was kept. A record whose one
-            # supplement was refused for size is not an error -- the refusal was
-            # deliberate and is recorded with its byte count -- but it is not a
-            # clean result either.
-            status = "partial"
-        elif self.kept:
-            status = "ok"
-        elif any(r.get("status") == "error" for r in reports):
-            status = "error"
-        else:
-            status = "none_found"
+        status = _derive_status(declared.get("missing"), self.skipped,
+                                self.kept, reports)
 
         manifest = {
             "schema_version": _SCHEMA_VERSION,
@@ -1044,7 +1032,7 @@ class _Run:
             # account of where those members came from, but there is no file to
             # point at. Joining it raised TypeError and failed the whole
             # supplementary pass for the record.
-            paths=[os.path.join(self.directory, f["filename"])
+            paths=[record_path(self.directory, os.path.basename(self.stem), f["filename"])
                    for f in self.kept if f.get("filename")],
             missing_declared=list(declared.get("missing") or []),
             blocked_urls=_blocked_urls(self.skipped),
@@ -1186,18 +1174,8 @@ def _heal_manifest(manifest: dict, manifest_path: str, stem: str,
             changed = True
 
     missing_declared = list((manifest.get("declared") or {}).get("missing") or [])
-    lost = [s for s in (manifest.get("skipped") or [])
-            if s.get("reason") in _LOST_REASONS]
-    if missing_declared:
-        status = "incomplete"
-    elif lost:
-        status = "partial"
-    elif manifest.get("files"):
-        status = "ok"
-    elif any(r.get("status") == "error" for r in manifest.get("providers") or []):
-        status = "error"
-    else:
-        status = "none_found"
+    status = _derive_status(missing_declared, manifest.get("skipped") or [],
+                            manifest.get("files"), manifest.get("providers") or [])
 
     if manifest.get("status") != status:
         manifest["status"] = status
@@ -1272,6 +1250,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
     blocked_urls = _blocked_urls(manifest.get("skipped") or [])
 
     directory = os.path.dirname(os.path.abspath(stem)) or "."
+    stem_basename = os.path.basename(stem)
     files = manifest.get("files") or []
     # A removed-after-extraction archive has no file BY DESIGN; refetching it
     # would restore the very zip whose members are already unpacked beside it.
@@ -1283,7 +1262,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
     verdicts = {}
     missing = []
     for f in files:
-        verdict = _integrity_of(os.path.join(directory, f.get("filename") or ""),
+        verdict = _integrity_of(record_path(directory, stem_basename, f.get("filename") or ""),
                                 f, verify_hashes)
         verdicts[id(f)] = verdict
         if verdict != INTACT and verdict != UNVERIFIABLE:
@@ -1306,7 +1285,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
     if not missing:
         return SupplementarySummary(
             status=status, written=present, manifest_path=manifest_path,
-            paths=[os.path.join(directory, f["filename"]) for f in files
+            paths=[record_path(directory, stem_basename, f["filename"]) for f in files
                    if f.get("filename")],
             detail="manifest present; nothing missing",
             missing_declared=missing_declared,
@@ -1332,11 +1311,14 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
             continue
         # A file that arrived by archive expansion has the *archive's* URL, so
         # fetching it straight into the member's name would write the whole zip
-        # where a single member belongs -- the right bytes for nothing.
-        if record.get("container"):
+        # where a single member belongs -- the right bytes for nothing. That
+        # holds for a member of a kept archive (extracted_from) as much as for
+        # one from the transport bundle (container).
+        if record.get("container") or record.get("extracted_from"):
             archives.setdefault(url, []).append(record)
             continue
-        dest = os.path.join(directory, filename)
+        dest = record_path(directory, stem_basename, filename)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         if http.download(url, dest, max_file_bytes, polite=False).ok:
             repaired += 1
             if verbose:
@@ -1344,7 +1326,7 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
 
     for url, records in archives.items():
         repaired += _repair_from_archive(http, url, records, directory,
-                                         max_file_bytes, verbose)
+                                         max_file_bytes, verbose, stem_basename)
 
     # Say which were corrupt rather than absent: "restored 30 of 30" hides a
     # storage fault that will recur on the next sync.
@@ -1428,7 +1410,8 @@ def _integrity_of(path: str, record: dict, verify_hashes: bool = True) -> str:
     return INTACT
 
 
-def _repair_from_archive(http, url, records, directory, max_file_bytes, verbose) -> int:
+def _repair_from_archive(http, url, records, directory, max_file_bytes, verbose,
+                         stem_basename: str = "") -> int:
     """Re-extract missing members from their archive, at their recorded names."""
     staged = None
     restored = 0
@@ -1448,17 +1431,58 @@ def _repair_from_archive(http, url, records, directory, max_file_bytes, verbose)
                 member = by_name.get(record.get("original_name") or "")
                 if member is None or member.file_size > max_file_bytes:
                     continue
-                dest = os.path.join(directory, record["filename"])
+                dest = record_path(directory, stem_basename, record["filename"])
                 payload = archive.read(member)
                 _write_bytes_atomic(dest, payload)
                 restored += 1
                 if verbose:
                     print(f"    📎 restored {record['filename']} from {url.rsplit('/', 1)[-1]}")
-    except (zipfile.BadZipFile, OSError, KeyError):
+    except Exception:
+        # BadZipFile, OSError and KeyError, but also zlib.error,
+        # NotImplementedError (unsupported compression) and RuntimeError
+        # (encrypted member): the repair pass never raises.
         return restored
     finally:
         _unlink(staged)
     return restored
+
+
+def _derive_status(missing_declared, skipped, files, providers) -> str:
+    """The record's supplement status. One ladder for finish() and the healer.
+
+    "partial" means something the record has was not obtained. A duplicate is
+    not that: the same file reachable three ways and stored once is a complete
+    result, and the overwhelming majority of skips are duplicates.
+    """
+    if missing_declared:
+        # A file the article's own JATS names was not obtained by any
+        # provider. Worse than "partial": this is known, named data loss.
+        return "incomplete"
+    if any(s.get("reason") in _LOST_REASONS for s in skipped):
+        # "partial" whether or not anything was kept. A record whose one
+        # supplement was refused for size is not an error -- the refusal was
+        # deliberate and is recorded with its byte count -- but it is not a
+        # clean result either.
+        return "partial"
+    if files:
+        return "ok"
+    if any(r.get("status") == "error" for r in providers):
+        return "error"
+    return "none_found"
+
+
+def record_path(directory: str, stem_basename: str, filename: str) -> str:
+    """Where a manifest record's file lives on disk.
+
+    Supplementary files are flat siblings of the manifest. Linked-deposit files
+    record `<slug>/<name>`, relative to `<stem>_data_artifacts/` rather than to
+    the manifest's directory, so a nested filename that is not found flat
+    resolves under the artifact root -- also where a missing one is restored.
+    """
+    path = os.path.join(directory, filename)
+    if ("/" in filename or os.sep in filename) and not os.path.isfile(path):
+        path = os.path.join(directory, stem_basename + DATA_ARTIFACT_INFIX, filename)
+    return path
 
 
 def si_filename(stem_basename: str, index: int, original_name: str, extension: str) -> str:
@@ -1561,16 +1585,7 @@ def _is_zip(path: str) -> bool:
 
 
 def _write_bytes_atomic(path: str, payload: bytes) -> None:
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    handle, temp_path = tempfile.mkstemp(prefix=".fetchpdf-si-", dir=directory)
-    try:
-        with os.fdopen(handle, "wb") as f:
-            f.write(payload)
-        apply_default_mode(temp_path)
-        os.replace(temp_path, path)
-    except BaseException:
-        _unlink(temp_path)
-        raise
+    write_bytes_atomic(path, payload, prefix=".fetchpdf-si-")
 
 
 # -- naming -----------------------------------------------------------------
@@ -1710,7 +1725,7 @@ def _wire(resolver, http, ladder, save_path, email, verbose):
         http = getattr(resolver, "http", None)
     if http is None:
         from .http import HttpClient
-        from .ratelimit import HostRateLimiter, shared_host_limiter
+        from .ratelimit import shared_host_limiter
 
         http = HttpClient(shared_host_limiter(ladder.rate_limits), email=email, verbose=verbose)
 
@@ -1801,16 +1816,3 @@ def _digest_of(checksum: str) -> str:
     return str(checksum).split(":", 1)[-1].strip().lower()
 
 
-def _iso(timestamp: float) -> str:
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _unlink(path: Optional[str]) -> None:
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass

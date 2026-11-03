@@ -92,15 +92,6 @@ _MULTI_ARTIFACT_DEPOSIT = re.compile(
     re.I,
 )
 
-#: Rule 3 -- inside a reference/citation the deposit belongs to the work being
-#: CITED, not to this paper. JATS marks these structurally, which is why this
-#: is reliable rather than a guess.
-_CITATION_CONTEXT = re.compile(
-    r"(<ref\b|</ref>|<mixed-citation|<element-citation|citation-string|"
-    r"ref-list|<nlm-citation|\[Preprint\])",
-    re.I,
-)
-
 #: Preprint-server DOIs that embed "osf.io" but name a PREPRINT, not a deposit.
 #: Without this, 10.31234/osf.io/8r9p7 is scraped as OSF id "8r9p7" and
 #: downloaded. 10.31219 is OSF Preprints' own prefix and was missing: a live
@@ -232,8 +223,10 @@ def _judge(repo: str, ident: str, context: str, in_das: bool,
     return UNCERTAIN, "repository URL with no deposit language nearby"
 
 
-#: Markers that OPEN and CLOSE a reference entry. Direction matters, so these
-#: are separate from the loose _CITATION_CONTEXT scan.
+#: Rule 3 -- inside a reference/citation the deposit belongs to the work being
+#: CITED, not to this paper. JATS marks these structurally, which is why this
+#: is reliable rather than a guess. Markers that OPEN and CLOSE a reference
+#: entry; direction matters.
 _CITATION_OPEN = re.compile(r"<(ref|mixed-citation|element-citation|nlm-citation)\b", re.I)
 _CITATION_CLOSE = re.compile(r"</(ref|mixed-citation|element-citation|nlm-citation)>", re.I)
 
@@ -336,9 +329,12 @@ def scan_text(text: str) -> List[Candidate]:
             ident = match.group(1)
             if not ident:
                 continue
+            # A sentence-final period is prose, not part of the identifier.
+            ident = ident.rstrip(".")
             if repo == "github":
-                # Strip a trailing ".git" and any path fragment beyond owner/repo.
-                ident = ident.rsplit(".git", 1)[0]
+                # A clone URL's ".git" is not part of the repo name. Only as a
+                # suffix: rsplit cut "owner/name.github.io" down to "owner/name".
+                ident = ident.removesuffix(".git")
             start = match.start()
             context = text[max(0, start - CONTEXT_CHARS):start + CONTEXT_CHARS]
             context = " ".join(context.split())

@@ -33,7 +33,6 @@ found nothing on an older clinical-trial corpus, which is a fact worth a sidecar
 entry rather than a silence (see linked_artifacts.py).
 """
 
-import os
 import re
 from typing import List, Optional
 
@@ -51,6 +50,7 @@ from .supplement_index import (
     classify_role,
     jats_sets,
 )
+from ._util import titles_match
 
 DATACITE_REVERSE = "https://api.datacite.org/dois"
 CROSSREF_COMPONENTS = "https://api.crossref.org/works"
@@ -185,17 +185,15 @@ def _files_in_repository(related_doi: str, ids, ctx,
     routed.add(key)
 
     proxy = IdentifierSet(doi=related_doi)
-    if related_doi.startswith("10.5281") or "zenodo" in related_doi:
-        enumerator, provider = enumerate_zenodo, "zenodo_files"
-    elif related_doi.startswith("10.6084") or "figshare" in related_doi:
-        enumerator, provider = enumerate_figshare, "figshare_files"
-    elif "osf.io" in related_doi or related_doi.startswith("10.17605"):
-        enumerator, provider = enumerate_osf, "osf_files"
-    elif related_doi.startswith("10.5061") or "dryad" in related_doi:
-        enumerator, provider = enumerate_dryad, "dryad_files"
-    elif related_doi.startswith("10.7910/dvn"):
-        enumerator, provider = enumerate_dataverse, "dataverse_files"
-    else:
+    provider = _repo_provider(key)
+    enumerator = {
+        "zenodo_files": enumerate_zenodo,
+        "figshare_files": enumerate_figshare,
+        "osf_files": enumerate_osf,
+        "dryad_files": enumerate_dryad,
+        "dataverse_files": enumerate_dataverse,
+    }.get(provider)
+    if enumerator is None:
         # The long tail (institutional repos, subject databases) has no
         # enumerator; the link still lands in the linked-artifacts sidecar.
         ctx.log(f"    {via}: no enumerator for {related_doi}")
@@ -300,6 +298,35 @@ _PAPER_DOI_PREFIXES = (
 _REPLICATION_TITLE_RE = re.compile(r"(?i)^(?:replication\s+)?(data|code|materials?)\s+(?:for|from):?\s*(.+)")
 
 
+def _datacite_attributes(doi: str, ctx) -> Optional[dict]:
+    """A deposit's DataCite record attributes, or None when it could not be had.
+
+    One fetch per DOI per record: the ownership and other-article checks both
+    read the same record, and used to request it once each.
+    """
+    import urllib.parse
+
+    cache = ctx.scratch.setdefault("_datacite_attributes", {})
+    key = (doi or "").strip().lower()
+    if key in cache:
+        return cache[key]
+    attributes = None
+    try:
+        response = ctx.http.get(
+            "https://api.datacite.org/dois/" + urllib.parse.quote(key, safe=""),
+            timeout=30, polite=False,
+        )
+        if response.ok:
+            try:
+                attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
+            except ValueError:
+                attributes = {}
+    except Exception:
+        attributes = None
+    cache[key] = attributes
+    return attributes
+
+
 def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
     """Whether the deposit's own metadata declares it belongs to this article.
 
@@ -328,17 +355,9 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
     if key in cache:
         return cache[key]
 
-    import urllib.parse
-    response = ctx.http.get(
-        "https://api.datacite.org/dois/" + urllib.parse.quote(key, safe=""),
-        timeout=30, polite=False,
-    )
+    attributes = _datacite_attributes(key, ctx)
     verdict = False
-    if response.ok:
-        try:
-            attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
-        except ValueError:
-            attributes = {}
+    if attributes is not None:
         needle = article_doi.strip().lower()
         for relation in attributes.get("relatedIdentifiers") or []:
             if not isinstance(relation, dict):
@@ -356,7 +375,8 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
 
 
 #: How close a "Replication Data for: <title>" remainder must sit to the
-#: article's own title. Exact containment is too strict by exactly one letter:
+#: article's own title: _util.TITLE_MATCH_RATIO, via titles_match. Exact
+#: containment is too strict by exactly one letter:
 #: a Harvard Dataverse deposit titled "...ESCAS randomised pilot study" against
 #: a journal title reading "...ESCAS Randomized Pilot Study" agrees for 108
 #: characters and then diverges on British vs American spelling, which sent a
@@ -364,27 +384,17 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
 #:
 #: The margin is not delicate. That pair scores 0.99; an unrelated replication
 #: title scores 0.12. Anything in between is not a near-miss worth arguing over.
-_TITLE_MATCH_RATIO = 0.93
 
 
 def _replication_title_matches(attributes: dict, article_doi: str, ctx) -> bool:
     """Route 2: 'Replication Data for: <title>' against the article's title."""
-    import difflib
-
     for entry in attributes.get("titles") or []:
         title = str((entry or {}).get("title") or "")
         matched = _REPLICATION_TITLE_RE.match(title.strip())
         if not matched:
             continue
-        claimed = _squash(matched.group(2))
-        actual = _squash(_article_title(article_doi, ctx))
-        if not claimed or not actual:
-            continue
-        if claimed in actual or actual in claimed:
-            return True
-        # Containment first (cheap, and the common case); near-identity only
-        # for the spelling-variant tail it would otherwise drop.
-        if difflib.SequenceMatcher(None, claimed, actual).ratio() >= _TITLE_MATCH_RATIO:
+        # Containment first, then near-identity for the spelling-variant tail.
+        if titles_match(matched.group(2), _article_title(article_doi, ctx)):
             return True
     return False
 
@@ -406,12 +416,6 @@ def _article_title(article_doi: str, ctx) -> str:
             pass
     cache[key] = title
     return title
-
-
-def _squash(text: str) -> str:
-    """Lowercased alphanumerics only, so punctuation and casing differences
-    between a deposit title and a journal title cannot break the match."""
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def enumerate_scholix_related(ids, ctx) -> List[SupplementFile]:
@@ -545,9 +549,9 @@ def enumerate_fulltext_scan(ids, ctx) -> List[SupplementFile]:
         return []
 
     from .fulltext_scan import ACCEPT, scan_record
-    from .linked_artifacts import record_link, record_query
+    from .engine import _stem_for
 
-    stem = os.path.splitext(ctx.save_path)[0] if ctx.save_path else ""
+    stem = _stem_for(ctx.save_path) if ctx.save_path else ""
     if not stem:
         return []
     try:
@@ -704,10 +708,8 @@ def _deposit_claims_another_article(target_doi: str, article_doi: str, ctx) -> b
 
     verdict = False
     try:
-        response = ctx.http.get(f"https://api.datacite.org/dois/{key}",
-                                timeout=25, polite=False)
-        if response.ok:
-            attributes = ((response.json() or {}).get("data") or {}).get("attributes") or {}
+        attributes = _datacite_attributes(key, ctx)
+        if attributes is not None:
             mine = (article_doi or "").strip().lower()
             for relation in attributes.get("relatedIdentifiers") or []:
                 if not isinstance(relation, dict):
@@ -745,11 +747,27 @@ def _has_repo_enumerator(target_doi: Optional[str]) -> bool:
     Gates the ownership lookup: a DOI that cannot be downloaded anyway is not
     worth a DataCite request to classify more finely.
     """
-    if not target_doi:
-        return False
-    doi = target_doi.strip().lower()
-    return (doi.startswith(("10.5281", "10.6084", "10.17605", "10.5061", "10.7910/dvn"))
-            or "zenodo" in doi or "figshare" in doi or "osf.io" in doi or "dryad" in doi)
+    return bool(target_doi) and _repo_provider(target_doi) is not None
+
+
+# (DOI prefix, substring, provider) in routing order. One table for both
+# _files_in_repository and _has_repo_enumerator, so the two cannot disagree.
+_REPO_ROUTES = (
+    ("10.5281", "zenodo", "zenodo_files"),
+    ("10.6084", "figshare", "figshare_files"),
+    ("10.17605", "osf.io", "osf_files"),
+    ("10.5061", "dryad", "dryad_files"),
+    ("10.7910/dvn", None, "dataverse_files"),
+)
+
+
+def _repo_provider(doi: str) -> Optional[str]:
+    """The provider tag of the repository a data DOI routes to, or None."""
+    doi = (doi or "").strip().lower()
+    for prefix, marker, provider in _REPO_ROUTES:
+        if doi.startswith(prefix) or (marker and marker in doi):
+            return provider
+    return None
 
 
 # -- E17: Europe PMC datalinks ------------------------------------------------

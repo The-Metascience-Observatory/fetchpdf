@@ -79,6 +79,30 @@ def looks_like_pdf(content: bytes, content_type: str = "") -> bool:
     return ctype in ("application/pdf", "application/octet-stream") and bool(content)
 
 
+def elsevier_headers(api_key: str, extra: dict = None) -> dict:
+    """Request headers for any api.elsevier.com call that carries the TDM key.
+
+    The one place the credentials are spelled, so a request can never carry the
+    key and forget the institutional token. ``X-ELS-Insttoken`` is added when
+    ELSEVIER_INSTTOKEN is set and omitted otherwise -- an empty header would be
+    read as a malformed token and refused. It is looked up at call time, not
+    bound at import, so a process that loads its .env late still gets it.
+
+    Both go in headers, never the URL: a URL surfaces in exception text, logs
+    and provenance, and a credential there is a credential leaked.
+
+    The key is a parameter, not read here, because each caller holds its own
+    binding of it (and its tests pin that binding).
+    """
+    from . import _env
+
+    out = {"X-ELS-APIKey": api_key}
+    if _env.ELSEVIER_INSTTOKEN:
+        out["X-ELS-Insttoken"] = _env.ELSEVIER_INSTTOKEN
+    out.update(extra or {})
+    return out
+
+
 def elsevier_first_page_only(headers) -> bool:
     """True when Elsevier's X-ELS-Status header marks a first-page-only PDF.
 

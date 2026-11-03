@@ -325,7 +325,8 @@ def main(argv=None):
         print("   returning 429s, lower --workers.")
 
     print(f"\n⬇️  Fetching {len(matched)} records with {args.workers} worker(s)\n")
-    stats = {"ok": 0, "failed": 0, "xml": 0, "html": 0, "md": 0, "si": 0}
+    stats = {"ok": 0, "failed": 0, "xml": 0, "html": 0, "md": 0, "si": 0,
+             "structured": 0}
     router = _ThreadRoutedStdout(sys.stdout)
     printed = threading.Lock()
     done = [0]
@@ -346,6 +347,9 @@ def main(argv=None):
             for key in ("xml", "html", "md"):
                 if key in got:
                     stats[key] += 1
+            # Once per record: "xml+html" counts toward both lines above.
+            if "xml" in got or "html" in got:
+                stats["structured"] += 1
             if "si×" in got:
                 stats["si"] += 1
 
@@ -384,7 +388,7 @@ def main(argv=None):
     # Keyed on the artifacts, not the markdown: conversion is off by default
     # now (native XML is the deliverable), so "no md" no longer implies
     # "no structured text".
-    no_structured = len(matched) - stats["xml"] - stats["html"]
+    no_structured = len(matched) - stats["structured"]
     if no_structured > 0:
         print(f"\n  {no_structured} records have no XML/HTML.")
         print("  Those still need the PDF pipeline for body text.")

@@ -23,13 +23,16 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
-from urllib.parse import urlsplit
+from html import unescape
+from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 from requests.cookies import create_cookie
@@ -168,8 +171,7 @@ _site_stats: dict = {}
 
 
 def _note_attempt(doi: str, ok: bool) -> None:
-    url = publisher_article_url(doi) or ""
-    site = registrable_domain(urlsplit(url).hostname or "")
+    site = (publisher_sites(doi) or [""])[0]
     with _stats_lock:
         tried, won = _site_stats.get(site, (0, 0))
         _site_stats[site] = (tried + 1, won + (1 if ok else 0))
@@ -317,8 +319,8 @@ def _domain_matches(cookie_domain: str, site: str) -> bool:
     return domain == site or domain.endswith("." + site)
 
 
-def cookie_jar(cookies: Sequence[dict], url: str,
-               now: Optional[float] = None) -> requests.cookies.RequestsCookieJar:
+def cookie_jar(cookies: Sequence[dict], url: str, now: Optional[float] = None,
+               sites: Optional[Sequence[str]] = None) -> requests.cookies.RequestsCookieJar:
     """A jar holding only the cookies that belong to *url*'s publisher.
 
     Each cookie keeps its own domain and path, so requests sends a cookie only
@@ -327,12 +329,15 @@ def cookie_jar(cookies: Sequence[dict], url: str,
     nothing in the jar to send. A real browser profile also holds thousands of
     cookies, and sending all of them earns ``400 Request Header Or Cookie Too
     Large``.
+
+    *sites* widens the scope to several publisher sites, for a DOI link that
+    redirects onto one of them; each cookie is still sent only to its own domain.
     """
-    site = registrable_domain(urlsplit(url).hostname or "")
+    sites = [s for s in (sites or [registrable_domain(urlsplit(url).hostname or "")]) if s]
     now = time.time() if now is None else now
     jar = requests.cookies.RequestsCookieJar()
     for c in cookies:
-        if not site or not _domain_matches(c.get("domain", ""), site):
+        if not any(_domain_matches(c.get("domain", ""), s) for s in sites):
             continue
         if c.get("expires") and c["expires"] < now:
             continue
@@ -351,8 +356,9 @@ def cookie_jar(cookies: Sequence[dict], url: str,
 # Publisher PDF URLs, by DOI prefix
 # --------------------------------------------------------------------------
 #: DOI prefix -> canonical PDF URL templates for publishers whose PDF path is
-#: derivable from the DOI. Open-access hosts are deliberately absent: the
-#: open-access chain already handles them.
+#: derivable from the DOI. Open-access hosts are absent unless they sit behind a
+#: bot check the open-access chain cannot pass (PNAS, Science, AHA): there the
+#: browser's own clearance cookie is what gets the PDF.
 #:
 #: SAGE, Taylor & Francis and Wiley duplicate patterns that also live in
 #: `try_landing_page_pdf_fallback`, which keys them on the resolved landing
@@ -371,6 +377,17 @@ PUBLISHER_PDF_TEMPLATES = {
     # Atypon platforms, same /doi/pdf/ shape as SAGE and T&F.
     "10.1027": ["https://econtent.hogrefe.com/doi/pdf/{doi}"],
     "10.1287": ["https://pubsonline.informs.org/doi/pdf/{doi}"],
+    "10.1073": ["https://www.pnas.org/doi/pdf/{doi}"],
+    "10.1126": ["https://www.science.org/doi/pdf/{doi}"],
+    "10.1200": ["https://ascopubs.org/doi/pdf/{doi}"],
+    "10.1161": ["https://www.ahajournals.org/doi/pdf/{doi}"],
+    "10.1152": ["https://journals.physiology.org/doi/pdf/{doi}"],
+    "10.1128": ["https://journals.asm.org/doi/pdf/{doi}"],
+    "10.1164": ["https://www.atsjournals.org/doi/pdf/{doi}"],
+    "10.1021": ["https://pubs.acs.org/doi/pdf/{doi}"],
+    # FASEB J is on Wiley; pdfdirect redirects to faseb.onlinelibrary.wiley.com.
+    "10.1096": ["https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}?download=true",
+                "https://onlinelibrary.wiley.com/doi/pdf/{doi}"],
 }
 
 #: DOI prefix -> the article's landing page on the publisher's own host. The
@@ -387,13 +404,84 @@ PUBLISHER_ARTICLE_TEMPLATES = {
     "10.1098": "https://royalsocietypublishing.org/doi/{doi}",
     "10.1027": "https://econtent.hogrefe.com/doi/{doi}",
     "10.1287": "https://pubsonline.informs.org/doi/{doi}",
+    "10.1073": "https://www.pnas.org/doi/{doi}",
+    "10.1126": "https://www.science.org/doi/{doi}",
+    "10.1200": "https://ascopubs.org/doi/{doi}",
+    "10.1161": "https://www.ahajournals.org/doi/{doi}",
+    "10.1152": "https://journals.physiology.org/doi/{doi}",
+    "10.1128": "https://journals.asm.org/doi/{doi}",
+    "10.1164": "https://www.atsjournals.org/doi/{doi}",
+    "10.1021": "https://pubs.acs.org/doi/{doi}",
+    "10.1096": "https://onlinelibrary.wiley.com/doi/{doi}",
+}
+
+#: DOI prefix -> the publisher's sites, for publishers whose PDF path is not
+#: derivable from the DOI (Silverchair, HighWire, ScienceDirect, ...). The route
+#: resolves the DOI with the cookies for these sites and takes the PDF link the
+#: landing page itself declares (``citation_pdf_url``). Cookies go only to these
+#: sites; a PDF served from another host (pdf.sciencedirectassets.com) is
+#: fetched without any.
+PUBLISHER_LANDING_SITES = {
+    "10.1158": ["aacrjournals.org"],                    # AACR
+    "10.1101": ["cshlp.org", "biorxiv.org", "medrxiv.org"],  # CSHL Press
+    "10.18632": ["oncotarget.com"],
+    "10.1093": ["oup.com"],
+    "10.1210": ["oup.com"],                             # Endocrine Society
+    "10.4049": ["oup.com", "aai.org"],                  # J Immunol
+    "10.1001": ["jamanetwork.com"],
+    "10.1182": ["ashpublications.org"],
+    "10.1242": ["biologists.com"],
+    "10.1183": ["ersjournals.com", "ersnet.org"],
+    "10.1136": ["bmj.com"],
+    "10.1530": ["bioscientifica.com"],
+    "10.1097": ["lww.com"],
+}
+
+#: DOI prefix -> (pattern, replacement) turning the landing URL into the PDF
+#: URL, for a publisher whose page declares no ``citation_pdf_url``.
+LANDING_PDF_REWRITES = {
+    "10.18632": (r"/article/(\d+)/.*$", r"/article/\1/pdf/"),   # Oncotarget
 }
 
 
+def _prefix(doi: str) -> str:
+    return (doi or "").split("/")[0]
+
+
+def covers(doi: str) -> bool:
+    """True if this route knows where the publisher keeps the DOI's PDF."""
+    prefix = _prefix(doi)
+    return prefix in PUBLISHER_PDF_TEMPLATES or prefix in PUBLISHER_LANDING_SITES
+
+
+def publisher_sites(doi: str) -> List[str]:
+    """The publisher sites whose cookies this DOI's fetch may use, main one first."""
+    prefix = _prefix(doi)
+    if prefix in PUBLISHER_LANDING_SITES:
+        return list(PUBLISHER_LANDING_SITES[prefix])
+    article = publisher_article_url(doi)
+    return [registrable_domain(urlsplit(article).hostname or "")] if article else []
+
+
+def cookie_sites() -> List[str]:
+    """Every publisher site the route reads cookies for."""
+    sites = {registrable_domain(urlsplit(t.format(doi="x/y")).hostname or "")
+             for t in PUBLISHER_ARTICLE_TEMPLATES.values()}
+    for more in PUBLISHER_LANDING_SITES.values():
+        sites.update(more)
+    return sorted(sites)
+
+
 def publisher_article_url(doi: str) -> Optional[str]:
-    """The article landing page on the publisher's own host, or None."""
-    template = PUBLISHER_ARTICLE_TEMPLATES.get((doi or "").split("/")[0])
-    return template.format(doi=doi) if template else None
+    """The article landing page on the publisher's own host, or None.
+
+    For a publisher in PUBLISHER_LANDING_SITES that is the DOI link, which
+    redirects there: its article URLs are not derivable from the DOI.
+    """
+    template = PUBLISHER_ARTICLE_TEMPLATES.get(_prefix(doi))
+    if template:
+        return template.format(doi=doi)
+    return f"https://doi.org/{doi}" if _prefix(doi) in PUBLISHER_LANDING_SITES else None
 
 
 # --------------------------------------------------------------------------
@@ -434,8 +522,7 @@ def _count_download() -> None:
 
 def publisher_pdf_urls(doi: str) -> List[str]:
     """Canonical publisher PDF URLs for a DOI, or ``[]`` if none is derivable."""
-    prefix = (doi or "").split("/")[0]
-    return [t.format(doi=doi) for t in PUBLISHER_PDF_TEMPLATES.get(prefix, [])]
+    return [t.format(doi=doi) for t in PUBLISHER_PDF_TEMPLATES.get(_prefix(doi), [])]
 
 
 def covered_by_site(dois) -> dict:
@@ -445,10 +532,9 @@ def covered_by_site(dois) -> dict:
     """
     out: dict = {}
     for doi in dois:
-        if not doi or not publisher_pdf_urls(doi):
+        if not doi or not covers(doi):
             continue
-        site = registrable_domain(urlsplit(publisher_article_url(doi) or "").hostname or "")
-        out.setdefault(site, []).append(doi)
+        out.setdefault(publisher_sites(doi)[0], []).append(doi)
     return out
 
 
@@ -508,28 +594,110 @@ def _write_pdf_bytes(data: bytes, save_path) -> bool:
             tmp.unlink()
 
 
+_META_PDF_RES = (
+    re.compile(r'<meta[^>]+name=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)', re.I),
+    re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']citation_pdf_url', re.I),
+)
+#: linkinghub.elsevier.com answers a DOI with a page that forwards by script.
+#: Elsevier itself is not covered (ScienceDirect declares no PDF link and its
+#: /pdfft answers HTML even in a browser), but Cell Press and Lancet-hosted
+#: society journals reach their own sites through it.
+_ELSEVIER_REDIRECT_RE = re.compile(r'name=["\']redirectURL["\'][^>]*value=["\']([^"\']+)', re.I)
+
+
+def _is_challenge(response) -> bool:
+    return (response.status_code in (403, 429, 503)
+            and "cloudflare" in (response.headers.get("server") or "").lower())
+
+
+def _session(url, cookies, user_agent, accept, sites=None) -> requests.Session:
+    # A fresh Session per request chain: requests.Session is not thread-safe,
+    # the batch worker pool calls this concurrently, and each chain gets a jar
+    # scoped to its own publisher.
+    session = requests.Session()
+    headers = headers_for(url, {"Accept": accept})
+    # The browser's own UA, so Cloudflare honours its clearance cookie --
+    # except where the host is known to want the polite UA (Springer serves
+    # a Chrome UA an HTML interstitial on /content/pdf).
+    if user_agent and headers.get("User-Agent") != POLITE_USER_AGENT:
+        headers["User-Agent"] = user_agent
+    session.headers.update(headers)
+    session.cookies = cookie_jar(cookies, url, sites=sites)
+    return session
+
+
+def pdf_url_from_landing(html: str, base_url: str, doi: str = "") -> Optional[str]:
+    """The PDF link a landing page declares for itself (``citation_pdf_url``)."""
+    url = None
+    for rx in _META_PDF_RES:
+        m = rx.search(html or "")
+        if m:
+            url = urljoin(base_url, unescape(m.group(1).strip()))
+            break
+    rewrite = LANDING_PDF_REWRITES.get(_prefix(doi))
+    if not url and rewrite and re.search(rewrite[0], urlsplit(base_url).path):
+        url = re.sub(rewrite[0], rewrite[1], base_url.split("?")[0])
+    # HighWire declares http:// links on https pages; a browser refuses the
+    # mixed-content fetch, and the https URL serves the same file.
+    if url and url.startswith("http://") and base_url.startswith("https://"):
+        url = "https://" + url[len("http://"):]
+    return url
+
+
+def _is_crawl_gate(url: str) -> bool:
+    """Silverchair's "Validate User" page, which a browser can also be sent to."""
+    return "/crawlprevention/" in (url or "")
+
+
+def _landing_pdf_urls(doi, cookies, verbose=False, timeout=90,
+                      user_agent=None) -> Tuple[List[str], bool]:
+    """Resolve the DOI with the publisher's cookies; return its declared PDF URL."""
+    sites = publisher_sites(doi)
+    url = f"https://doi.org/{doi}"
+    session = _session(url, cookies, user_agent,
+                       "text/html,application/xhtml+xml,*/*;q=0.8", sites=sites)
+    try:
+        for _hop in range(2):
+            response = session.get(url, timeout=timeout, allow_redirects=True)
+            if verbose:
+                print(f"  institutional: {url} -> HTTP {response.status_code} at {response.url}")
+            if _is_challenge(response) or _is_crawl_gate(response.url):
+                return [], True
+            if response.status_code != 200:
+                return [], False
+            html = response.text[:2_000_000]
+            forward = _ELSEVIER_REDIRECT_RE.search(html)
+            if forward and "elsevier.com" in (urlsplit(response.url).hostname or ""):
+                url = unquote(forward.group(1))
+                continue
+            pdf = pdf_url_from_landing(html, response.url, doi)
+            return ([pdf] if pdf else []), False
+    except requests.RequestException as exc:
+        if verbose:
+            print(f"  institutional: {url} -> {type(exc).__name__}")
+    finally:
+        session.close()
+    return [], False
+
+
 def fetch_with_cookies(doi, save_path, cookies, verbose=False,
                        timeout=90, user_agent=None) -> Tuple[Optional[str], bool]:
     """Try each canonical publisher PDF URL with the browser's own cookies.
+
+    A publisher without a derivable PDF URL (PUBLISHER_LANDING_SITES) is asked
+    for its landing page first, and the PDF it declares is tried.
 
     Returns ``(url, challenged)``: the URL that produced the PDF (the caller
     records provenance and runs the identity check) or None, and whether any
     answer was a bot challenge -- the cue for the browser fallback.
     """
     challenged = False
-    for url in publisher_pdf_urls(doi):
-        # A fresh Session per URL: requests.Session is not thread-safe, the
-        # batch worker pool calls this concurrently, and each URL gets a jar
-        # scoped to its own publisher.
-        session = requests.Session()
-        headers = headers_for(url, {"Accept": "application/pdf,*/*"})
-        # The browser's own UA, so Cloudflare honours its clearance cookie --
-        # except where the host is known to want the polite UA (Springer serves
-        # a Chrome UA an HTML interstitial on /content/pdf).
-        if user_agent and headers.get("User-Agent") != POLITE_USER_AGENT:
-            headers["User-Agent"] = user_agent
-        session.headers.update(headers)
-        session.cookies = cookie_jar(cookies, url)
+    urls = publisher_pdf_urls(doi)
+    if not urls and _prefix(doi) in PUBLISHER_LANDING_SITES:
+        urls, challenged = _landing_pdf_urls(doi, cookies, verbose=verbose,
+                                             timeout=timeout, user_agent=user_agent)
+    for url in urls:
+        session = _session(url, cookies, user_agent, "application/pdf,*/*")
         try:
             response = session.get(url, timeout=timeout, allow_redirects=True,
                                    stream=True)
@@ -537,8 +705,7 @@ def fetch_with_cookies(doi, save_path, cookies, verbose=False,
                 print(f"  institutional: {url} -> HTTP {response.status_code}")
             if response.status_code == 200 and _save_pdf(response, save_path):
                 return url, False
-            if (response.status_code in (403, 429, 503)
-                    and "cloudflare" in (response.headers.get("server") or "").lower()):
+            if _is_challenge(response):
                 challenged = True
         except requests.RequestException as exc:
             if verbose:
@@ -569,7 +736,7 @@ _xvfb_proc = None
 def _browser_display() -> Optional[str]:
     """An X display for headed Chromium: a shared private Xvfb, else $DISPLAY."""
     global _xvfb_display, _xvfb_proc
-    if os.name == "nt" or os.sys.platform == "darwin":
+    if os.name == "nt" or sys.platform == "darwin":
         return ""
     if os.environ.get("FETCHPDF_INSTITUTIONAL_VISIBLE") and os.environ.get("DISPLAY"):
         return os.environ["DISPLAY"]
@@ -596,12 +763,13 @@ def _browser_display() -> Optional[str]:
     return os.environ.get("DISPLAY")
 
 
-def _playwright_cookies(cookies: Sequence[dict], site: str) -> List[dict]:
+def _playwright_cookies(cookies: Sequence[dict], sites) -> List[dict]:
     """The publisher's cookies, in the shape Playwright's add_cookies takes."""
+    sites = [sites] if isinstance(sites, str) else list(sites)
     now = time.time()
     out = []
     for c in cookies:
-        if not _domain_matches(c.get("domain", ""), site):
+        if not any(_domain_matches(c.get("domain", ""), s) for s in sites):
             continue
         if c.get("expires") and c["expires"] < now:
             continue
@@ -640,6 +808,15 @@ def wait_past_challenge(page, timeout_s: float = 30.0) -> bool:
     return False
 
 
+def _wait_off_linkinghub(page, timeout_s: float = 20.0) -> None:
+    """Elsevier's DOI hop forwards by script; wait until it has."""
+    deadline = time.time() + timeout_s
+    while "linkinghub.elsevier.com" in (page.url or "") and time.time() < deadline:
+        page.wait_for_timeout(1000)
+    if "linkinghub.elsevier.com" not in (page.url or ""):
+        wait_past_challenge(page)
+
+
 def fetch_pdf_in_page(page, url: str) -> Tuple[Optional[bytes], dict]:
     """fetch() *url* from inside *page*; returns (pdf bytes or None, info)."""
     info = page.evaluate(_FETCH_JS, [url, MAX_PDF_BYTES])
@@ -652,7 +829,8 @@ def fetch_in_browser(doi, save_path, cookies, user_agent=None,
     """The cookie route through a real browser. Returns the PDF URL, or None."""
     article = publisher_article_url(doi)
     pdf_urls = publisher_pdf_urls(doi)
-    if not article or not pdf_urls:
+    from_landing = not pdf_urls and _prefix(doi) in PUBLISHER_LANDING_SITES
+    if not article or not (pdf_urls or from_landing):
         return None
     try:
         from playwright.sync_api import sync_playwright
@@ -665,7 +843,7 @@ def fetch_in_browser(doi, save_path, cookies, user_agent=None,
         if verbose:
             print("  institutional: no display and no Xvfb; no browser fallback")
         return None
-    site = registrable_domain(urlsplit(article).hostname or "")
+    sites = publisher_sites(doi)
     env = dict(os.environ)
     if display:
         env["DISPLAY"] = display
@@ -684,15 +862,32 @@ def fetch_in_browser(doi, save_path, cookies, user_agent=None,
             try:
                 context = browser.new_context(user_agent=user_agent or None,
                                               viewport={"width": 1400, "height": 900})
-                context.add_cookies(_playwright_cookies(cookies, site))
+                context.add_cookies(_playwright_cookies(cookies, sites))
                 page = context.new_page()
                 page.goto(article, wait_until="domcontentloaded", timeout=60000)
                 if not wait_past_challenge(page):
                     if verbose:
                         print(f"  institutional (browser): challenge did not clear on {article}")
                     return None
+                if from_landing:
+                    _wait_off_linkinghub(page)
+                    pdf = pdf_url_from_landing(page.content(), page.url, doi)
+                    pdf_urls = [pdf] if pdf else []
+                    if verbose and not pdf:
+                        print(f"  institutional (browser): no citation_pdf_url at {page.url}")
                 for url in pdf_urls:
-                    data, info = fetch_pdf_in_page(page, url)
+                    try:
+                        data, info = fetch_pdf_in_page(page, url)
+                    except Exception:      # noqa: BLE001 - the page was still settling
+                        page.wait_for_timeout(3000)
+                        data, info = fetch_pdf_in_page(page, url)
+                    if not data and info.get("status") in (403, 429):
+                        # Cloudflare refuses a burst of parallel workers (seen
+                        # 2026-10-23 on PNAS: 2 of 6 at once, all fine singly).
+                        page.wait_for_timeout(8000)
+                        page.reload(wait_until="domcontentloaded", timeout=60000)
+                        wait_past_challenge(page)
+                        data, info = fetch_pdf_in_page(page, url)
                     if verbose:
                         print(f"  institutional (browser): {url} -> HTTP {info.get('status')}"
                               f"{' PDF' if data else ''}")
@@ -715,7 +910,7 @@ def fetch(doi, save_path, cookies_path, verbose=False,
     """
     if not cookies_path:
         return None, []
-    if not publisher_pdf_urls(doi):
+    if not covers(doi):
         return None, ["no publisher PDF URL is known for this DOI prefix"]
     if _cap_reached():
         return None, [f"download cap reached ({_max_downloads} this run); "

@@ -160,8 +160,6 @@ PAGE_COUNT_MIN_SPAN = 2
 
 _PAGE_RANGE_RE = re.compile(r"^\s*(?:[A-Za-z]*)(\d+)\s*(?:[-–—]\s*(?:[A-Za-z]*)(\d+))?\s*$")
 
-_DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
-
 #: S1 on its own is not enough when the front pages are legible and do not carry
 #: the title (issue #5). The requested DOI is printed by the paper itself, but
 #: also by a paper that CITES it and by the article's own supplementary file:

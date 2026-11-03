@@ -55,7 +55,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ._util import iso
+from ._util import iso, unlink
 from .byline import byline_from_xml
 from .references import Reference, references_from_xml, references_section
 from .to_markdown import Conversion, image_keys, jats_to_markdown, record_stem_for
@@ -207,7 +207,8 @@ def _tiff_to_png(content: bytes) -> Optional[bytes]:
     try:
         import fitz
 
-        return fitz.open(stream=content, filetype="tiff")[0].get_pixmap().tobytes("png")
+        with fitz.open(stream=content, filetype="tiff") as doc:
+            return doc[0].get_pixmap().tobytes("png")
     except Exception:                           # noqa: BLE001 - no converter
         return None
 
@@ -422,7 +423,7 @@ def _page(xml_path: str, content: bytes, conversion: Conversion, doi: str,
     return (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        f"<meta name=\"generator\" content=\"fetchpdf to_html\">\n"
+        "<meta name=\"generator\" content=\"fetchpdf to_html\">\n"
         + (f"<meta name=\"citation_doi\" content=\"{_esc(doi)}\">\n" if doi else "")
         + f"<title>{_esc(title)}</title>\n<style>{_CSS}</style>\n</head>\n<body>\n"
         f"<aside class=\"provenance\">{banner}</aside>\n<main>\n{body}"
@@ -503,7 +504,10 @@ def html_to_pdf(page_html: str, out_path: str, timeout_ms: int = 120000) -> str:
         except Exception:                       # noqa: BLE001 - Playwright's build absent
             browser = p.chromium.launch(channel="chrome", **launch)
         try:
-            page = browser.new_page()
+            # The page is built to carry no script. Text from the XML reaches
+            # it through Markdown with raw HTML allowed, so JavaScript off
+            # keeps anything that slips through inert in a --no-sandbox browser.
+            page = browser.new_page(java_script_enabled=False)
             page.set_default_timeout(timeout_ms)
             page.set_content(page_html, wait_until="load")
             page.pdf(
@@ -574,6 +578,7 @@ def render_record(xml_path: str, html: bool = True, pdf: bool = False,
             os.replace(tmp, html_out)
             result["html"] = html_out
         except OSError as e:
+            unlink(tmp)
             result["error"] = f"could not write {html_out}: {e}"
     if want_pdf:
         try:

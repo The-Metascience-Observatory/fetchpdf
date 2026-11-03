@@ -68,10 +68,13 @@ PROBES: Dict[str, str] = {
     "springer": "10.1007/s10823-025-09558-5",
     "hogrefe": "10.1027/1618-3169/a000636",
     "informs": "10.1287/mnsc.2023.4866",
+    "science": "10.1126/science.abn1725",
+    "aha": "10.1161/circulationaha.121.058901",
 }
 
 PUBLISHER_NAMES = {"wiley": "Wiley", "tandf": "Taylor & Francis", "sage": "SAGE",
-                   "springer": "Springer", "hogrefe": "Hogrefe", "informs": "INFORMS"}
+                   "springer": "Springer", "hogrefe": "Hogrefe", "informs": "INFORMS",
+                   "science": "Science", "aha": "AHA Journals"}
 
 CONFIG_DIR = inst.CONFIG_DIR
 ACCESS_CONFIG = inst.ACCESS_CONFIG
@@ -117,8 +120,14 @@ def publisher_for_site(site: str) -> Optional[str]:
 
 def _write_private_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    # Only fetchpdf's own config folders are made private. A --out pointing
+    # at the home directory or the working directory must not lock it down.
+    parent, config = path.parent.resolve(), CONFIG_DIR.resolve()
+    if parent == config or config in parent.parents:
+        os.chmod(path.parent, 0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_CREAT's mode applies only to a new file; tighten an existing one too.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
 
@@ -165,8 +174,7 @@ def export_from_browser(browser: str, out_path: Path, label: str,
     """
     import browser_cookie3
     loader = getattr(browser_cookie3, browser)
-    sites = sorted({_site(t.format(doi="x/y"))
-                    for t in inst.PUBLISHER_ARTICLE_TEMPLATES.values()})
+    sites = inst.cookie_sites()
     cookies, per_site, unreadable = [], {}, []
     for site in sites:
         try:
@@ -395,7 +403,7 @@ def cmd_setup(args) -> int:
         print(f"     {len(keys) + 1}. Another library: I have its OpenAthens sign-in link")
         print(f"     {len(keys) + 2}. Another library: I'll use each publisher's "
               f"'Access through your institution' button")
-        choice = _ask(f"     Choose [1]: ", "1")
+        choice = _ask("     Choose [1]: ", "1")
         n = int(choice) if choice.isdigit() else 1
         if 1 <= n <= len(keys):
             key, inst_cfg = keys[n - 1], INSTITUTIONS[keys[n - 1]]
@@ -516,7 +524,7 @@ def cmd_disable(args) -> int:
         return 0
     cfg["enabled"] = False
     _write_private_json(ACCESS_CONFIG, cfg)
-    print(f"Institutional access is OFF. Turn it back on with: fetchpdf fetchcookies")
+    print("Institutional access is OFF. Turn it back on with: fetchpdf fetchcookies")
     return 0
 
 
@@ -592,10 +600,6 @@ def main(argv=None) -> int:
         parser.print_help()
         return 0 if inst.load_access_config() else 2
     return args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 
 
 # --------------------------------------------------------------------------
@@ -758,3 +762,6 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
     print(f"Use it with:  fetchpdf <dois.csv> -o <dir> --cookies {out_path}")
     return 0 if any(s.startswith("ok") for s in results.values()) else 1
 
+
+if __name__ == "__main__":
+    sys.exit(main())

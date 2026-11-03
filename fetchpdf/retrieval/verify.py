@@ -27,7 +27,6 @@ from typing import List, Tuple
 
 from .supplementary import (
     ABSENT,
-    DATA_ARTIFACT_INFIX,
     HASH_MISMATCH,
     INTACT,
     LFS_POINTER,
@@ -35,6 +34,7 @@ from .supplementary import (
     SIZE_MISMATCH,
     UNVERIFIABLE,
     _integrity_of,
+    record_path,
 )
 
 #: Ordered worst-first, because that is the order an operator needs to act in.
@@ -71,7 +71,6 @@ def audit_manifest(manifest_path: str, verify_hashes: bool = True
     # directory reports every deposit file as absent when all of them are there.
     stem = os.path.basename(manifest_path[:-len(MANIFEST_SUFFIX)]) \
         if manifest_path.endswith(MANIFEST_SUFFIX) else ""
-    artifact_root = os.path.join(directory, stem + DATA_ARTIFACT_INFIX)
 
     results = []
     for record in manifest.get("files") or []:
@@ -81,11 +80,7 @@ def audit_manifest(manifest_path: str, verify_hashes: bool = True
         filename = record.get("filename") or ""
         if not filename:
             continue
-        path = os.path.join(directory, filename)
-        if not os.path.isfile(path):
-            candidate = os.path.join(artifact_root, filename)
-            if os.path.isfile(candidate):
-                path = candidate
+        path = record_path(directory, stem, filename)
         results.append((path, _integrity_of(path, record, verify_hashes)))
     return results
 

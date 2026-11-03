@@ -15,7 +15,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - [Batch Processing & Parallel Execution](#batch-processing--parallel-execution)
 - [Format-Prioritized Retrieval](#format-prioritized-retrieval)
 - [Supplementary Material](#supplementary-material)
-- [`--pull-everything`: the second layer](#--pull-everything-the-second-layer)
+- [`--fetch-everything`: the second layer](#--fetch-everything-the-second-layer)
 - [Figure Images](#figure-images)
 - [Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions) — papers your library subscribes to (`fetchpdf fetchcookies`)
 - [Calling fetchpdf from a script or an agent](#calling-fetchpdf-from-a-script-or-an-agent) — `--json`
@@ -45,7 +45,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
 - 🖼️ **[Figure Images](#figure-images)**: `--pull-figures` fetches the article's published figures from PMC (or the Elsevier object API) with a manifest of labels, captions and hashes
 - 🖨️ **[XML to HTML / PDF](#rendering-the-xml-as-html-or-pdf)**: `--generate-html-from-xml` / `--generate-pdf-from-xml` render a retrieved XML as one self-contained page, figures and tables embedded
 - 🔗 **[Linked Datasets & Code](#linked-datasets-and-code-stem_linked_artifactsjson)**: the same pass discovers each paper's external datasets/software via ScholeXplorer, Europe PMC and DataCite, downloads ownership-confirmed deposits from figshare/Zenodo/OSF/Dryad/Dataverse, and records every link in a sidecar
-- 🤖 **[LLM-assisted retrieval](#--pull-everything-the-second-layer)**: `--pull-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
+- 🤖 **[LLM-assisted retrieval](#--fetch-everything-the-second-layer)**: `--fetch-everything` adds a second layer — a model reads the paper itself and goes after the SI and datasets the APIs missed
 - 🔐 **[Institutional access](#institutional-access-via-cookies-ie-using-your-librarys-subscriptions)** (opt-in): a one-time `fetchpdf fetchcookies` lets fetchpdf download papers your library subscribes to
 - 🚀 **Batch Processing**: Process multiple DOIs/PMIDs from CSV files or lists
 - ⚡ **Parallel Execution**: Download multiple papers simultaneously with configurable workers
@@ -66,7 +66,7 @@ pip install -e .
 
 ### Optional: Install Playwright and Chromium for Browser Automation
 
-Install Playwright and Chromium only if you want to try additional scrapers enabled by `--add-playwright`. The scapers are for SSRN, OSF (if direct download fails), Wiley 10.1111/ DOIs, HTML table retrieval (second route), and Atypon supplementary material (PNAS, Science, SAGE, T&F, Annual Reviews).
+Install Playwright and Chromium to enable additional browser-based scrapers. They are used automatically once Playwright is installed (pass `--no-playwright` to skip them). The scrapers are for SSRN, OSF (if direct download fails), Wiley 10.1111/ DOIs, HTML table retrieval (second route), and Atypon supplementary material (PNAS, Science, SAGE, T&F, Annual Reviews).
 
 ```bash
 pip install -e ".[browser]"   # or: pip install playwright
@@ -101,9 +101,10 @@ SERPAPI_API_KEY=your_serpapi_key           # Optional Google Scholar PDF fallbac
 
 # Optional — publisher-specific
 ELSEVIER_TDM_API_KEY=your_elsevier_key      # Elsevier text/data-mining access
+ELSEVIER_INSTTOKEN=your_inst_token          # Elsevier institutional token (needs the key above)
 SCOPUS_API_KEY=your_scopus_key              # Scopus abstract lookup during identifier resolution
 
-# Optional — only for --pull-everything --llm-backend openrouter
+# Optional — only for --fetch-everything --llm-backend openrouter
 OPENROUTER_API_KEY=your_openrouter_key      # the retrieval agent's second backend
 
 # Required by fetchpdf-pubpeer — PubPeer rejects keyless requests
@@ -533,7 +534,7 @@ unless stdin and stdout are both terminals** — pipes, cron and CI get a one-li
 count and today's behaviour, so no unattended run can block on it. It is also
 suppressed when the answer is already known: any flag that turns the
 supplementary pass on (`--pull-supplementary`, `--refresh-supplementary`,
-`--download-data-artifacts`, `--pull-everything`, `--llm-agent-retrieval`), an
+`--download-data-artifacts`, `--fetch-everything`, `--llm-agent-retrieval`), an
 explicit `--on-existing skip` or `supplement`, `--abstract-only`, or the
 goal-aware flags (`--get-xml-or-html`, `--upgrade-existing` on the tiered path),
 which do not skip records at all. Single-identifier runs never ask.
@@ -550,6 +551,12 @@ retrieved, the PDF is kept and reported as unverified.
 
 When a PDF is unavailable, FetchPDF tries XML or HTML full text automatically.
 Use `--no-xml-fallback` to disable this fallback.
+
+A record that comes back as XML only is filed in its own folder,
+`{output_dir}/{stem}/`, with its figure images in `{stem}_figures/` and a
+rendering at `{stem}_from_xml.pdf` (figures embedded; a rendering of the XML,
+not the publisher's PDF). A later flat run finds it there. Use
+`--no-xml-fallback-extras` to leave the bare `.xml` instead.
 
 Publisher HTML (T2) uses lxml, which is installed with fetchpdf.
 
@@ -634,7 +641,7 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | Europe PMC datalinks | any PMID — text-mined accessions and data citations |
 | Full-text scan | deposits the paper names in its own prose — only under `--download-data-artifacts` |
 | Atypon publisher SI | PNAS, Science, Annual Reviews, SAGE, T&F — only when Europe PMC withholds the SI or the record has no PMCID; drives a headed browser, so it needs Playwright, Chromium and a display (or Xvfb) |
-| LLM retrieval agent | only under [`--pull-everything`](#--pull-everything-the-second-layer) or `--llm-agent-retrieval` |
+| LLM retrieval agent | only under [`--fetch-everything`](#--fetch-everything-the-second-layer) or `--llm-agent-retrieval` |
 | JCI | `10.1172/jci…` |
 
 Wiley, ACS and MDPI serve HTTP 403 to plain requests and are not yet covered;
@@ -684,7 +691,7 @@ Supplementary files never appear in `failed_dois.csv`, in `source_tracking.csv`,
 or in the format-composition tally; the missing-PDFs report lists gaps in them
 only in its own separate section. The same holds for linked datasets,
 [figures](#figure-images) and the
-[`--pull-everything`](#--pull-everything-the-second-layer) agent.
+[`--fetch-everything`](#--fetch-everything-the-second-layer) agent.
 
 ### Linked datasets and code: `{stem}_linked_artifacts.json`
 
@@ -773,18 +780,19 @@ GitLab repositories, and the institutional-repository long tail.
 Adding an enumerator is the same small pattern as `enumerate_dryad` /
 `enumerate_dataverse` in `fetchpdf/retrieval/supplement_index.py`.
 
-## `--pull-everything`: the second layer
+## `--fetch-everything`: the second layer
 
 Everything above is layer 1 — APIs, indexes and enumerators. It is very good at
 what publishers and repositories *declare*, and it cannot read. Layer 2 is a
 model that reads the paper itself and goes after what layer 1 did not get.
 
 ```bash
-fetchpdf papers.csv -o ./out --get-xml-or-html --make-subfolder --provenance \
-         --pull-everything
+fetchpdf papers.csv -o ./out --make-subfolder --provenance --fetch-everything
 ```
 
-`--pull-everything` implies `--pull-supplementary` and
+`--fetch-everything` implies `--get-xml-or-html` (XML, else HTML, beside the PDF
+where one exists), `--pull-figures` (the publisher's figure images beside the
+XML), `--pull-supplementary` and
 `--download-data-artifacts`, turns on adjudication of the deterministic scan's
 uncertain candidates, and adds the retrieval agent. Files land exactly where
 they always did: supplements as numbered siblings of the PDF, linked deposits
@@ -856,7 +864,7 @@ backend has no general-purpose harness to lock down, because its two tools are
 ours, so it downloads directly.
 
 `--llm-backend` selects the retrieval agent's backend only. The adjudication of
-uncertain full-text-scan candidates (on under `--pull-everything`, or with
+uncertain full-text-scan candidates (on under `--fetch-everything`, or with
 `--llm-adjudicate-artifacts`) always calls the Claude Code CLI, as a single-turn
 call with `--allowed-tools ""`; it does not get the `--disallowed-tools` /
 `--strict-mcp-config` lockdown described above.
@@ -1072,8 +1080,22 @@ your browser's cookies signs fetchpdf out as well.
 Publishers whose PDF address follows from the DOI: **Wiley** (`10.1002`,
 `10.1111`), **Taylor & Francis** (`10.1080`), **SAGE** (`10.1177`),
 **Springer** (`10.1007`, `10.1057`), the **Royal Society** (`10.1098`),
-**Hogrefe** (`10.1027`) and **INFORMS** (`10.1287`). Other DOIs are untouched
-and produce no extra output.
+**Hogrefe** (`10.1027`), **INFORMS** (`10.1287`), **PNAS** (`10.1073`),
+**Science** (`10.1126`), **ASCO** (`10.1200`), **AHA** (`10.1161`), **APS**
+(`10.1152`), **ASM** (`10.1128`), **ATS** (`10.1164`), **ACS** (`10.1021`) and
+**FASEB** (`10.1096`).
+
+Publishers whose PDF address is not derivable from the DOI are reached through
+the DOI link, and the PDF the landing page declares is fetched: **AACR**
+(`10.1158`), **Cold Spring Harbor** (`10.1101`), **Oncotarget** (`10.18632`),
+**Oxford** (`10.1093`, `10.1210`, `10.4049`), **JAMA** (`10.1001`), **ASH**
+(`10.1182`), **Company of Biologists** (`10.1242`), **ERS** (`10.1183`),
+**BMJ** (`10.1136`), **Bioscientifica** (`10.1530`) and **LWW** (`10.1097`).
+
+Several of these are open access but sit behind a Cloudflare bot check that a
+plain download cannot pass. Opening any article on the site once in your
+everyday browser earns the clearance cookie, and the next run reuses it.
+Other DOIs are untouched and produce no extra output.
 
 It runs right after the fast open-access lookups (repositories, PMC,
 Unpaywall), so a paper that is free anywhere is fetched from there and never
@@ -1363,7 +1385,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 9. **CORE** (core.ac.uk) — 40M+ repository papers; needs `COREAPIKEY`
 10. **DOAJ** — open-access full-text links
 11. **DataCite content URLs** — direct content and related resource links
-12. **Wiley rendered PDF** — only with `--add-playwright`
+12. **Wiley rendered PDF** — only when Playwright is installed
 13. **APA supplemental** — APA supplemental files, converting `.doc`/`.docx` to PDF when available
 14. **Direct DOI resolver**
     - Follows `https://doi.org/{doi}` to the landing page
@@ -1391,8 +1413,28 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 
 18. **Elsevier full-text API**
     - Elsevier records only (`10.1016/*`, or a Crossref landing page on sciencedirect.com / elsevier.com)
-    - Tries the PDF first, then full-text XML (the XML half is skipped with `--no-xml-fallback`)
     - Requires `ELSEVIER_TDM_API_KEY`
+    - **`10.1016/*` DOIs are asked for their PDF first** — before PMC, Unpaywall,
+      institutional access and the long tail of landing-page and repository
+      probes (a dead repository host in Unpaywall's list alone can cost over a
+      minute). An entitled record is one request instead of a walk through every
+      other route. Only a *full* PDF ends
+      the search: Elsevier's first-page-only preview (served with HTTP 200 and a
+      real PDF when the key is not entitled) is discarded, so asking first cannot
+      pre-empt a source that holds the whole paper. When the PDF is obtained, the
+      full-text XML is fetched alongside it, so both are on disk.
+    - The deferred step at the end of the chain remains: it takes the XML for
+      records whose key is entitled to the XML but not the PDF, and covers
+      ScienceDirect DOIs outside `10.1016/*`. It does not repeat a PDF request the
+      early step already made. The XML half is skipped with `--no-xml-fallback`.
+    - With `--prioritize-xml` / `--xml-only` / `--get-xml-or-html` the tiered
+      ladder asks the same endpoint itself (`elsevier_tdm` at T1, `elsevier_pdf`
+      at T5, ahead of the legacy chain).
+    - **Off campus?** Entitlement is decided by your IP unless you also set
+      `ELSEVIER_INSTTOKEN`. Request an institutional token from Elsevier (the
+      developer portal at dev.elsevier.com, or your library); it is sent as
+      `X-ELS-Insttoken` on every `api.elsevier.com` request, never to any other
+      host, and is redacted from logs and sidecars.
 
 If the whole chain yields no PDF, `fetch_pdf` tries structured full text
 (T1 XML / T2 HTML) from the tier ladder before giving up; `--no-xml-fallback`

@@ -37,7 +37,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional
 
-from ._util import iso, localname
+from ._util import iso, localname, unlink
 from .normalize import html_table_to_canonical, jats_table_to_canonical, token_count
 
 _WS_RE = re.compile(r"\s+")
@@ -230,6 +230,9 @@ class _FloatMap:
     (715/764 tables and 705/748 figures across 240 inbox files, 2026-09-02);
     the body only carries a `<ce:float-anchor refid>` where each belongs. A
     body-only walk therefore sees almost no tables at all.
+
+    JATS `<floats-group>` is the same arrangement: PMC author manuscripts keep
+    every figure there, after `<back>`, so they come out as leftovers at the end.
     """
 
     def __init__(self, root):
@@ -237,7 +240,7 @@ class _FloatMap:
         self.in_order = []
         self.emitted = set()
         for container in root.iter():
-            if localname(container.tag) != "floats":
+            if localname(container.tag) not in ("floats", "floats-group"):
                 continue
             for el in container:
                 self.in_order.append(el)
@@ -901,10 +904,11 @@ def record_stem_for(artifact_path: str) -> str:
 
 
 def write_markdown(artifact_path: str, overwrite: bool = False,
-                   verbose: bool = False) -> Optional[str]:
+                   verbose: bool = False, conversion=None) -> Optional[str]:
     """Convert one artifact and write `{stem}_from_xml.md` / `{stem}_from_html.md`.
 
-    Returns the path, or None.
+    Returns the path, or None. `conversion`, when the caller already has it,
+    saves parsing the document a second time.
 
     Never raises into a batch: a document that will not convert is one bad
     record, not a dead run.
@@ -913,7 +917,8 @@ def write_markdown(artifact_path: str, overwrite: bool = False,
     if os.path.exists(out_path) and not overwrite:
         return out_path
     try:
-        conversion = convert_file(artifact_path)
+        if conversion is None:
+            conversion = convert_file(artifact_path)
     except Exception as e:
         if verbose:
             print(f"  markdown: {os.path.basename(artifact_path)} raised {type(e).__name__}: {str(e)[:90]}")
@@ -931,6 +936,7 @@ def write_markdown(artifact_path: str, overwrite: bool = False,
             f.write(text)
         os.replace(tmp, out_path)
     except OSError as e:
+        unlink(tmp)
         if verbose:
             print(f"  markdown: could not write {out_path}: {e}")
         return None
@@ -974,7 +980,8 @@ def convert_directory(directory: str, overwrite: bool = False, verbose: bool = F
             conversion = convert_file(path)
         except Exception:
             pass
-        written = write_markdown(path, overwrite=overwrite, verbose=verbose)
+        written = write_markdown(path, overwrite=overwrite, verbose=verbose,
+                                 conversion=conversion)
         if written is None:
             summary["failed"] += 1
         elif existed and not overwrite:

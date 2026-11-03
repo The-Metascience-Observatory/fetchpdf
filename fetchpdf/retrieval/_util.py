@@ -17,10 +17,7 @@ from typing import Optional
 #: Two titles for the same work are the same title at 0.93 and are different
 #: works well below it. The margin is not delicate: a Dataverse deposit and its
 #: own article score 0.99, an unrelated one 0.12. Anything in between is not a
-#: near-miss worth arguing over. `supplement_graph` still carries its own copy
-#: of this number and its own `_squash`; they predate these and have not been
-#: migrated, so the two are free to drift. Anyone touching either should move
-#: that caller over rather than adding a third.
+#: near-miss worth arguing over.
 TITLE_MATCH_RATIO = 0.93
 
 

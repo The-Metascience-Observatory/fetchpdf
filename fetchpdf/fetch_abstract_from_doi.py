@@ -261,7 +261,7 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
                 "title":    d.get("title"),
                 "abstract": abstract,
                 "authors":  authors,
-                "journal":  (d.get("primary_location") or {}).get("source", {}).get("display_name"),
+                "journal":  ((d.get("primary_location") or {}).get("source") or {}).get("display_name"),
                 "year":     d.get("publication_year"),
             })
             if verbose and abstract:
@@ -435,7 +435,8 @@ def fetch_abstract_from_doi(doi, email=None, delay=0.1, verbose=False):
                 if verbose and abstract:
                     print("  ✅ Abstract from Scopus")
         except Exception as e:
-            if verbose: print(f"  Scopus error: {e}")
+            # The exception text can carry the request URL, and with it the key.
+            if verbose: print(f"  Scopus error: {type(e).__name__}")
         time.sleep(delay)
         if _done(): return result
 

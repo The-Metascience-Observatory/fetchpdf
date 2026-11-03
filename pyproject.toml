@@ -63,6 +63,9 @@ better-text-images = [
 # fetchpdf-render). The PDF variant also needs [browser].
 render = [
     "markdown-it-py>=3.0",
+    # TIFF figures -> PNG for the embedded page. PyMuPDF is the fallback
+    # converter, so this is the lighter way to get TIFF figures rendered.
+    "Pillow>=9.0",
 ]
 dev = [
     "pytest>=7.0.0",

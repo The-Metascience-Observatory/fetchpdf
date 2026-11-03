@@ -34,7 +34,8 @@ from .ratelimit import HostRateLimiter
 
 #: Query parameters whose values must never appear in a log line or a sidecar.
 _SECRET_PARAMS = {"apikey", "api_key", "key", "token", "access_token", "auth"}
-_SECRET_HEADERS = {"authorization", "x-api-key", "apikey"}
+_SECRET_HEADERS = {"authorization", "x-api-key", "apikey",
+                   "x-els-apikey", "x-els-insttoken"}
 
 #: Headers that carry a credential, i.e. the ones worth REMOVING and retrying
 #: when a host rejects them. Same membership as `_SECRET_HEADERS` today but a
@@ -87,6 +88,16 @@ def redact(url: Optional[str]) -> Optional[str]:
     except ValueError:
         pass
     return _SECRET_IN_PATH_RE.sub(r"\1=REDACTED", url)
+
+
+def _error_text(error: BaseException) -> str:
+    """An exception's message, safe to log or persist.
+
+    urllib3 puts the request path and query in its messages ("Max retries
+    exceeded with url: /...?apiKey=..."), so the raw text would carry a key
+    into verbose output and Download.detail.
+    """
+    return _SECRET_IN_PATH_RE.sub(r"\1=REDACTED", str(error))[:200]
 
 
 @dataclass
@@ -209,6 +220,30 @@ class HttpClient:
                 headers.setdefault("Authorization", f"Bearer {key}")
         return headers
 
+    @staticmethod
+    def elsevier_token_headers(host: str, headers: Optional[dict] = None) -> dict:
+        """Add the Elsevier institutional token to a request for api.elsevier.com.
+
+        Separate from `polite_headers` on purpose. That one is skipped for
+        `polite=False`, which every Elsevier object and supplement call passes
+        (the mailto/identification it adds is for other APIs), and it is also
+        the path on which a 401/403 strips credentials and retries unkeyed --
+        neither is right for this token. It must ride on EVERY request to the
+        host or the subscription entitlement it carries applies to some of a
+        record's files and not others.
+
+        Exact-host match, so the token cannot leave for a redirect-adjacent or
+        look-alike host. A no-op when ELSEVIER_INSTTOKEN is unset.
+        """
+        if host != "api.elsevier.com":
+            return headers if headers is not None else {}
+        from .. import _env
+
+        out = dict(headers or {})
+        if _env.ELSEVIER_INSTTOKEN:
+            out.setdefault("X-ELS-Insttoken", _env.ELSEVIER_INSTTOKEN)
+        return out
+
     # -- the request --------------------------------------------------------
 
     def get(self, url, params=None, headers=None, timeout=None, retries=3,
@@ -224,6 +259,7 @@ class HttpClient:
         if polite:
             params = self.polite_params(host, params)
             headers = self.polite_headers(host, headers)
+        headers = self.elsevier_token_headers(host, headers)
 
         backoff = 0.5
         last_error = ""
@@ -296,12 +332,12 @@ class HttpClient:
                     elapsed=elapsed,
                 )
             except self._TRANSIENT as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except Exception as e:  # malformed URL, bad encoding, ...
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 break
 
         if self.verbose:
@@ -377,12 +413,12 @@ class HttpClient:
                     elapsed=elapsed,
                 )
             except self._TRANSIENT as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except Exception as e:
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 break
 
         if self.verbose:
@@ -421,6 +457,7 @@ class HttpClient:
         if polite:
             params = self.polite_params(host, params)
             headers = self.polite_headers(host, headers)
+        headers = self.elsevier_token_headers(host, headers)
 
         directory = os.path.dirname(os.path.abspath(dest)) or "."
         backoff = 0.5
@@ -522,14 +559,14 @@ class HttpClient:
                 # mismatched offset is silent corruption of exactly the kind the
                 # no-truncation rule above exists to prevent.
                 _unlink(temp_path)
-                last_error = str(e)[:200]
+                last_error = _error_text(e)
                 if attempt < retries - 1:
                     time.sleep(backoff * (2 ** attempt))
                     continue
             except BaseException as e:
                 _unlink(temp_path)
                 if isinstance(e, Exception):
-                    last_error = str(e)[:200]
+                    last_error = _error_text(e)
                     break
                 raise
 
@@ -568,8 +605,11 @@ def _adopt_local_file_impl(url, dest, max_bytes) -> Download:
 
     hasher = hashlib.sha256()
     written = 0
+    # Staged beside dest and moved into place whole, so an interrupt mid-copy
+    # leaves no partial file at dest.
+    part = dest + ".part"
     try:
-        with open(source, "rb") as src, open(dest, "wb") as out:
+        with open(source, "rb") as src, open(part, "wb") as out:
             while True:
                 chunk = src.read(65536)
                 if not chunk:
@@ -577,11 +617,14 @@ def _adopt_local_file_impl(url, dest, max_bytes) -> Download:
                 hasher.update(chunk)
                 out.write(chunk)
                 written += len(chunk)
-    except OSError as error:
+        os.replace(part, dest)
+    except BaseException as error:
         try:
-            os.unlink(dest)
+            os.unlink(part)
         except OSError:
             pass
+        if not isinstance(error, OSError):
+            raise
         return Download(url=redact(url), request_url=redact(url), status=0,
                         outcome="unreachable", detail=str(error)[:120])
 
@@ -657,6 +700,23 @@ def apply_default_mode(path: str) -> None:
         os.chmod(path, DELIVERED_FILE_MODE)
     except OSError:
         pass
+
+
+def write_bytes_atomic(path: str, payload: bytes, prefix: str = ".fetchpdf-w-") -> None:
+    """Write payload to path whole or not at all, with delivered-file permissions."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle, temp_path = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(handle, "wb") as f:
+            f.write(payload)
+        apply_default_mode(temp_path)
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _unlink(path: Optional[str]) -> None:

@@ -5,7 +5,6 @@ import os
 import re
 import sys
 import time
-import difflib
 import html
 import shutil
 import tempfile
@@ -27,7 +26,8 @@ from ._env import (
     S2_API_KEY as _S2_API_KEY,
 )
 from ._http import (USER_AGENT, POLITE_USER_AGENT, headers_for,
-                    elsevier_first_page_only)
+                    elsevier_first_page_only, elsevier_headers)
+from .retrieval._util import unlink as _unlink_quietly
 
 # The ID Converter moved: www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/ now 301s
 # here. requests follows the redirect, so the old URL still worked -- it just
@@ -664,10 +664,23 @@ def _accept_downloaded_pdf(save_path: str, doi: str, url: str = "", verbose=Fals
     # the same paths and have already passed _looks_like_jats_fulltext.
     try:
         with open(save_path, "rb") as f:
-            if f.read(4) != b"%PDF":
-                return True
+            head = f.read(1024)
     except OSError:
         return False
+    if not head.startswith(b"%PDF"):
+        if not save_path.lower().endswith(".pdf"):
+            return True
+        # Readers accept junk before the header within the first 1 KB. No %PDF
+        # anywhere in it at a .pdf path is an HTML login wall or interstitial
+        # served as application/pdf -- not a document to keep.
+        if b"%PDF" not in head:
+            _note_rejected(doi, url)
+            _print_yellow_warning(
+                f"⚠️  Discarded a non-PDF saved as PDF for {doi}"
+                + (f"\n     source: {url[:110]}" if url else "")
+            )
+            _unlink_quietly(save_path)
+            return False
 
     from .retrieval.pdf_identity import TRUNCATED, WALL, WRONG, verify_pdf_identity
     from .retrieval.resolve import arxiv_id_from_doi
@@ -813,14 +826,6 @@ def _artifact_snapshot(save_path: str) -> dict:
     return snapshot
 
 
-def _unlink_quietly(path: str) -> None:
-    try:
-        if path and os.path.exists(path):
-            os.unlink(path)
-    except OSError:
-        pass
-
-
 def _looks_like_no_fulltext_item(html_text: str) -> bool:
     """True when a landing page is a news/editorial item with no PDF to get.
 
@@ -869,8 +874,9 @@ def _unregister_pool_from_atexit(executor) -> bool:
     None sentinel, so it stays parked in its socket read and the interpreter's
     normal teardown is not gated on it.
 
-    Writes are atomic (os.replace), so a worker abandoned mid-download costs a
-    temp file, not a corrupt artifact.
+    Streamed downloads go through a .part file and os.replace (see
+    _stream_pdf_to), so a worker abandoned mid-download costs a temp file,
+    not a corrupt artifact.
 
     Returns False if CPython's internals have moved, in which case the caller
     still works -- it just keeps the old blocking-at-exit behaviour.
@@ -942,7 +948,6 @@ DOI_URL_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
 FILENAME_SAFE_DOI_RE = re.compile(r"^(10\.\d{4,9})--(.+)$", re.IGNORECASE)
 PMID_URL_RE = re.compile(r"^https?://(?:www\.)?pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?", re.IGNORECASE)
 PMID_INPUT_RE = re.compile(r"^(?:pmid[\s:._-]*)?(\d{4,10})$", re.IGNORECASE)
-DOI_CANDIDATE_RE = re.compile(r"10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
 
 
 def _ncbi_url(base_url):
@@ -1509,15 +1514,18 @@ def pmid_to_doi(pmid: str, verbose=False):
             print(f"  PMID->DOI Europe PMC lookup failed for {pmid}: {str(exc)[:100]}")
 
     try:
-        from bs4 import BeautifulSoup
+        # lxml, not bs4: bs4 was never a declared dependency, so without it
+        # this fallback was silently off. lxml is required.
+        import lxml.html
         page = _get_pubmed_web_html(pmid, verbose=verbose)
-        soup = BeautifulSoup(page or "", "html.parser")
-        own_pmid = soup.find("meta", attrs={"name": "citation_pmid"})
-        own_doi = soup.find("meta", attrs={"name": "citation_doi"})
-        if own_pmid and own_pmid.get("content") == pmid and own_doi:
-            doi = clean(own_doi.get("content"))
-            if doi:
-                return doi
+        if page:
+            tree = lxml.html.fromstring(page.encode("utf-8") if isinstance(page, str) else page)
+            own_pmid = tree.xpath('//meta[@name="citation_pmid"]/@content')
+            own_doi = tree.xpath('//meta[@name="citation_doi"]/@content')
+            if own_pmid and own_pmid[0] == pmid and own_doi:
+                doi = clean(own_doi[0])
+                if doi:
+                    return doi
     except Exception as exc:
         if verbose:
             print(f"  PMID->DOI PubMed HTML lookup failed for {pmid}: {str(exc)[:100]}")
@@ -1716,7 +1724,6 @@ def _crossref_doi_exists(doi: str, email: str | None = None,
     if not doi or not doi.startswith("10."):
         return None
     try:
-        params = {}
         h = dict(headers)
         if email:
             h["User-Agent"] = f"{h.get('User-Agent','fetchpdf/1.0')} (mailto:{email})"
@@ -1962,7 +1969,10 @@ def count_existing_records(identifiers, output_dir, make_subfolder=False,
         safe_doi = doi_to_safe_filename(display_id)
         record_dir = (os.path.join(output_dir, safe_doi)
                       if make_subfolder else output_dir)
-        stem = os.path.join(record_dir, safe_doi)
+        save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+        if not make_subfolder:
+            save_path = _xml_fallback_save_path(save_path)
+        stem = os.path.splitext(save_path)[0]
         if any(os.path.exists(stem + ext) for ext in extensions):
             existing += 1
     return existing, total
@@ -2091,6 +2101,35 @@ def _stdio_is_interactive() -> bool:
 
 
 #-----------------------------------------------------------------------------------------
+def _stream_pdf_to(r, save_path: str, url: str, require_magic: bool) -> bool:
+    """Stream a response body to save_path; True when the file was written.
+
+    require_magic: refuse (writing nothing) unless the first bytes are %PDF.
+    Checked on the first chunk, so a multi-GB octet-stream that is not a PDF
+    is dropped after 8 KB instead of being buffered whole.
+
+    The body goes to a .part file that replaces save_path only once complete:
+    a stream cut off midway used to leave a truncated .pdf that the next run
+    took for a finished download.
+    """
+    chunks = (c for c in r.iter_content(8192) if c)
+    first = next(chunks, b"")
+    if require_magic and first[:4] != b"%PDF":
+        return False
+    part = save_path + ".part"
+    try:
+        with open(part, "wb") as f:
+            f.write(first)
+            for chunk in chunks:
+                f.write(chunk)
+        os.replace(part, save_path)
+    except BaseException:
+        _unlink_quietly(part)
+        raise
+    _note_download_url(save_path, url)
+    return True
+
+
 def try_download(url, save_path, verbose=False):
     """Try downloading PDF from URL and save to save_path."""
 
@@ -2143,22 +2182,12 @@ def try_download(url, save_path, verbose=False):
             # Accept application/pdf or application/octet-stream with PDF magic bytes
             # (PsychArchives, DSpace, etc. often use octet-stream)
             if "pdf" in content_type:
-                with open(save_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        if chunk:
-                            f.write(chunk)
-                _note_download_url(save_path, url)
-                if verbose:
-                    print("PDF downloaded OK from direct URL.")
-                return True
+                if _stream_pdf_to(r, save_path, url, require_magic=False):
+                    if verbose:
+                        print("PDF downloaded OK from direct URL.")
+                    return True
             if "octet-stream" in content_type:
-                chunks = list(r.iter_content(8192))
-                if chunks and chunks[0][:4] == b"%PDF":
-                    with open(save_path, "wb") as f:
-                        for chunk in chunks:
-                            if chunk:
-                                f.write(chunk)
-                    _note_download_url(save_path, url)
+                if _stream_pdf_to(r, save_path, url, require_magic=True):
                     if verbose:
                         print("PDF downloaded OK (octet-stream).")
                     return True
@@ -2176,18 +2205,12 @@ def try_download(url, save_path, verbose=False):
                 retry_headers = {**request_headers,
                                  "User-Agent": POLITE_USER_AGENT}
                 try:
-                    r2 = requests.get(url, headers=retry_headers, timeout=20,
-                                      allow_redirects=True, stream=True)
-                    ctype2 = r2.headers.get("content-type", "").lower()
-                    if r2.status_code == 200 and ("pdf" in ctype2
-                                                  or "octet-stream" in ctype2):
-                        chunks = list(r2.iter_content(8192))
-                        if chunks and chunks[0][:4] == b"%PDF":
-                            with open(save_path, "wb") as f:
-                                for chunk in chunks:
-                                    if chunk:
-                                        f.write(chunk)
-                            _note_download_url(save_path, url)
+                    with requests.get(url, headers=retry_headers, timeout=20,
+                                      allow_redirects=True, stream=True) as r2:
+                        ctype2 = r2.headers.get("content-type", "").lower()
+                        if (r2.status_code == 200
+                                and ("pdf" in ctype2 or "octet-stream" in ctype2)
+                                and _stream_pdf_to(r2, save_path, url, require_magic=True)):
                             if verbose:
                                 print("PDF downloaded OK (polite-UA retry after "
                                       "HTML interstitial).")
@@ -2200,6 +2223,9 @@ def try_download(url, save_path, verbose=False):
     except Exception as e:
         if verbose:
             print(f"Failed downloading from {url[:80]}: {str(e)[:100]}")
+    finally:
+        if r is not None:
+            r.close()
     return False
 
 
@@ -2208,34 +2234,24 @@ def try_download_with_session(url: str, save_path: str, referer: str = None, ver
     if not url:
         return False
     try:
-        session = requests.Session()
-        session.headers.update(headers)
-        if referer:
-            session.headers["Referer"] = referer
-            session.get(referer, headers=HTML_HEADERS, timeout=15)
-        r = session.get(url, timeout=20, allow_redirects=True, stream=True)
-        content_type = r.headers.get("content-type", "").lower()
-        if r.status_code == 200:
-            if "pdf" in content_type:
-                with open(save_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        if chunk:
-                            f.write(chunk)
-                _note_download_url(save_path, url)
-                if verbose:
-                    print("PDF downloaded OK (session).")
-                return True
-            if "octet-stream" in content_type:
-                chunks = list(r.iter_content(8192))
-                if chunks and chunks[0][:4] == b"%PDF":
-                    with open(save_path, "wb") as f:
-                        for chunk in chunks:
-                            if chunk:
-                                f.write(chunk)
-                    _note_download_url(save_path, url)
-                    if verbose:
-                        print("PDF downloaded OK (session, octet-stream).")
-                    return True
+        with requests.Session() as session:
+            session.headers.update(headers)
+            if referer:
+                session.headers["Referer"] = referer
+                session.get(referer, headers=HTML_HEADERS, timeout=15).close()
+            with session.get(url, timeout=20, allow_redirects=True, stream=True) as r:
+                content_type = r.headers.get("content-type", "").lower()
+                if r.status_code == 200:
+                    if "pdf" in content_type:
+                        if _stream_pdf_to(r, save_path, url, require_magic=False):
+                            if verbose:
+                                print("PDF downloaded OK (session).")
+                            return True
+                    if "octet-stream" in content_type:
+                        if _stream_pdf_to(r, save_path, url, require_magic=True):
+                            if verbose:
+                                print("PDF downloaded OK (session, octet-stream).")
+                            return True
     except Exception as e:
         if verbose:
             print(f"Session download failed: {e}")
@@ -2248,7 +2264,7 @@ def _is_plausible_http_url(url: str) -> bool:
     u = url.strip()
     if not (u.startswith("http://") or u.startswith("https://")):
         return False
-    if any(ch in u for ch in [" ", "{", "}", "<", ">", "\\n", "\\r", "\\t"]):
+    if any(ch in u for ch in [" ", "{", "}", "<", ">", "\n", "\r", "\t"]):
         return False
     return True
 
@@ -2505,6 +2521,7 @@ def try_landing_page_pdf_fallback(doi: str, landing_url: str, save_path: str, ve
     if landing_resp.status_code == 200 and "pdf" in (landing_resp.headers.get("content-type", "").lower()):
         with open(save_path, "wb") as f:
             f.write(landing_resp.content)
+        _note_download_url(save_path, landing_resp.url)
         if verbose:
             print(f"✅ Landing page resolved directly to PDF for {doi}")
         return True
@@ -2682,10 +2699,14 @@ def try_escholarship_via_pubmed(doi: str, save_path: str, verbose=False) -> bool
 
 
 @_timed("pmid_direct")
-def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow_xml=True) -> bool:
+def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow_xml=True,
+                                 try_pdf=True) -> bool:
     """
     Try PMID-native PDF retrieval when DOI is unavailable.
     Uses PMCID routes + Europe PMC full-text links.
+
+    try_pdf=False goes straight to the PMC XML, for a caller that has already
+    run the PDF routes and only wants the XML once every other source failed.
     """
     if not pmid:
         return False
@@ -2707,6 +2728,11 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
     except Exception as e:
         if verbose:
             print(f"  PMID native idconv lookup failed for {pmid}: {str(e)[:100]}")
+
+    if not try_pdf:
+        if allow_xml and pmcid:
+            return try_pmc_xml_fallback(pmcid, save_path, verbose=verbose, doi=f"pmid:{pmid}")
+        return False
 
     # PMCID-derived direct PDF endpoints.
     if pmcid:
@@ -2769,13 +2795,7 @@ def try_pmid_direct_pdf_fallback(pmid: str, save_path: str, verbose=False, allow
                 if any(k in ul for k in [".pdf", "pdf", "/article/", "fulltext", "/doi/", "springer", "wiley", "tandfonline", "sagepub", "sciencedirect", "nature.com"]):
                     candidates.append(u)
 
-            # Deduplicate while preserving order.
-            deduped = []
-            seen = set()
-            for c in candidates:
-                if c and c not in seen:
-                    seen.add(c)
-                    deduped.append(c)
+            deduped = _dedupe_keep_order(c for c in candidates if c)
 
             if verbose:
                 print(f"  PMID native PubMed provider candidates: {len(deduped)}")
@@ -2830,6 +2850,52 @@ def _print_yellow_warning(message: str):
 def _xml_path_for_pdf_path(save_path: str) -> str:
     base, _ = os.path.splitext(save_path)
     return f"{base}.xml"
+
+
+#: Per-record files that travel with an XML-only result into its own folder.
+_XML_FALLBACK_SIBLINGS = (".xml", ".provenance.json", "_from_xml.md",
+                          "_linked_artifacts.json")
+
+
+def _is_xml_fallback(result, tiered: bool) -> bool:
+    """True when the chain settled for full-text XML because no PDF could be had.
+
+    Not in the tiered modes (--prioritize-xml, --xml-only, ...): there the XML
+    is what was asked for, and the caller's own flags decide what follows.
+    """
+    return bool(result) and not tiered and str(result).lower().endswith(".xml")
+
+
+def _xml_fallback_save_path(save_path: str) -> str:
+    """save_path inside {dir}/{stem}/ when an earlier run filed an XML fallback there.
+
+    So a flat re-run finds that record instead of fetching it again.
+    """
+    folder, name = os.path.split(save_path)
+    stem = os.path.splitext(name)[0]
+    nested = os.path.join(folder, stem, name)
+    if not os.path.exists(save_path) and os.path.exists(_xml_path_for_pdf_path(nested)):
+        return nested
+    return save_path
+
+
+def _move_xml_fallback_to_own_folder(result: str, save_path: str):
+    """Move an XML-only result into {dir}/{stem}/, where its figures and the
+    rendered PDF will go. Returns ``(result, save_path)`` at the new location;
+    unchanged when the record already has its own folder.
+    """
+    folder, name = os.path.split(save_path)
+    stem = os.path.splitext(name)[0]
+    if os.path.basename(os.path.abspath(folder or ".")) == stem:
+        return result, save_path
+    record_dir = os.path.join(folder, stem)
+    os.makedirs(record_dir, exist_ok=True)
+    for suffix in _XML_FALLBACK_SIBLINGS:
+        src = os.path.join(folder, stem + suffix)
+        if os.path.exists(src):
+            os.replace(src, os.path.join(record_dir, stem + suffix))
+    new_save = os.path.join(record_dir, name)
+    return _xml_path_for_pdf_path(new_save), new_save
 
 
 _ELIFE_DOI_RE = re.compile(r"^10\.7554/elife\.(\d+)$", re.IGNORECASE)
@@ -3160,9 +3226,9 @@ def _try_elsevier_pdf_by_pii(pii: str, save_path: str, api_key: str, verbose=Fal
     try:
         r = requests.get(
             url,
-            headers={"X-ELS-APIKey": api_key,
-                     "Accept": "application/pdf",
-                     "User-Agent": headers["User-Agent"]},
+            headers=elsevier_headers(api_key, {
+                "Accept": "application/pdf",
+                "User-Agent": headers["User-Agent"]}),
             timeout=90,
         )
     except Exception as e:
@@ -3198,15 +3264,106 @@ def _try_elsevier_pdf_by_pii(pii: str, save_path: str, api_key: str, verbose=Fal
     return save_path
 
 
+def _elsevier_xml_body_verdict(xml_text: str):
+    """(True, "") when Elsevier's XML carries real body markup, else (False, why).
+
+    The one gate for "is this full text", shared by the deferred fallback and
+    the PDF-first step's companion XML so they can never disagree about it. The
+    reasoning behind the marker list is in `try_elsevier_fulltext_api_fallback`.
+    """
+    lowered = xml_text.lower()
+    if any(marker in lowered for marker in ("<ja:body", "<ce:para", "<ce:sections")):
+        return True, ""
+    reason = ("flat rawtext only, no structure" if "<xocs:rawtext" in lowered
+              else "abstract only" if "<ce:abstract" in lowered
+              else "metadata only")
+    return False, reason
+
+
+@_timed("elsevier_early")
+def try_elsevier_pdf_first(doi: str, save_path: str, verbose=False, allow_xml=True,
+                           asked_out=None):
+    """Elsevier's PDF (and its XML, when entitled), asked for EARLY.
+
+    For a 10.1016 DOI with a key, this is one request that either returns the
+    typeset article or is refused -- against a long tail of landing-page scans
+    and repository probes that, on an Elsevier record, almost never find what a
+    subscription serves directly. Measured 2026-10-31 on 10.1016/j.cell.2020.04.015:
+    ~3 minutes with Elsevier last (most of it retries against a dead repository
+    host), seconds with it asked first.
+
+    It takes only a FULL PDF. A first-page preview is discarded by
+    `_try_elsevier_pdf_by_pii`, so moving Elsevier ahead of the other routes
+    cannot let a preview pre-empt a source that holds the whole paper. And it
+    writes nothing unless a PDF was obtained: an XML-only result is left to the
+    deferred call, because an .xml on disk mid-chain would satisfy the chain's
+    skip-if-exists check in every related-DOI re-entry and end the search before
+    the PDF sources behind it had run.
+
+    On a PDF, the XML is fetched too (unless `allow_xml` is off), so the record
+    still ends with both slots filled, as the deferred path has always done.
+    Returns the XML path when both were written, the PDF path otherwise, or None.
+    `asked_out`, if given, receives True once the PDF request has actually been
+    made: a Crossref hiccup before that point is not "Elsevier refused", and the
+    deferred call must still ask.
+    DOIs outside 10.1016 are not asked here -- they are only recognisable as
+    Elsevier from Crossref's landing page, which the deferred call still handles.
+    """
+    api_key = _ELSEVIER_TDM_API_KEY
+    if not api_key or not str(doi).lower().startswith("10.1016/"):
+        return None
+
+    crossref_params = {"mailto": _DEFAULT_EMAIL} if _DEFAULT_EMAIL else {}
+    r = _crossref_raw_get(f"https://api.crossref.org/works/{doi}",
+                          params=crossref_params, timeout=12)
+    if r.status_code != 200:
+        return None
+    pii = _extract_elsevier_pii_from_crossref((r.json() or {}).get("message", {}))
+    if not pii:
+        return None
+
+    if asked_out is not None:
+        asked_out.append(True)
+    pdf_path = _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
+    if not pdf_path:
+        return None
+    if not allow_xml:
+        return pdf_path
+
+    # Best effort and guarded: the PDF is already on disk and is a real result,
+    # so nothing about the companion may take it away.
+    try:
+        xr = requests.get(
+            f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml",
+            timeout=45,
+            headers=elsevier_headers(api_key, {"User-Agent": headers["User-Agent"]}))
+        if xr.status_code == 200 and _elsevier_xml_body_verdict(xr.text)[0]:
+            xml_path = _xml_path_for_pdf_path(save_path)
+            with open(xml_path, "w", encoding="utf-8") as f:
+                f.write(xr.text)
+            if verbose:
+                print(f"✅ Elsevier PDF+XML for {doi}")
+            return xml_path
+    except Exception as e:
+        if verbose:
+            print(f"  Elsevier XML companion failed: {str(e)[:100]}")
+    return pdf_path
+
+
 @_timed("elsevier")
 def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_message=None,
-                                       verbose=False, allow_xml=True):
+                                       verbose=False, allow_xml=True, try_pdf=True):
     """Elsevier Full-Text Retrieval API: PDF if entitled, else raw XML.
 
     Helpful when ScienceDirect PDF endpoints are bot-blocked. `allow_xml=False`
     (from --no-xml-fallback) suppresses only the XML half -- the PDF attempt
     still runs, because a caller that wants PDFs has no reason to skip a route
     that returns one.
+
+    `try_pdf=False` is the converse, and is for the deferred call that follows
+    `try_elsevier_pdf_first`: that step has already asked for this record's PDF
+    and been refused, so asking again would spend the same requests for the same
+    answer. Only the XML half runs.
     """
     api_key = _ELSEVIER_TDM_API_KEY
     if not api_key:
@@ -3247,13 +3404,18 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
     if not allow_xml:
         # --no-xml-fallback: caller ingests PDFs and cannot read .xml, so the
         # PDF is the only acceptable answer from this route.
+        if not try_pdf:
+            return None         # nothing left to ask: no XML wanted, PDF already refused
         if verbose:
             print("  Elsevier: XML suppressed (--no-xml-fallback), trying PDF")
         return _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
 
-    api_url = f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml&apiKey={api_key}"
+    # Key in the header, as the PDF variant sends it: in the URL it would
+    # surface in any exception text printed below.
+    api_url = f"https://api.elsevier.com/content/article/PII:{pii}?httpAccept=text/xml"
     try:
-        r = requests.get(api_url, timeout=45, headers={"User-Agent": headers["User-Agent"]})
+        r = requests.get(api_url, timeout=45, headers=elsevier_headers(
+            api_key, {"User-Agent": headers["User-Agent"]}))
         if r.status_code != 200:
             if verbose:
                 print(f"  Elsevier API status {r.status_code} for {pii}")
@@ -3281,19 +3443,16 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
         #
         # Only real body markup counts now. The tiered path reaches the same verdict
         # by classifying rawtext as T6 and refusing it for extraction.
-        lowered = xml_text.lower()
-        has_body = any(marker in lowered for marker in ("<ja:body", "<ce:para", "<ce:sections"))
+        has_body, stub_reason = _elsevier_xml_body_verdict(xml_text)
         if not has_body:
             if verbose:
-                reason = ("flat rawtext only, no structure"
-                          if "<xocs:rawtext" in lowered
-                          else "abstract only" if "<ce:abstract" in lowered
-                          else "metadata only")
-                print(f"  Elsevier API returned {reason} (no full text) for {pii}; "
-                      f"trying PDF representation")
+                print(f"  Elsevier API returned {stub_reason} (no full text) for {pii}"
+                      + ("; trying PDF representation" if try_pdf else ""))
             # The XML is a stub, but entitlement is per-representation -- the
             # PDF of this same PII is very often the complete article. This is
             # the case that used to end the record as "Nothing worked".
+            if not try_pdf:
+                return None     # the PDF-first step already asked, and was refused
             return _try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
 
         xml_path = _xml_path_for_pdf_path(save_path)
@@ -3310,9 +3469,8 @@ def try_elsevier_fulltext_api_fallback(doi: str, save_path: str, crossref_messag
         # away. (Without this, any error here fell into the outer handler and
         # the whole call returned None, discarding the saved XML.)
         try:
-            companion = _try_elsevier_pdf_by_pii(
-                pii, save_path, api_key, verbose=verbose
-            )
+            companion = (_try_elsevier_pdf_by_pii(pii, save_path, api_key, verbose=verbose)
+                         if try_pdf else None)
         except Exception as e:
             companion = None
             if verbose:
@@ -3462,12 +3620,12 @@ def _render_osf_page_to_pdf(osf_id: str, save_path: str, verbose=False, page=Non
                 return False
             page.pdf(path=save_path, format="A4", print_background=True)
 
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-            with open(save_path, "rb") as f:
-                if f.read(4) == b"%PDF":
-                    if verbose:
-                        print(f"✅ OSF rendered page fallback success for {osf_id}")
-                    return True
+        if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                and _starts_with_pdf_magic(save_path)):
+            if verbose:
+                print(f"✅ OSF rendered page fallback success for {osf_id}")
+            return True
+        _unlink_quietly(save_path)       # a render that failed the check
     except Exception as e:
         if verbose:
             print(f"  OSF rendered fallback error: {str(e)[:120]}")
@@ -3475,13 +3633,6 @@ def _render_osf_page_to_pdf(osf_id: str, save_path: str, verbose=False, page=Non
 
 
 #-----------------------------------------------------------------------------------------
-def _text_similarity(a: str, b: str) -> float:
-    """Return normalized similarity score for two strings."""
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
 def _extract_pdf_links_from_doaj_record(record: dict):
     """Extract candidate full-text links from a DOAJ API record."""
     candidates = []
@@ -3806,13 +3957,7 @@ def _collect_datacite_candidate_urls(datacite_attributes: dict):
             if relation in {"issupplementto", "isversionof", "isidenticalto", "iscitedby", "references"}:
                 urls.append(identifier)
 
-    deduped = []
-    seen = set()
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            deduped.append(u)
-    return deduped
+    return _dedupe_keep_order(urls)
 
 
 def _is_datacite_prefix(doi: str) -> bool:
@@ -4008,12 +4153,12 @@ def try_wiley_rendered_pdf_fallback(doi: str, save_path: str, verbose=False):
             page.pdf(path=save_path, format="A4", print_background=True)
             _quiet_close(browser)
 
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-            with open(save_path, "rb") as f:
-                if f.read(4) == b"%PDF":
-                    if verbose:
-                        print(f"✅ Wiley rendered PDF fallback success for {doi}")
-                    return True
+        if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                and _starts_with_pdf_magic(save_path)):
+            if verbose:
+                print(f"✅ Wiley rendered PDF fallback success for {doi}")
+            return True
+        _unlink_quietly(save_path)       # a render that failed the check
     except Exception as e:
         if verbose:
             print(f"Error with Wiley rendered fallback: {e}")
@@ -4033,7 +4178,7 @@ def _try_institutional(save_path, resolved, cookies_file=None, verbose=False,
     if not resolved:
         return None
     from .retrieval import institutional as _institutional
-    if not _institutional.publisher_pdf_urls(resolved):
+    if not _institutional.covers(resolved):
         return None
     cookies_file = cookies_file or _institutional.active_cookies_file()
     if not cookies_file:
@@ -4241,6 +4386,7 @@ def _fetch_pdf_chain(doi,
                        _paths_out=None,
                        _visited=None,
                        _resolver=None,
+                       _elsevier_first=True,
                       ):
     """
     Try to download a PDF for a DOI (or PMID resolved to DOI) using multiple fallbacks:
@@ -4258,6 +4404,9 @@ def _fetch_pdf_chain(doi,
      11. DOI→PMID fallback
      12. Google Scholar via SerpApi (optional API key)
      13. Elsevier XML API (last resort)
+     (Elsevier 10.1016 DOIs with a key also try the Elsevier PDF API FIRST,
+     ahead of PMC and Unpaywall -- see "Elsevier PDF first" below; `_elsevier_first=False` turns that
+     off for the tiered engine's T5 rung, which asks Elsevier itself.)
 
     Saves PDF to save_dir as: doi.replace('/', '--') + '.pdf'
     Returns the path if successful, else None.
@@ -4349,7 +4498,7 @@ def _fetch_pdf_chain(doi,
     if not doi:
         if pmid_input:
             # Fallback path when PMID has no DOI in metadata indexes.
-            xml_path = os.path.splitext(save_path)[0] + ".xml"
+            xml_path = _xml_path_for_pdf_path(save_path)
             if os.path.exists(save_path) or os.path.exists(xml_path):
                 existing = save_path if os.path.exists(save_path) else xml_path
                 if verbose:
@@ -4382,7 +4531,7 @@ def _fetch_pdf_chain(doi,
     deferred_xml = []
 
     # Skip if PDF or XML already exists
-    xml_path = os.path.splitext(save_path)[0] + ".xml"
+    xml_path = _xml_path_for_pdf_path(save_path)
     if os.path.exists(save_path) or os.path.exists(xml_path):
         existing = save_path if os.path.exists(save_path) else xml_path
         if verbose:
@@ -4423,8 +4572,7 @@ def _fetch_pdf_chain(doi,
                         return save_path
 
                 # Method 2: Use Playwright to scrape OSF page for download links
-                if use_playwright:
-                  if verbose:
+                if use_playwright and verbose:
                     print(f"  Trying OSF Playwright scraping for {osf_id}...")
                 try:
                     if not use_playwright:
@@ -4495,8 +4643,10 @@ def _fetch_pdf_chain(doi,
                                     page.wait_for_timeout(2000)
 
                                 # Debug: Save page screenshot and HTML
-                                if verbose:
-                                    debug_dir = "./test_downloads/debug"
+                                # Opt-in only: --verbose used to drop these into
+                                # ./test_downloads/debug of whatever directory ran it.
+                                debug_dir = os.environ.get("FETCHPDF_DEBUG_DIR")
+                                if verbose and debug_dir:
                                     os.makedirs(debug_dir, exist_ok=True)
                                     screenshot_path = os.path.join(debug_dir, f"osf_{osf_id}.png")
                                     html_path = os.path.join(debug_dir, f"osf_{osf_id}.html")
@@ -4564,14 +4714,14 @@ def _fetch_pdf_chain(doi,
                                                     download = download_info.value
                                                     download.save_as(save_path)
 
-                                                    if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-                                                        with open(save_path, "rb") as f:
-                                                            if f.read(4) == b"%PDF":
-                                                                if verbose:
-                                                                    print("✅ OSF PDF downloaded via button click")
-                                                                _record_source(_source_out, "osf")
-                                                                _quiet_close(browser)
-                                                                return save_path
+                                                    if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                                                            and _starts_with_pdf_magic(save_path)):
+                                                        if verbose:
+                                                            print("✅ OSF PDF downloaded via button click")
+                                                        _record_source(_source_out, "osf")
+                                                        _quiet_close(browser)
+                                                        return save_path
+                                                    _unlink_quietly(save_path)
                                                     if verbose:
                                                         print("    Download file check failed")
                                                 except PlaywrightTimeout:
@@ -4635,8 +4785,9 @@ def _fetch_pdf_chain(doi,
                             else:
                                 if verbose:
                                     print(f"    OSF page returned error status: {resp.status if resp else 'No response'}")
-                                _quiet_close(browser)
-                                return None
+                                # Fall through: the browser is closed below and
+                                # the rest of the chain still runs. Only a 429
+                                # (above) ends the record.
 
                             if resp and resp.status < 400:
                                 # If buttons didn't work, look for PDF links in page content
@@ -4726,9 +4877,9 @@ def _fetch_pdf_chain(doi,
 
                         _quiet_close(browser)
 
-                except ImportError:
-                    if verbose:
-                        print("    Playwright not available for OSF download")
+                except ImportError as e:
+                    if verbose and use_playwright:
+                        print(f"    Playwright not available for OSF download: {e}")
                 except Exception as e:
                     if verbose:
                         print(f"    OSF Playwright failed: {e}")
@@ -4805,14 +4956,14 @@ def _fetch_pdf_chain(doi,
                                                 download = download_info.value
                                                 download.save_as(save_path)
 
-                                                if os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
-                                                    with open(save_path, "rb") as f:
-                                                        if f.read(4) == b"%PDF":
-                                                            if verbose:
-                                                                print("✅ SSRN PDF downloaded via Playwright download")
-                                                            _record_source(_source_out, "ssrn")
-                                                            _quiet_close(browser)
-                                                            return save_path
+                                                if (os.path.exists(save_path) and os.path.getsize(save_path) > 1000
+                                                        and _starts_with_pdf_magic(save_path)):
+                                                    if verbose:
+                                                        print("✅ SSRN PDF downloaded via Playwright download")
+                                                    _record_source(_source_out, "ssrn")
+                                                    _quiet_close(browser)
+                                                    return save_path
+                                                _unlink_quietly(save_path)
                                                 if verbose:
                                                     print("    Download file check failed")
                                             except PlaywrightTimeout:
@@ -5039,12 +5190,35 @@ def _fetch_pdf_chain(doi,
             if verbose:
                 print(f"Error with Zenodo: {e}")
 
+    # ---------------- Elsevier PDF first (10.1016 DOIs, keyed) ----------------
+    # Ahead of PMC and Unpaywall, not merely ahead of the slow tail: Unpaywall's
+    # best location for an Elsevier paper is routinely a repository copy, and a
+    # dead repository host costs ~80s of connect retries before any later step
+    # runs (measured 2026-10-31 on 10.1016/j.cell.2020.04.015, www.zora.uzh.ch).
+    # An Elsevier record the key is entitled to is one request here; asked last
+    # it waited behind every landing-page scan and repository probe in the chain.
+    # Only a full PDF ends the search -- see try_elsevier_pdf_first -- and when
+    # it is refused the deferred call below still gets the XML, without asking
+    # for the PDF a second time.
+    elsevier_asked = []
+    if _elsevier_first:
+        try:
+            early = try_elsevier_pdf_first(doi, save_path, verbose=verbose,
+                                           allow_xml=allow_xml_fallback,
+                                           asked_out=elsevier_asked)
+            if early:
+                _record_source(_source_out, "elsevier")
+                return early
+        except Exception as e:
+            if verbose:
+                print(f"Error with Elsevier PDF-first: {e}")
+
     # ---------------- PubMed Central (PMC) via Europe PMC ----------------
     # Many OA papers are freely available via PMC. Europe PMC's pdf=render
     # endpoint reliably serves PDFs (NCBI PMC uses JS redirects).
     try:
         r = _get_with_retries(
-            _ncbi_url(f"{IDCONV_URL}?ids={doi}&format=json&tool=replication_search&email={email}"),
+            _ncbi_url(f"{IDCONV_URL}?ids={doi}&format=json&tool=replication_search&email={quote_plus(email or '')}"),
             timeout=15,
         )
         if r.status_code == 200:
@@ -5104,7 +5278,7 @@ def _fetch_pdf_chain(doi,
 
     # ---------------- Unpaywall ----------------
     try:
-        r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={email}", timeout=10)
+        r = requests.get(f"https://api.unpaywall.org/v2/{doi}?email={quote_plus(email or '')}", timeout=10)
         if r.status_code == 200:
             data = r.json()
             _remember_title(doi, data.get("title"))
@@ -5359,6 +5533,7 @@ def _fetch_pdf_chain(doi,
             if "application/pdf" in r.headers.get("content-type", "").lower():
                 with open(save_path, "wb") as f:
                     f.write(r.content)
+                _note_download_url(save_path, r.url)
                 if (verbose):  print(f"✅ Direct DOI PDF success for {doi}")
                 _record_source(_source_out, "direct_doi")
                 return save_path
@@ -5467,14 +5642,20 @@ def _fetch_pdf_chain(doi,
                                 )
                             if verbose:
                                 print(f"  Trying {label}: {alt_doi}")
+                            # PDF only, as for the Crossref related DOIs: the
+                            # related chain's XML would beat every PDF source
+                            # still ahead of this one.
                             alt_result = fetch_pdf(
-                                alt_doi, save_path, email, verbose, delay=0, use_playwright=use_playwright, _source_out=_source_out, _visited=_visited
+                                alt_doi, save_path, email, verbose, delay=0,
+                                allow_xml_fallback=False,
+                                use_playwright=use_playwright,
+                                _source_out=_source_out, _visited=_visited,
                             )
                             if alt_result:
                                 if verbose:
                                     print(f"✅ {label} success for {doi}")
                                 _record_source(_source_out, "datacite_related")
-                                return save_path
+                                return alt_result
                             break  # only try first match per type
     except Exception as e:
         if verbose:
@@ -5496,13 +5677,13 @@ def _fetch_pdf_chain(doi,
                 _record_source(_source_out, "pmid_direct")
                 return pmid_got if isinstance(pmid_got, str) else save_path
             # The PMID route's own PMC XML, unless the PMC step above already
-            # queued XML for this record. Re-running the route repeats its PDF
-            # attempts before the XML, but only once every PDF source has failed.
+            # queued XML for this record. try_pdf=False: its PDF routes have
+            # just failed, so the deferred call goes straight to the XML.
             if allow_xml_fallback and not any(
                 source in ("pmc", "pmc_efetch") for source, _ in deferred_xml
             ):
                 deferred_xml.append(("pmid_direct", lambda: try_pmid_direct_pdf_fallback(
-                    pmid_str, save_path, verbose, allow_xml=True)))
+                    pmid_str, save_path, verbose, allow_xml=True, try_pdf=False)))
 
     # ---------------- Google Scholar via SerpApi ---------------------------
     # Preserve search credits until the ordinary PDF sources are exhausted.
@@ -5523,6 +5704,7 @@ def _fetch_pdf_chain(doi,
             elsevier_path = try_elsevier_fulltext_api_fallback(
                 doi, save_path, crossref_message=elsevier_crossref_message,
                 verbose=verbose, allow_xml=allow_xml_fallback,
+                try_pdf=not elsevier_asked,
             )
             if elsevier_path:
                 _record_source(_source_out, "elsevier")
@@ -5860,7 +6042,7 @@ def _read_csv_column(path, column, case_insensitive=True):
                 if (v := row.get(actual)) is not None and v.strip()]
 
 
-def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None, xml_fallback_extras=True):
     """
     Download PDFs for multiple DOIs with optional parallel processing.
 
@@ -5968,6 +6150,7 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
             download_related_unverified=download_related_unverified,
             draft_requests=draft_requests,
             make_subfolder=make_subfolder,
+            xml_fallback_extras=xml_fallback_extras,
             json_out=json_out,
             cookies_file=cookies_file,
         )
@@ -5975,16 +6158,13 @@ def batch_fetch_pdfs(dois, output_dir, email=None, verbose=False, delay=0.1, wor
         _restore_stdio()
 
 
-def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None):
+def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0.1, workers=1, create_missing_report=True, track_source=False, start_offset=0, abstract_if_no_pdf=False, abstract_only=False, allow_xml_fallback=True, use_playwright=False, prioritize_xml=False, xml_only=False, xml_html_only=False, get_xml_or_html=False, to_markdown=False, extract_images=False, pull_figures=False, generate_html_from_xml=False, generate_pdf_from_xml=False, target_task="extraction", upgrade_existing=False, want_provenance=False, pull_supplementary=False, refresh_supplementary=False, max_supplementary_bytes=None, shared_resolver=None, record_timeout=1200, batch_timeout=None, make_subfolder=False, download_data_artifacts=False, max_data_artifact_bytes=None, llm_adjudicate_artifacts=False, llm_agent_retrieval=False, llm_backend=None, max_llm_records=0, llm_model=None, unpack_data_artifacts=False, download_related_unverified=False, draft_requests=False, json_out=None, cookies_file=None, xml_fallback_extras=True):
     """The body of batch_fetch_pdfs, split out so stdio restoration is guaranteed.
 
     Everything below is unchanged; the only reason for the split is that the
     wrapper above needs a try/finally around the whole thing.
     """
-    import os
-    import sys
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
     from concurrent.futures import TimeoutError as FuturesTimeout
 
     os.makedirs(output_dir, exist_ok=True)
@@ -6024,7 +6204,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     if _tiered or pull_supplementary or pull_figures:
         from .retrieval.cache import ResolutionCache
         from .retrieval.http import HttpClient
-        from .retrieval.ratelimit import HostRateLimiter, shared_host_limiter
+        from .retrieval.ratelimit import shared_host_limiter
         from .retrieval.resolve import BatchResolver
         from .retrieval.tiers import load_ladder
 
@@ -6106,6 +6286,10 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
     _image_statuses = {}
 
     def _si_http():
+        if _resolver is None:
+            # An XML-fallback figure pass in a run that built no resolver; the
+            # figures module then makes its own client.
+            return None
         client = getattr(_si_local, "client", None)
         if client is None:
             from .retrieval.http import HttpClient
@@ -6139,7 +6323,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             if verbose:
                 print(f"  images: {os.path.basename(pdf)} failed ({e})")
 
-    def _pull_figures(display_id, raw_id, canonical, save_path):
+    def _pull_figures(display_id, raw_id, canonical, save_path, force=False):
         """Published figure images for one record. Never changes the verdict.
 
         Wrapped whole for the same reason as _pull_si, and run on the
@@ -6147,7 +6331,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         fetched before this flag existed is the main thing anyone points it at,
         and fetch_pdf is never called there.
         """
-        if not pull_figures or not save_path:
+        if not (pull_figures or force) or not save_path:
             return
         try:
             from .retrieval.figures import pull_for_record as pull_figures_for_record
@@ -6173,13 +6357,13 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         except Exception as e:
             print(f"   🖼️  {display_id}: figure pass failed ({str(e)[:120]})")
 
-    def _render_xml(display_id, save_path):
+    def _render_xml(display_id, save_path, force_pdf=False):
         """{stem}_from_xml.html / .pdf for a record with XML. Never changes the verdict.
 
         After _pull_figures, which supplies the images, and on the
         already-exists branch too, for the same reason that pass runs there.
         """
-        if not (generate_html_from_xml or generate_pdf_from_xml) or not save_path:
+        if not (generate_html_from_xml or generate_pdf_from_xml or force_pdf) or not save_path:
             return
         from .retrieval.engine import _stem_for
         xml_path = _stem_for(save_path) + ".xml"
@@ -6190,7 +6374,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         try:
             from .retrieval.to_html import render_record
             outcome = render_record(xml_path, html=generate_html_from_xml,
-                                    pdf=generate_pdf_from_xml, verbose=verbose)
+                                    pdf=generate_pdf_from_xml or force_pdf, verbose=verbose)
             written = [os.path.basename(p) for p in (outcome["html"], outcome["pdf"]) if p]
             if written:
                 print(f"   🖨️  {display_id}: {', '.join(written)} "
@@ -6324,6 +6508,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
             if made_dir is not None:
                 made_dir.append(record_dir)
         save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+        if not make_subfolder:
+            save_path = _xml_fallback_save_path(save_path)
 
         # Always allocated, not just under --tracksource: the success line names
         # the acquiring source, and that should not depend on an unrelated flag.
@@ -6438,6 +6624,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
 
         success = result is not None
 
+        # No PDF, only the XML: give it a folder, its figures, and a rendering.
+        xml_fallback = xml_fallback_extras and _is_xml_fallback(result, _tiered)
+        if xml_fallback:
+            result, save_path = _move_xml_fallback_to_own_folder(result, save_path)
+
         # Deliberately after `success` is decided and never folded into it. Run
         # unconditionally, including when the paper could not be had: a paywalled
         # article with three retrievable .xlsx files is a better outcome than
@@ -6450,8 +6641,9 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # artifact there is nothing for them to illustrate, and the pass would
         # leave an empty `_figures/` and manifest in a record that failed.
         if success:
-            _pull_figures(display_id, raw_identifier, canonical_doi, save_path)
-        _render_xml(display_id, save_path)
+            _pull_figures(display_id, raw_identifier, canonical_doi, save_path,
+                          force=xml_fallback)
+        _render_xml(display_id, save_path, force_pdf=xml_fallback)
         _pull_images(result or save_path, display_id)
 
         if success:
@@ -6736,8 +6928,8 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # naive version prints its summary and then hangs forever at exit, which
         # is precisely the "stalled at the end" symptom. Daemon threads are not
         # joined, so the interpreter can leave them behind. Safe here because
-        # every artifact is written atomically via os.replace: a worker killed
-        # mid-flight leaves a temp file, never a half-written PDF.
+        # streamed downloads are written via a .part file and os.replace: a
+        # worker killed mid-flight leaves a temp file, never a half-written PDF.
         executor = _DaemonThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="fetchpdf"
         )
@@ -7013,6 +7205,14 @@ def _print_institutional_report():
             print(f"    {line}")
 
 
+def _playwright_installed() -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec("playwright") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _cookie_offer_applies(args) -> bool:
     """The library route only ever yields a PDF; these modes would not keep one."""
     return not (args.abstract_only or args.xml_only or args.xml_html_only)
@@ -7057,7 +7257,7 @@ def _and_list(names) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
-def _offer_cookie_import(failed, retry):
+def _offer_cookie_import(failed, retry, xml_only=False):
     """End of run: offer to import library cookies for failures they could fetch.
 
     *failed* is the run's failed DOIs; *retry(dois)* re-runs those through the
@@ -7066,6 +7266,7 @@ def _offer_cookie_import(failed, retry):
     signed in to -- one paper at Wiley opens one Wiley tab, not six. Interactive
     runs are asked; pipes, cron and --json get the command to run instead.
     --no-cookies and --cookies FILE are left alone. Returns the recovered DOIs.
+    *xml_only*: the papers came back as full-text XML, not as nothing.
     """
     from .retrieval import institutional as _institutional
     from .get_cookies import PUBLISHER_NAMES, publisher_for_site
@@ -7084,16 +7285,17 @@ def _offer_cookie_import(failed, retry):
     covered = [d for p in publishers for d in by_publisher[p]]
     n = len(covered)
     noun = "paper" if n == 1 else "papers"
+    failed_noun = f"{noun} with no PDF (XML only)" if xml_only else f"failed {noun}"
     where = ", ".join(f"{PUBLISHER_NAMES[p]} {len(by_publisher[p])}" for p in publishers)
     who = _and_list([PUBLISHER_NAMES[p] for p in publishers])
     cfg = _institutional.load_access_config()
     print()
     if cfg is None:
-        print(f"🔐 {n} failed {noun} ({where}) may be available through your "
+        print(f"🔐 {n} {failed_noun} ({where}) may be available through your "
               f"library's subscriptions, by importing your browser's cookies.")
         command = f"fetchpdf fetchcookies --publishers {','.join(publishers)}"
     else:
-        print(f"🔐 {n} failed {noun} ({where}) are at publishers your library access "
+        print(f"🔐 {n} {failed_noun} ({where}) are at publishers your library access "
               f"covers. If your library sign-in there has lapsed, signing in again may get them.")
         command = f"fetchpdf cookies refresh --publishers {','.join(publishers)}"
     question = f"   Sign in to {who} through your library and retry them? [y/N]: "
@@ -7427,6 +7629,7 @@ def _batch_kwargs(args, json_out):
         download_related_unverified=args.download_related_unverified,
         draft_requests=args.draft_requests,
         make_subfolder=args.make_subfolder,
+        xml_fallback_extras=not args.no_xml_fallback_extras,
         json_out=json_out,
         cookies_file=args.cookies_file,
     )
@@ -7516,8 +7719,9 @@ def _main(argv=None, json_out=None):
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default="./pdfs",
-        help="Output directory for downloads (default: ./pdfs)"
+        default=None,
+        help="Output directory for downloads (default: ./pdfs; the current "
+             "directory with --make-subfolder)"
     )
     parser.add_argument(
         "--email",
@@ -7581,7 +7785,13 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--add-playwright",
         action="store_true",
-        help="Enable Playwright-based scrapers (publisher browser sessions, OSF browser). Disabled by default."
+        help="Enable Playwright-based scrapers (publisher browser sessions, OSF browser). "
+             "On by default whenever Playwright is installed; kept for old scripts."
+    )
+    parser.add_argument(
+        "--no-playwright",
+        action="store_true",
+        help="Skip the Playwright-based scrapers even when Playwright is installed."
     )
     parser.add_argument(
         "--start-from-row",
@@ -7681,6 +7891,14 @@ def _main(argv=None, json_out=None):
              "{stem}_from_xml.pdf with Chromium. A rendering of the XML, not the "
              "publisher's PDF, and never written as {stem}.pdf. Give both flags to "
              "keep both files. Needs: pip install 'fetchpdf[render,browser]'."
+    )
+    parser.add_argument(
+        "--no-xml-fallback-extras",
+        action="store_true",
+        help="When a record comes back as full-text XML only (no PDF could be had), "
+             "leave the .xml where it is. By default it is moved into its own "
+             "{stem}/ folder, its figures are fetched (as --pull-figures) and it is "
+             "rendered to {stem}_from_xml.pdf (as --generate-pdf-from-xml)."
     )
     parser.add_argument(
         "--target-task",
@@ -7785,10 +8003,11 @@ def _main(argv=None, json_out=None):
              "warning, if the CLI is absent or errors. Requires --download-data-artifacts."
     )
     parser.add_argument(
-        "--pull-everything",
+        "--fetch-everything", "--pull-everything", dest="fetch_everything",
         action="store_true",
-        help="Both retrieval layers at once: every API route (--pull-supplementary "
-             "--download-data-artifacts) plus an AI agent that reads the paper itself "
+        help="Everything possible at once: the PDF plus its XML/HTML (--get-xml-or-html) "
+             "and the publisher's figure images (--pull-figures), every API route "
+             "(--pull-supplementary --download-data-artifacts) plus an AI agent that reads the paper itself "
              "and goes after the supplementary files and datasets those routes did "
              "not get. SI lands beside the PDF as numbered siblings; linked deposits "
              "land in {stem}_data_artifacts/. NOT literally everything -- Wiley, ACS "
@@ -7831,14 +8050,14 @@ def _main(argv=None, json_out=None):
         "--llm-model",
         default="haiku",
         help="Model for --llm-adjudicate-artifacts and the retrieval agent "
-             "(--llm-agent-retrieval, --pull-everything). Claude names such as haiku "
+             "(--llm-agent-retrieval, --fetch-everything). Claude names such as haiku "
              "or sonnet; translated to OpenRouter slugs under --llm-backend openrouter "
              "(default: haiku)."
     )
     parser.add_argument(
         "--make-subfolder",
         action="store_true",
-        help="Give each record its own directory, {output_dir}/{safe_doi}/, named by the same "
+        help="Give each record its own directory, {output_dir}/{safe_doi}/ (output_dir defaults to the current directory here, not ./pdfs), named by the same "
              "DOI encoding used for the filenames, so folder and file stems match. Every "
              "artifact for a record (PDF, XML, abstract, provenance, linked artifacts, "
              "supplementary files) lands inside it; run-level files (failed_dois.csv, "
@@ -7888,6 +8107,13 @@ def _main(argv=None, json_out=None):
     )
 
     args = parser.parse_args(argv)
+    if args.output_dir is None:
+        # Per-record folders go straight into the cwd rather than under ./pdfs.
+        args.output_dir = "." if args.make_subfolder else "./pdfs"
+    # On whenever Playwright is installed; each browser route falls back
+    # quietly if Chromium itself is missing.
+    args.add_playwright = not args.no_playwright and (
+        args.add_playwright or _playwright_installed())
 
     # `fetchpdf DOI [OUTPUT]`, or a list the shell split into several words:
     # `fetchpdf 10.1/a, 10.2/b` arrives as ["10.1/a,", "10.2/b"]. Read every
@@ -7940,6 +8166,13 @@ def _main(argv=None, json_out=None):
             "rejected. Install one:  pip install pypdf  (or 'fetchpdf[better-text-images]')"
         )
 
+    # --fetch-everything also keeps the structured copy beside the PDF and the
+    # publisher's figure images beside that. The stricter --xml-only variants
+    # already keep XML, so they are left to say so themselves.
+    if args.fetch_everything:
+        if not (args.xml_only or args.xml_html_only):
+            args.get_xml_or_html = True
+        args.pull_figures = True
     # --xml-only and --upgrade-existing are meaningless outside the tier walk.
     if args.xml_only or args.xml_html_only or args.upgrade_existing or args.get_xml_or_html:
         args.prioritize_xml = True
@@ -7958,7 +8191,7 @@ def _main(argv=None, json_out=None):
         parser.error("--max-supplementary-mb must be a positive number of megabytes")
     if args.max_data_artifact_mb <= 0:
         parser.error("--max-data-artifact-mb must be a positive number of megabytes")
-    if args.pull_everything:
+    if args.fetch_everything:
         # One flag, both layers. Set before the checks below so it cannot trip
         # the error its own implications satisfy.
         args.pull_supplementary = True
@@ -8020,6 +8253,7 @@ def _main(argv=None, json_out=None):
         return 0
 
     # Batch from an existing corpus dir (decode folder names → DOIs).
+    dois_from_folders = None
     if args.input_from_dirs:
         if not os.path.isdir(args.input_from_dirs):
             print(f"❌ --input-from-dirs target is not a directory: {args.input_from_dirs}")
@@ -8030,23 +8264,13 @@ def _main(argv=None, json_out=None):
         if not dois_from_folders:
             print(f"❌ No safe-DOI-shaped subdirectories found under {args.input_from_dirs}")
             return 1
-        # Feed the discovered list through the same batch path used by --csv,
-        # by writing a temporary in-memory CSV. Keeps a single code path for
-        # start_from_row / workers / everything else the batch already handles.
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".csv", delete=False, encoding="utf-8",
-        )
-        tmp.write("DOI\n")
-        for d in dois_from_folders:
-            tmp.write(d + "\n")
-        tmp.close()
-        args.csv = tmp.name
+        # The discovered list goes through the same batch path as --csv, so
+        # start_from_row / workers / everything else the batch handles apply.
         print(f"📁 --input-from-dirs: discovered {len(dois_from_folders)} DOI(s) "
               f"from subdirectories of {args.input_from_dirs}")
 
     # Auto-detect CSV from positional input arg
-    if args.input and not args.csv and not args.pmid_csv:
+    if args.input and not args.csv and not args.pmid_csv and not dois_from_folders:
         if args.input.lower().endswith('.csv') and os.path.isfile(args.input):
             args.csv = args.input
             args.input = None
@@ -8058,7 +8282,7 @@ def _main(argv=None, json_out=None):
     # A comma-separated list on the command line runs as a batch, through the
     # same path as a CSV.
     id_list = None
-    if args.input and not args.csv and not args.pmid_csv:
+    if args.input and not args.csv and not args.pmid_csv and not dois_from_folders:
         id_list = split_identifier_list(args.input)
         if id_list and args.output_pos:
             print("❌ An output file path names one file; with a list of "
@@ -8072,10 +8296,13 @@ def _main(argv=None, json_out=None):
     args.output = args.output_pos
 
     # Batch mode from CSV or a comma-separated list
-    if args.csv or id_list:
+    if args.csv or id_list or dois_from_folders:
         if id_list:
             dois = id_list
             batch_source = "the command line"
+        elif dois_from_folders:
+            dois = list(dois_from_folders)
+            batch_source = args.input_from_dirs
         else:
             dois = _read_csv_column(args.csv, args.doi_column)
             batch_source = args.csv
@@ -8111,7 +8338,7 @@ def _main(argv=None, json_out=None):
             success_count += len(recovered)
 
         print("\n" + "=" * 60)
-        print(f"✅ Success: {success_count}/{len(dois)} ({success_count/len(dois)*100:.1f}%)")
+        print(f"✅ Success: {success_count}/{len(dois)} ({success_count/max(len(dois), 1)*100:.1f}%)")
         _report_unverified_keeps()
 
         if failed:
@@ -8163,7 +8390,7 @@ def _main(argv=None, json_out=None):
             success_count += len(recovered)
 
         print("\n" + "=" * 60)
-        print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/len(identifiers)*100:.1f}%)")
+        print(f"✅ Success: {success_count}/{len(identifiers)} ({success_count/max(len(identifiers), 1)*100:.1f}%)")
         _report_unverified_keeps()
 
         if failed:
@@ -8236,6 +8463,8 @@ def _main(argv=None, json_out=None):
                 os.makedirs(record_dir, exist_ok=True)
                 made_record_dir = record_dir
             save_path = os.path.join(record_dir, f"{safe_doi}.pdf")
+            if not args.make_subfolder:
+                save_path = _xml_fallback_save_path(save_path)
             print(f"💾 No output path provided; using: {save_path}")
 
         # Allocated the way the batch worker allocates them, and for the same
@@ -8275,15 +8504,23 @@ def _main(argv=None, json_out=None):
             want_provenance=args.provenance,
             cookies_file=args.cookies_file,
         )
-        if not result and _cookie_offer_applies(args):
+        # XML-only counts too: the library route may still have the PDF.
+        if ((not result or _is_xml_fallback(result, _tiered))
+                and _cookie_offer_applies(args)):
             retried = []
 
             def _retry_single(dois):
                 retried.append(fetch_pdf(doi=dois[0], save_path=save_path,
                                          _source_out=source_out, verbose=args.verbose))
                 return dois[:1] if retried[-1] else []
-            if _offer_cookie_import([resolved_identifier or args.doi], _retry_single):
+            if _offer_cookie_import([resolved_identifier or args.doi], _retry_single,
+                                    xml_only=bool(result)):
                 result = retried[-1]
+
+        # No PDF, only the XML: give it a folder, its figures, and a rendering.
+        xml_fallback = _is_xml_fallback(result, _tiered) and not args.no_xml_fallback_extras
+        if xml_fallback and not args.output:
+            result, save_path = _move_xml_fallback_to_own_folder(result, save_path)
 
         # A separate call rather than a parameter on fetch_pdf, and that
         # is the recursion guard: the tiered engine re-enters the chain at T5 via
@@ -8327,7 +8564,7 @@ def _main(argv=None, json_out=None):
 
         # Only for a record that was retrieved: figures with no article to go
         # with them are an empty `_figures/` and manifest in a failed record.
-        if args.pull_figures and result:
+        if (args.pull_figures or xml_fallback) and result:
             # A separate call above fetch_pdf, for the same reason the
             # supplementary pass is one: the tiered engine re-enters the chain
             # at T5 with a temporary save_path, and a flag threaded through
@@ -8353,14 +8590,14 @@ def _main(argv=None, json_out=None):
             except Exception as e:
                 print(f"\n🖼️  figure pass failed: {str(e)[:200]}")
 
-        if args.generate_html_from_xml or args.generate_pdf_from_xml:
+        if args.generate_html_from_xml or args.generate_pdf_from_xml or xml_fallback:
             from .retrieval.engine import _stem_for
             xml_path = _stem_for(save_path) + ".xml"
             if os.path.exists(xml_path):
                 try:
                     from .retrieval.to_html import render_record
                     outcome = render_record(xml_path, html=args.generate_html_from_xml,
-                                            pdf=args.generate_pdf_from_xml,
+                                            pdf=args.generate_pdf_from_xml or xml_fallback,
                                             verbose=args.verbose)
                     for key in ("html", "pdf"):
                         if outcome[key]:
@@ -8439,5 +8676,4 @@ def _main(argv=None, json_out=None):
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

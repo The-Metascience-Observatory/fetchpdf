@@ -27,9 +27,9 @@ from .artifact import Artifact, ValidationResult
 from .cache import ResolutionCache
 from .context import RetrievalContext
 from . import goals
-from .http import HttpClient
+from .http import HttpClient, apply_default_mode
 from .provenance import ProvenanceRecord, write_sidecar
-from .ratelimit import HostRateLimiter, shared_host_limiter
+from .ratelimit import shared_host_limiter
 from .resolve import BatchResolver
 from .tiers import ARTIFACT_EXTENSIONS, Tier, TIER_EXTENSIONS, load_ladder
 from .validate import validate_t1, validate_t2
@@ -186,6 +186,7 @@ def retrieve_tiered(
     if goalset.complete and not upgrade_existing:
         found = ", ".join(os.path.basename(p) for p in goalset.filled_paths())
         ctx.log(f"✅ Skipping {ids.best_id} - already exists: {found}")
+        _flush(resolver, owns_resolver)
         return RetrievalResult(
             path=goalset.filled_paths()[0], reason="already exists", goals=goalset,
         )
@@ -258,7 +259,6 @@ def retrieve_tiered(
                 validation = ValidationResult.failure(
                     f"validation raised: {type(e).__name__}: {str(e)[:120]}"
                 )
-                ctx.log(f"    ✗ {spec.name}: {validation.reason}")
             if provenance is not None:
                 provenance.attempt(
                     source=spec.name,
@@ -627,6 +627,7 @@ def _write_atomic(path: str, content: bytes) -> None:
     try:
         with os.fdopen(handle, "wb") as f:
             f.write(content)
+        apply_default_mode(temp_path)     # mkstemp's 0600 is for staging only
         os.replace(temp_path, path)
     except BaseException:
         try:

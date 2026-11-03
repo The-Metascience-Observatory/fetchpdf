@@ -42,7 +42,7 @@ import html as _html
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 #: How the address was found, most trustworthy first. Recorded on the Contact
 #: so a draft can show its provenance and a human can judge a stale address.

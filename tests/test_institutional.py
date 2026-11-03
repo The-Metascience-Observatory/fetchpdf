@@ -268,6 +268,61 @@ def test_every_pdf_publisher_has_a_landing_page():
     assert set(inst.PUBLISHER_PDF_TEMPLATES) == set(inst.PUBLISHER_ARTICLE_TEMPLATES)
 
 
+def test_a_publisher_is_covered_by_template_or_by_landing_page_not_both():
+    assert not set(inst.PUBLISHER_PDF_TEMPLATES) & set(inst.PUBLISHER_LANDING_SITES)
+    assert inst.covers("10.1073/pnas.1") and inst.covers("10.1158/0008-5472.can-1")
+    assert not inst.covers("10.1037/xge0000001")
+
+
+def test_cookies_are_read_for_landing_page_publishers_too():
+    sites = inst.cookie_sites()
+    assert {"pnas.org", "aacrjournals.org", "cshlp.org", "wiley.com"} <= set(sites)
+
+
+class _Page:
+    def __init__(self, url, text, status=200):
+        self.url, self.text, self.status_code, self.headers = url, text, status, {}
+
+
+def test_a_landing_page_publisher_is_fetched_from_its_declared_pdf(monkeypatch, tmp_path):
+    seen = []
+
+    def get(self, url, **kw):
+        seen.append({c.name for c in self.cookies})
+        if url.startswith("https://doi.org/"):
+            return _Page("https://aacrjournals.org/cancerres/article/81/8/1/2",
+                         '<meta name="citation_pdf_url" '
+                         'content="https://aacrjournals.org/cancerres/article-pdf/81/8/1/3/1.pdf">')
+        return _Response(200, b"%PDF-1.4 body")
+
+    monkeypatch.setattr(requests.Session, "get", get)
+    cookies = [{"name": "sess", "value": "v", "domain": ".aacrjournals.org"},
+               {"name": "other", "value": "x", "domain": ".wiley.com"}]
+    url, _ = inst.fetch_with_cookies("10.1158/0008-5472.can-1", tmp_path / "a.pdf", cookies)
+    assert url == "https://aacrjournals.org/cancerres/article-pdf/81/8/1/3/1.pdf"
+    assert (tmp_path / "a.pdf").read_bytes().startswith(b"%PDF")
+    assert seen and all(names <= {"sess"} for names in seen)
+
+
+def test_a_declared_http_pdf_link_is_upgraded_on_an_https_page():
+    html = '<meta content="http://genesdev.cshlp.org/content/1/2/3.full.pdf" name="citation_pdf_url">'
+    assert (inst.pdf_url_from_landing(html, "https://genesdev.cshlp.org/content/1/2/3")
+            == "https://genesdev.cshlp.org/content/1/2/3.full.pdf")
+
+
+def test_oncotarget_pdf_is_derived_from_its_landing_url():
+    assert (inst.pdf_url_from_landing("<html></html>",
+                                      "https://www.oncotarget.com/article/10748/text/",
+                                      "10.18632/oncotarget.10748")
+            == "https://www.oncotarget.com/article/10748/pdf/")
+
+
+def test_a_silverchair_crawl_gate_hands_over_to_the_browser(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests.Session, "get", lambda self, url, **kw: _Page(
+        "https://ashpublications.org/crawlprevention/governor?content=x", "<html></html>"))
+    assert inst.fetch_with_cookies("10.1182/blood.1", tmp_path / "a.pdf", []) == (None, True)
+
+
 # -- off by default; setup turns it on -----------------------------------------
 
 def test_access_is_off_until_setup_has_run():
