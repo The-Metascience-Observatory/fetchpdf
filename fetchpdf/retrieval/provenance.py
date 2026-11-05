@@ -82,7 +82,7 @@ class ProvenanceRecord:
     def accept(self, artifact, path: str, chunks=None, canonical_tokens: int = 0) -> None:
         """Record an accepted artifact.
 
-        Appends. A --get-xml-or-html walk accepts two (a structured copy and the
+        Appends. A --get-xml-or-html-and-pdf walk accepts two (a structured copy and the
         PDF), and an audit record for such a record has to describe both -- which
         one a number came from is the question this file exists to answer.
         `self.artifact` stays pointing at the first, best one for readers that

@@ -120,26 +120,56 @@ def single_best(tiers: Sequence[Tier]) -> GoalSet:
     return GoalSet([Goal(name="best", tiers=tuple(tiers))])
 
 
+def _ladder_goals(tiers: Sequence[Tier], slots) -> GoalSet:
+    """One goal per (name, tier-group) slot, skipping slots the ladder has no tier for."""
+    goals = []
+    for name, group in slots:
+        wanted = tuple(t for t in group if t in tiers)
+        if wanted:
+            goals.append(Goal(name=name, tiers=wanted))
+    # A ladder restricted to nothing the slots accept (only T6/T7, say) would give
+    # an empty goal set and a walk that accepts nothing. Fall back to the default
+    # rather than silently failing every record.
+    return GoalSet(goals) if goals else single_best(tiers)
+
+
 def structured_and_pdf(tiers: Sequence[Tier]) -> GoalSet:
-    """--get-xml-or-html: a structured copy AND the PDF.
+    """--get-xml-or-html-and-pdf: a structured copy (XML, else HTML) AND the PDF.
 
     Ordered structured-first so that when both are still open, a validated T1
     artifact is filed as the structured goal rather than being consumed by a
     broader one.
     """
-    structured = [t for t in _STRUCTURED_TIERS if t in tiers]
-    pdf = [t for t in (Tier.T5_PDF,) if t in tiers]
-    goals = []
-    if structured:
-        goals.append(Goal(name="structured", tiers=tuple(structured)))
-    if pdf:
-        goals.append(Goal(name="pdf", tiers=tuple(pdf)))
-    # A ladder restricted to neither (nothing but T6/T7, say) would give an empty
-    # goal set and a walk that accepts nothing. Fall back to the default rather
-    # than silently failing every record.
-    return GoalSet(goals) if goals else single_best(tiers)
+    return _ladder_goals(tiers, (("structured", _STRUCTURED_TIERS), ("pdf", (Tier.T5_PDF,))))
 
 
-def build(tiers: Sequence[Tier], get_xml_or_html: bool = False) -> GoalSet:
-    """The goal set for this walk."""
-    return structured_and_pdf(tiers) if get_xml_or_html else single_best(tiers)
+def xml_and_pdf(tiers: Sequence[Tier]) -> GoalSet:
+    """--get-xml-and-pdf: XML where it can be had, and the PDF where it can be had."""
+    return _ladder_goals(tiers, (("xml", (Tier.T1_XML,)), ("pdf", (Tier.T5_PDF,))))
+
+
+def xml_html_and_pdf(tiers: Sequence[Tier]) -> GoalSet:
+    """--get-xml-and-html-and-pdf: all three, each independently, as far as possible."""
+    return _ladder_goals(tiers, (
+        ("xml", (Tier.T1_XML,)), ("html", (Tier.T2_HTML,)), ("pdf", (Tier.T5_PDF,))))
+
+
+#: Values `build` accepts for its collect argument. True is the historical
+#: --get-xml-or-html boolean and means XML_OR_HTML_PDF.
+XML_OR_HTML_PDF = "xml_or_html_pdf"
+XML_PDF = "xml_pdf"
+XML_HTML_PDF = "xml_html_pdf"
+
+_BUILDERS = {
+    XML_OR_HTML_PDF: structured_and_pdf,
+    XML_PDF: xml_and_pdf,
+    XML_HTML_PDF: xml_html_and_pdf,
+}
+
+
+def build(tiers: Sequence[Tier], get_xml_or_html=False) -> GoalSet:
+    """The goal set for this walk. `get_xml_or_html` is False, True, or a mode name."""
+    if not get_xml_or_html:
+        return single_best(tiers)
+    mode = XML_OR_HTML_PDF if get_xml_or_html is True else get_xml_or_html
+    return _BUILDERS[mode](tiers)

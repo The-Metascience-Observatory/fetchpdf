@@ -292,7 +292,7 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
     # read from -- has no record of a DataCite DOI at all, so no title and no
     # page range are available either. Every arXiv PDF therefore reached the end
     # of this function with nothing checked and came back NO_REFERENCE, which the
-    # engine treats as a refusal: `--get-xml-or-html` on 10.48550/arXiv.2605.04265
+    # engine treats as a refusal: `--get-xml-or-html-and-pdf` on 10.48550/arXiv.2605.04265
     # fetched the PDF, threw it away, and kept only the HTML, contradicting the
     # flag it was asked for.
     #

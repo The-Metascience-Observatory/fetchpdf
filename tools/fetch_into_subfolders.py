@@ -15,7 +15,7 @@ picks up exactly where it stopped, because each folder carries its own
 resolution cache and its own skip-if-exists state.
 
 The PDFs already being present is not a problem, it is the point:
---get-xml-or-html pre-fills the `pdf` goal from disk, so each record fetches only
+--get-xml-or-html-and-pdf pre-fills the `pdf` goal from disk, so each record fetches only
 the structured half it is missing and re-downloads nothing.
 """
 

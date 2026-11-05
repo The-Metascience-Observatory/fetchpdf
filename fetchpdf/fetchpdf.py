@@ -1039,7 +1039,7 @@ def defers_existing_to_engine(tiered: bool, upgrade_existing: bool,
     record:
 
       --upgrade-existing   is looking for a BETTER tier than what is here
-      --get-xml-or-html    is looking for the MISSING HALF of a pair
+      --get-xml-or-html-and-pdf    is looking for the MISSING HALF of a pair
 
     Skipping in the worker defeats both. It cost a silent no-op once already: a
     directory of PDFs reported every record "already exists" and gained no XML at
@@ -4471,7 +4471,7 @@ def _fetch_pdf_chain(doi,
         elif result.path:
             _record_source(_source_out, "existing")
         # The return stays a single path, because every caller treats it as one.
-        # A --get-xml-or-html walk produces two, so the rest go out through this
+        # A --get-xml-or-html-and-pdf walk produces two, so the rest go out through this
         # list -- the same mutable-out-param idiom as _source_out above.
         if to_markdown:
             # Convert here rather than in the batch worker so single-DOI runs get
@@ -6555,7 +6555,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         # decision to the engine, which will only write on a better tier.
         stem = os.path.splitext(save_path)[0]
         existing_file = None
-        # Both --upgrade-existing and --get-xml-or-html defer the
+        # Both --upgrade-existing and --get-xml-or-html-and-pdf defer the
         # already-have-it decision to the engine, which reasons per goal: one
         # looks for a better tier, the other for the *missing half* of a pair.
         # Skipping here on any single artifact would defeat both -- a directory of
@@ -6647,7 +6647,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
         _pull_images(result or save_path, display_id)
 
         if success:
-            # A --get-xml-or-html record has two artifacts. Both are counted, and
+            # A --get-xml-or-html-and-pdf record has two artifacts. Both are counted, and
             # the line names the pair ("xml+pdf") instead of only the best one.
             # paths_out's last element is the goal summary; the rest are paths.
             paths_out = paths_out or []
@@ -6702,7 +6702,7 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
 
         identity, reasons = _identity_and_reasons(result, save_path)
         # The tiered engine hands back a file it found on disk as source
-        # "existing" (--upgrade-existing, --get-xml-or-html): nothing was
+        # "existing" (--upgrade-existing, --get-xml-or-html-and-pdf): nothing was
         # fetched, so it is not "downloaded" -- the same rule as single-DOI.
         if not success:
             json_status = JSON_STATUS_FAILED
@@ -7836,13 +7836,29 @@ def _main(argv=None, json_out=None):
              "publisher HTML, then stop. Never writes a PDF. Implies --prioritize-xml."
     )
     parser.add_argument(
-        "--get-xml-or-html",
+        "--get-xml-or-html-and-pdf",
+        dest="get_xml_or_html_and_pdf",
         action="store_true",
         help="Keep BOTH a structured copy (XML, else publisher HTML) AND the PDF, "
              "instead of stopping at the best single format. Skips tiers that fill "
              "neither slot (LaTeX source, supplements, landing pages). Doubles as a "
              "backfill: pointed at a directory of existing PDFs it fetches only the "
              "missing structured half and re-downloads nothing. Implies --prioritize-xml."
+    )
+    parser.add_argument(
+        "--get-xml-and-pdf",
+        dest="get_xml_and_pdf",
+        action="store_true",
+        help="Keep the XML when one can be had AND the PDF when one can be had, each "
+             "independently. Publisher HTML is never kept. Backfills like "
+             "--get-xml-or-html-and-pdf. Implies --prioritize-xml."
+    )
+    parser.add_argument(
+        "--get-xml-and-html-and-pdf",
+        dest="get_xml_and_html_and_pdf",
+        action="store_true",
+        help="Keep the XML, the publisher HTML and the PDF, each to the extent it can "
+             "be had. Backfills like --get-xml-or-html-and-pdf. Implies --prioritize-xml."
     )
     parser.add_argument(
         "--to-markdown",
@@ -7881,7 +7897,7 @@ def _main(argv=None, json_out=None):
              "{stem}_from_xml.html: one self-contained page with tables and figure "
              "images embedded, nothing loaded from the network. Implies "
              "--pull-figures. Only records whose XML was kept are rendered; add "
-             "--get-xml-or-html to keep it beside the PDF. Run fetchpdf-render on "
+             "--get-xml-or-html-and-pdf to keep it beside the PDF. Run fetchpdf-render on "
              "a directory for XML you already have. Needs: pip install 'fetchpdf[render]'."
     )
     parser.add_argument(
@@ -8005,7 +8021,7 @@ def _main(argv=None, json_out=None):
     parser.add_argument(
         "--fetch-everything", "--pull-everything", dest="fetch_everything",
         action="store_true",
-        help="Everything possible at once: the PDF plus its XML/HTML (--get-xml-or-html) "
+        help="Everything possible at once: the PDF plus its XML/HTML (--get-xml-or-html-and-pdf) "
              "and the publisher's figure images (--pull-figures), every API route "
              "(--pull-supplementary --download-data-artifacts) plus an AI agent that reads the paper itself "
              "and goes after the supplementary files and datasets those routes did "
@@ -8166,11 +8182,22 @@ def _main(argv=None, json_out=None):
             "rejected. Install one:  pip install pypdf  (or 'fetchpdf[better-text-images]')"
         )
 
+    # The three --get-* flags are one setting: which formats are kept beside the PDF.
+    # Everything downstream reads args.get_xml_or_html (False, or a goals mode).
+    chosen = [mode for mode, on in (
+        ("xml_or_html_pdf", args.get_xml_or_html_and_pdf),
+        ("xml_pdf", args.get_xml_and_pdf),
+        ("xml_html_pdf", args.get_xml_and_html_and_pdf)) if on]
+    if len(chosen) > 1:
+        parser.error("--get-xml-or-html-and-pdf, --get-xml-and-pdf and "
+                     "--get-xml-and-html-and-pdf are alternatives; give only one")
+    args.get_xml_or_html = chosen[0] if chosen else False
+
     # --fetch-everything also keeps the structured copy beside the PDF and the
     # publisher's figure images beside that. The stricter --xml-only variants
     # already keep XML, so they are left to say so themselves.
     if args.fetch_everything:
-        if not (args.xml_only or args.xml_html_only):
+        if not (args.xml_only or args.xml_html_only or args.get_xml_or_html):
             args.get_xml_or_html = True
         args.pull_figures = True
     # --xml-only and --upgrade-existing are meaningless outside the tier walk.
@@ -8221,7 +8248,7 @@ def _main(argv=None, json_out=None):
     if args.get_xml_or_html and (args.xml_only or args.xml_html_only):
         other = "--xml-only" if args.xml_only else "--xml-html-only"
         _print_yellow_warning(
-            f"❌ --get-xml-or-html keeps a PDF alongside the structured copy, and "
+            f"❌ the --get-xml-*-and-pdf flags keep a PDF alongside the structured copy, and "
             f"{other} forbids writing a PDF at all. These cannot both hold -- drop one."
         )
         return 2
@@ -8610,7 +8637,7 @@ def _main(argv=None, json_out=None):
                 print("\n🖨️  no XML could be retrieved for this record, so nothing to render")
             else:
                 print("\n🖨️  no .xml was kept for this record, so nothing to render "
-                      "(add --get-xml-or-html)")
+                      "(add --get-xml-or-html-and-pdf)")
 
         if args.extract_images:
             pdf = None

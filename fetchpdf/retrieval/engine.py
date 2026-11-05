@@ -77,7 +77,8 @@ class RetrievalResult:
 
     @property
     def structured_path(self) -> Optional[str]:
-        return self.path_for("structured")
+        return (self.path_for("structured") or self.path_for("xml")
+                or self.path_for("html"))
 
     @property
     def pdf_path(self) -> Optional[str]:
@@ -197,7 +198,7 @@ def retrieve_tiered(
         if goalset.complete:
             break
         if tier not in goalset.wanted_tiers():
-            # No unfilled goal accepts this tier. Under --get-xml-or-html that
+            # No unfilled goal accepts this tier. Under --get-xml-or-html-and-pdf that
             # skips T3/T4/T7 outright: a LaTeX tarball or a landing page fills
             # neither the structured nor the PDF slot, so trying them would only
             # cost time.
@@ -418,7 +419,7 @@ def _judge(artifact: Artifact, expected: Tier, ctx, order: List[Tier],
             f"content is {artifact.tier.name}, not {expected.name}"
         )
 
-    # Nothing left to put it in. Under --get-xml-or-html this is what stops a
+    # Nothing left to put it in. Under --get-xml-or-html-and-pdf this is what stops a
     # second XML artifact overwriting the first one, and it is recorded as a
     # demotion reason rather than a silent drop.
     if goalset is not None and goalset.goal_for(artifact.tier) is None:
@@ -650,7 +651,7 @@ def _flush(resolver, owns_resolver: bool) -> None:
 def _fill_goals_from_disk(goalset, stem: str, ctx) -> None:
     """Pre-fill any goal whose artifact is already on disk.
 
-    Per goal, not per record: that is what turns --get-xml-or-html into a backfill
+    Per goal, not per record: that is what turns --get-xml-or-html-and-pdf into a backfill
     over an existing PDF inventory. A directory full of PDFs has its `pdf` goal
     satisfied and only the structured half fetched, and no PDF is touched.
     """

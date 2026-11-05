@@ -155,7 +155,7 @@ papers your library subscribes to. See
 By default a record yields one file: the best PDF the source chain finds. Three
 flags widen that.
 
-1. **Structured full text** — `--get-xml-or-html` keeps a JATS/TEI XML (else
+1. **Structured full text** — `--get-xml-or-html-and-pdf` keeps a JATS/TEI XML (else
    publisher HTML) copy alongside the PDF; `--to-markdown` also renders it to
    `{stem}_from_xml.md` (or `{stem}_from_html.md`). XML and HTML are great
    formats for using with AI (LLMs): complex tables usually survive better than
@@ -175,7 +175,7 @@ flags widen that.
 
 ```bash
 fetchpdf papers.csv -o ./out -w 4 \
-    --get-xml-or-html --to-markdown \
+    --get-xml-or-html-and-pdf --to-markdown \
     --download-data-artifacts \
     --make-subfolder --provenance
 ```
@@ -404,10 +404,10 @@ fetchpdf papers.csv -o ./out --xml-html-only    # XML or publisher HTML
 fetchpdf papers.csv -o ./out --xml-only         # XML, nothing else
 
 # A structured copy AND the PDF for every record
-fetchpdf papers.csv -o ./out --get-xml-or-html
+fetchpdf papers.csv -o ./out --get-xml-or-html-and-pdf
 
 # ...and a {stem}_from_xml.md / _from_html.md for each XML/HTML artifact
-fetchpdf papers.csv -o ./out --get-xml-or-html --to-markdown
+fetchpdf papers.csv -o ./out --get-xml-or-html-and-pdf --to-markdown
 
 # Convert artifacts you already have, without re-downloading
 fetchpdf-md ./out
@@ -425,7 +425,7 @@ supplement keeps its own extension, e.g. `{stem}.xlsx`), `{stem}.pdf`,
 `{stem}.txt` and `{stem}.landing.html` — plus `{stem}_from_xml.md` /
 `{stem}_from_html.md` under `--to-markdown`.
 
-`--get-xml-or-html` doubles as a backfill: pointed at a directory of existing
+`--get-xml-or-html-and-pdf` doubles as a backfill: pointed at a directory of existing
 PDFs it fetches only the missing structured half and re-downloads nothing.
 
 ### Choosing a flag
@@ -435,7 +435,9 @@ PDFs it fetches only the missing structured half and re-downloads nothing.
 | `--prioritize-xml` | everything, best format first | yes |
 | `--xml-html-only` | T1 XML, T2 HTML | **no** — record fails |
 | `--xml-only` | T1 XML | **no** — record fails |
-| `--get-xml-or-html` | structured **and** PDF, both kept | yes, and keeps it |
+| `--get-xml-or-html-and-pdf` | structured **and** PDF, both kept | yes, and keeps it |
+| `--get-xml-and-pdf` | XML where available **and** PDF where available, both kept | yes, and keeps it |
+| `--get-xml-and-html-and-pdf` | XML, publisher HTML and PDF, each to the extent available | yes, and keeps it |
 
 `--xml-only` and `--xml-html-only` both imply `--prioritize-xml`. Given both,
 `--xml-only` is stricter and wins (with a warning).
@@ -536,7 +538,7 @@ suppressed when the answer is already known: any flag that turns the
 supplementary pass on (`--pull-supplementary`, `--refresh-supplementary`,
 `--download-data-artifacts`, `--fetch-everything`, `--llm-agent-retrieval`), an
 explicit `--on-existing skip` or `supplement`, `--abstract-only`, or the
-goal-aware flags (`--get-xml-or-html`, `--upgrade-existing` on the tiered path),
+goal-aware flags (`--get-xml-or-html-and-pdf`, `--upgrade-existing` on the tiered path),
 which do not skip records at all. Single-identifier runs never ask.
 
 What is *not* remembered between runs: failures. `failed_dois.csv` is a report,
@@ -790,7 +792,7 @@ model that reads the paper itself and goes after what layer 1 did not get.
 fetchpdf papers.csv -o ./out --make-subfolder --provenance --fetch-everything
 ```
 
-`--fetch-everything` implies `--get-xml-or-html` (XML, else HTML, beside the PDF
+`--fetch-everything` implies `--get-xml-or-html-and-pdf` (XML, else HTML, beside the PDF
 where one exists), `--pull-figures` (the publisher's figure images beside the
 XML), `--pull-supplementary` and
 `--download-data-artifacts`, turns on adjudication of the deterministic scan's
@@ -968,7 +970,7 @@ from the network. `--generate-pdf-from-xml` prints the same page to
 
 ```bash
 pip install 'fetchpdf[render,browser]' && playwright install chromium
-fetchpdf papers.csv -o ./out --get-xml-or-html --generate-pdf-from-xml
+fetchpdf papers.csv -o ./out --get-xml-or-html-and-pdf --generate-pdf-from-xml
 fetchpdf-render ./out --html --pdf --fetch-figures   # XML you already have
 ```
 
@@ -986,7 +988,7 @@ shaped by its aspect ratio and capped at the column width. Under the title come
 the authors, their affiliations and the journal citation (volume, issue, pages).
 Tables always fit the page width in the PDF; very wide ones print smaller.
 
-Only records whose XML was kept are rendered — add `--get-xml-or-html` to keep
+Only records whose XML was kept are rendered — add `--get-xml-or-html-and-pdf` to keep
 the XML beside the PDF.
 
 ## Institutional access via cookies (ie using your library's subscriptions)
@@ -1103,7 +1105,7 @@ spends a subscription download. It runs before the slow long tail (Crossref
 landing pages, CORE, DOAJ, DataCite, ...), where a subscription answers in a
 second or two. The PDF meets the same identity check as every other source and
 is reported as `institutional_cookies` in source tracking and `--json`. It also
-fills the PDF half of `--get-xml-or-html` runs.
+fills the PDF half of `--get-xml-or-html-and-pdf` runs.
 
 ### Sign-in, the VPN, and Cloudflare
 
@@ -1187,9 +1189,9 @@ refusal, not a bare failure:
 | `path` | str \| null | Absolute path to the artifact, or null. |
 | `format` | str | From the artifact actually written: `pdf`, `xml`, `html`, `latex`, `landing`, `suppl`, `abstract`, `text`, `other`. **A successful record is not necessarily a PDF** — with the default XML fallback a record can succeed as `xml`. |
 | `source` | str \| null | The route that produced it (`unpaywall`, `core`, `osf`, …), `existing` for a skip, `structured_fallback` when no PDF was available and structured full text was saved instead. |
-| `identity` | str \| null | The verdict on the PDF **fetched in this run and reported in `path`**: `verified`, or a refusal — `wrong_article`, `truncated`, `unreadable`, `no_reference`, `no_engine`. Null when nothing was judged: an XML artifact, a file already on disk, or any run under the tiered flags (`--prioritize-xml`, `--get-xml-or-html`, `--xml-only`, `--xml-html-only`), where the engine validates per tier instead. A success with a non-`verified` identity is a PDF that was kept rather than deleted because the verdict could not be trusted — see [the identity check](#format-prioritized-retrieval) — not one that passed. |
+| `identity` | str \| null | The verdict on the PDF **fetched in this run and reported in `path`**: `verified`, or a refusal — `wrong_article`, `truncated`, `unreadable`, `no_reference`, `no_engine`. Null when nothing was judged: an XML artifact, a file already on disk, or any run under the tiered flags (`--prioritize-xml`, `--get-xml-or-html-and-pdf`, `--xml-only`, `--xml-html-only`), where the engine validates per tier instead. A success with a non-`verified` identity is a PDF that was kept rather than deleted because the verdict could not be trusted — see [the identity check](#format-prioritized-retrieval) — not one that passed. |
 | `reasons` | list[str] | Why a record failed, or why a kept PDF could not be verified. Empty on a verified success. |
-| `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html`), empty otherwise. `path` is not repeated here. |
+| `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html-and-pdf`), empty otherwise. `path` is not repeated here. |
 | `supplementary` | object | Only with `--pull-supplementary` (or a flag that implies it): `status` (`ok`, `none_found`, `partial`, `incomplete`, `error`, `skipped`), `written`, `skipped`, `manifest` (absolute path or null), `missing_declared` (files the article declares that were not obtained) and `blocked_urls` (refused to this client; open them in a browser). |
 | `figures` | object | Only with `--pull-figures`: `status`, `written`, `failed`, `refusal` and `manifest`. |
 | `images` | object | Only with `--extract-images`: `status`, `written` and `manifest`. |
@@ -1427,7 +1429,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
       records whose key is entitled to the XML but not the PDF, and covers
       ScienceDirect DOIs outside `10.1016/*`. It does not repeat a PDF request the
       early step already made. The XML half is skipped with `--no-xml-fallback`.
-    - With `--prioritize-xml` / `--xml-only` / `--get-xml-or-html` the tiered
+    - With `--prioritize-xml` / `--xml-only` / `--get-xml-or-html-and-pdf` the tiered
       ladder asks the same endpoint itself (`elsevier_tdm` at T1, `elsevier_pdf`
       at T5, ahead of the legacy chain).
     - **Off campus?** Entitlement is decided by your IP unless you also set
