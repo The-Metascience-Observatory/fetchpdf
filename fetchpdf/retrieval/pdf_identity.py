@@ -160,6 +160,44 @@ PAGE_COUNT_MIN_SPAN = 2
 
 _PAGE_RANGE_RE = re.compile(r"^\s*(?:[A-Za-z]*)(\d+)\s*(?:[-–—]\s*(?:[A-Za-z]*)(\d+))?\s*$")
 
+#: S1 on its own is not enough when the front pages are legible and do not carry
+#: the title (issue #5). The requested DOI is printed by the paper itself, but
+#: also by a paper that CITES it and by the article's own supplementary file:
+#: fetch_pdf("10.1037/0022-3514.74.6.1464") wrote 10.5964/meth.7155, whose
+#: abstract reads "(IAT; Greenwald et al., 1998. DOI: 10.1037/0022-3514.74.6.1464)",
+#: and the Supplementary Information PDF for 10.1038/nature08833 prints
+#: "doi: 10.1038/nature08833" on page 1. Measured over 121 cached PDFs whose DOI
+#: was found in the text, scoring the Crossref title against the front two pages:
+#: the citing paper 0.52, the supplement 0.64, a line-numbered medRxiv preprint
+#: (correct) 0.76, the other 118 correct papers >= 0.97. 0.70 sits in the gap; it
+#: is narrow, so a page too short to judge (LEGIBLE_FRONT_CHARS) keeps the DOI
+#: verdict rather than risk refusing a correct scan.
+DOI_TITLE_PAGES = 2
+DOI_TITLE_MIN = 0.70
+
+#: The same DOI printed inside an author-year citation -- "Greenwald et al.,
+#: 1998. DOI: 10.1037/...", "(Smith & Jones, 2020, https://doi.org/...)" -- is a
+#: reference to the paper, not the paper's own masthead. Matched on the text
+#: just before the DOI, so it also works when no title is known to compare.
+_CITED_BEFORE_DOI_RE = re.compile(
+    r"(?:et\s+al\.?|&\s*[a-z][a-z'\-]+|\band\s+[a-z][a-z'\-]+)"   # et al. / & Name / and Name
+    r"[\s,]*\(?\s*(?:1[89]|20)\d{2}[a-z]?\s*\)?"                     # , 1998 / (1998) / 2020a
+    r"\s*[.,;:]?\s*"
+    r"(?:doi\s*[:.]?\s*|(?:https?\s*:\s*//\s*)?(?:dx\s*\.\s*)?doi\s*\.\s*org\s*/\s*)?$",
+    re.IGNORECASE,
+)
+#: How far before the DOI the author-year pattern may end, and how far back a
+#: "cite this article" line may start. A paper's own front matter often prints
+#: a suggested citation in exactly the cited shape ("Cite this article as: Smith
+#: et al., 2021. https://doi.org/..."), and that is the paper's own DOI.
+CITED_CONTEXT_CHARS = 80
+OWN_CITATION_LINE_CHARS = 400
+_OWN_CITATION_RE = re.compile(
+    r"cite\s+(?:this|the)\s+(?:article|paper|chapter|work|preprint)|please\s+cite"
+    r"|how\s+to\s+cite|citation\s*:|recommended\s+citation|cite\s+as",
+    re.IGNORECASE,
+)
+
 #: Embedded titles that carry no identity: a converter's leftovers, a filename,
 #: a template default. Present in a large minority of real PDFs, and treating
 #: them as "declares a different article" would reject correct files.
@@ -279,11 +317,24 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
 
     # S1: the requested DOI, printed on the paper. True of essentially every
     # version of record, and squashing means a line break inside it is harmless.
+    # Not on its own, though, when the DOI is only cited, or when the front pages
+    # are legible and do not carry the title (DOI_TITLE_MIN): then the later
+    # signals decide, and a refusal says the DOI was seen and why it did not count.
+    doi_discounted = ""
     if doi:
         wanted = squash(normalise_doi(doi))
         if wanted and wanted in squashed_page:
-            return truncated or IdentityVerdict(
-                VERIFIED, "requested DOI found in the PDF text", ["doi-in-text"])
+            if _doi_only_cited(text, doi):
+                doi_discounted = "only inside a citation"
+            elif title:
+                two_pages = squash(reader.text(DOI_TITLE_PAGES) or text)
+                fraction = matched_fraction(squash(title), two_pages)
+                if len(two_pages) >= LEGIBLE_FRONT_CHARS and fraction < DOI_TITLE_MIN:
+                    doi_discounted = ("but its front pages carry only {:.0%} of the "
+                                      "title".format(fraction))
+            if not doi_discounted:
+                return truncated or IdentityVerdict(
+                    VERIFIED, "requested DOI found in the PDF text", ["doi-in-text"])
 
     # S1b: the arXiv id, stamped down the margin of every PDF arXiv serves. It
     # is S1 for a class of record that S1 cannot reach and neither can S2-S4:
@@ -410,9 +461,22 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
                 "so it cannot be checked against {}".format(
                     len(squashed_page), DOI_PAGES, doi or "the requested record"),
             )
+        if doi_discounted:
+            return IdentityVerdict(
+                WRONG,
+                'PDF prints the requested DOI {}, so it is not taken as "{}" '
+                "(likely a paper citing it, or its supplement)".format(
+                    doi_discounted, _clip(title)),
+            )
         return IdentityVerdict(
             WRONG,
             'PDF does not contain the requested DOI or the title "{}"'.format(_clip(title)),
+        )
+    if doi_discounted:
+        return IdentityVerdict(
+            NO_REFERENCE,
+            "PDF prints {} {}, and no title is known to check it against".format(
+                doi or "the requested DOI", doi_discounted),
         )
     return IdentityVerdict(
         NO_REFERENCE,
@@ -628,6 +692,32 @@ def _read_text(source, pages: Optional[int]) -> Optional[str]:
 def _is_generic_title(embedded: str) -> bool:
     stripped = (embedded or "").strip()
     return bool(_GENERIC_TITLE_RE.match(stripped) or _FILENAME_TITLE_RE.match(stripped))
+
+
+def _doi_only_cited(text: str, doi: str) -> bool:
+    """Whether every place `doi` is printed in `text` is inside a citation.
+
+    True only when the DOI appears at least once and each appearance follows an
+    author-year citation ("et al., 1998. DOI:") with no "cite this article" line
+    before it. A DOI printed once in a masthead and once in a citation is the
+    paper's own, so one non-citation appearance is enough to say False.
+    """
+    wanted = normalise_doi(doi)
+    if not wanted:
+        return False
+    # Line wraps land anywhere inside a DOI, so allow whitespace between its characters.
+    pattern = re.compile(r"\s*".join(re.escape(c) for c in wanted), re.IGNORECASE)
+    hits = list(pattern.finditer(text))
+    if not hits:
+        return False
+    for hit in hits:
+        before = text[max(0, hit.start() - CITED_CONTEXT_CHARS):hit.start()]
+        if not _CITED_BEFORE_DOI_RE.search(before):
+            return False
+        line_window = text[max(0, hit.start() - OWN_CITATION_LINE_CHARS):hit.start()]
+        if _OWN_CITATION_RE.search(line_window):
+            return False
+    return True
 
 
 def _clip(text: str, limit: int = 70) -> str:

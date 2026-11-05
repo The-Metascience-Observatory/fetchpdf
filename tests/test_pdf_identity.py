@@ -14,6 +14,7 @@ from conftest import text_pdf
 from fetchpdf.retrieval import pdf_identity
 from fetchpdf.retrieval.pdf_identity import (
     NO_ENGINE,
+    NO_REFERENCE,
     TRUNCATED,
     UNREADABLE,
     VERIFIED,
@@ -583,3 +584,106 @@ def test_a_wall_is_discarded_even_when_metadata_is_unreachable(tmp_path, monkeyp
     monkeypatch.setattr(fpd, "_title_for", lambda doi, verbose=False: None)   # Crossref down
     assert fpd._accept_downloaded_pdf(str(path), DOI) is False
     assert not os.path.exists(path)
+
+
+# --------------------------------------------------------------------------
+# The requested DOI is printed, but not as this paper's own (issue #5)
+# --------------------------------------------------------------------------
+
+IAT_DOI = "10.1037/0022-3514.74.6.1464"
+IAT_TITLE = ("Measuring individual differences in implicit cognition: "
+             "The implicit association test")
+CITING_TITLE = ("Filling the gap between implicit associations and behavior: "
+                "A linear mixed-effects Rasch analysis of the Implicit Association Test")
+CITING_PROSE = ["Participants completed the task in a single session and responses "
+                "were modelled with crossed random effects for items and persons."] * 8
+
+
+def test_paper_citing_the_doi_is_not_accepted_as_it(tmp_path):
+    """10.5964/meth.7155, fetched for the 1998 IAT paper (issue #5).
+
+    Its abstract prints the requested DOI inside a citation. Before the fix the
+    DOI alone accepted it.
+    """
+    path = _pdf(tmp_path, "citing.pdf", [
+        CITING_TITLE,
+        "The measure obtained from the Implicit Association Test (IAT; Greenwald",
+        f"et al., 1998. DOI: {IAT_DOI}) is often used to predict behaviour.",
+    ] + CITING_PROSE)
+    verdict = verify_pdf_identity(path, IAT_DOI, IAT_TITLE)
+    assert verdict.state == WRONG
+    assert "only inside a citation" in verdict.reason
+
+
+def test_paper_citing_the_doi_is_not_accepted_when_no_title_is_known(tmp_path):
+    """The citation shape alone is enough to refuse: there is no title to check."""
+    path = _pdf(tmp_path, "citing-untitled.pdf", [
+        CITING_TITLE,
+        f"(Greenwald, McGhee, & Schwartz, 1998, https://doi.org/{IAT_DOI}).",
+    ] + CITING_PROSE)
+    verdict = verify_pdf_identity(path, IAT_DOI, None)
+    assert verdict.state == NO_REFERENCE
+    assert "only inside a citation" in verdict.reason
+
+
+def test_supplement_printing_the_doi_without_the_title_is_not_accepted(tmp_path):
+    """The Supplementary Information PDF for 10.1038/nature08833 prints the
+    article DOI on page 1 but not its title (0.64 of it, measured)."""
+    path = _pdf(tmp_path, "si.pdf", [
+        "SUPPLEMENTARY INFORMATION",
+        "doi: 10.1038/nature08833",
+        "Supplementary Methods, Supplementary Figures S1-S12 and Supplementary Tables S1-S4",
+    ] + ["Supplementary Figure legends and additional methods for the cohort "
+         "analyses, including sequencing depth and quality filters."] * 8)
+    verdict = verify_pdf_identity(path, "10.1038/nature08833", TITLE)
+    assert verdict.state == WRONG
+    assert "carry only" in verdict.reason
+
+
+def test_own_suggested_citation_still_counts_as_the_papers_doi(tmp_path):
+    """The false-reject guard for the citation rule. Front matter often prints the
+    paper's own suggested citation in exactly the cited shape."""
+    path = _pdf(tmp_path, "own-cite.pdf", [
+        "Cite this article as: Smith et al., 2021.",
+        f"https://doi.org/{DOI}",
+    ] + PROSE)
+    verdict = verify_pdf_identity(path, DOI, None)
+    assert verdict.state == VERIFIED
+    assert verdict.signals == ["doi-in-text"]
+
+
+def test_doi_in_masthead_and_in_a_citation_is_the_papers_own(tmp_path):
+    """One appearance outside a citation is enough to keep S1."""
+    path = _pdf(tmp_path, "masthead.pdf", [
+        f"https://doi.org/{DOI}",
+        f"As reported earlier (Smith et al., 2021. doi: {DOI}), the index held.",
+    ] + PROSE)
+    verdict = verify_pdf_identity(path, DOI, None)
+    assert verdict.state == VERIFIED
+    assert verdict.signals == ["doi-in-text"]
+
+
+def test_line_numbered_preprint_with_a_partly_legible_title_keeps_the_doi(tmp_path):
+    """A line-numbered medRxiv preprint (correct paper) scored 0.76: above the bar."""
+    words = TITLE.split()
+    half = len(words) // 2
+    numbered = [f"1 {' '.join(words[:half])}", "2 3 4 5 6", f"7 {' '.join(words[half:])}"]
+    path = _pdf(tmp_path, "medrxiv.pdf", numbered + [f"doi: {DOI}"] + PROSE)
+    from fetchpdf.retrieval._util import matched_fraction, squash
+    front = squash("\n".join(numbered + [f"doi: {DOI}"] + PROSE))
+    assert matched_fraction(squash(TITLE), front) >= pdf_identity.DOI_TITLE_MIN
+    verdict = verify_pdf_identity(path, DOI, TITLE)
+    assert verdict.state == VERIFIED
+
+
+def test_garbled_front_page_keeps_the_doi_verdict(tmp_path):
+    """Too little text to judge the title: the DOI is still trusted."""
+    # Between MIN_FRONT_CHARS (read at all) and LEGIBLE_FRONT_CHARS (judged).
+    stamp = ["Downloaded from https://academic.example.org by guest on June 5, 2016"] * 4
+    path = _pdf(tmp_path, "scan.pdf", [f"doi:{DOI}"] + stamp)
+    from fetchpdf.retrieval._util import squash
+    chars = len(squash(chr(10).join([f"doi:{DOI}"] + stamp)))
+    assert pdf_identity.MIN_FRONT_CHARS <= chars < pdf_identity.LEGIBLE_FRONT_CHARS, chars
+    verdict = verify_pdf_identity(path, DOI, TITLE)
+    assert verdict.state == VERIFIED
+    assert verdict.signals == ["doi-in-text"]
