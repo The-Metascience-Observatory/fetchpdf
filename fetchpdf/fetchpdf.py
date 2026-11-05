@@ -8189,8 +8189,12 @@ def _main(argv=None, json_out=None):
         ("xml_pdf", args.get_xml_and_pdf),
         ("xml_html_pdf", args.get_xml_and_html_and_pdf)) if on]
     if len(chosen) > 1:
-        parser.error("--get-xml-or-html-and-pdf, --get-xml-and-pdf and "
-                     "--get-xml-and-html-and-pdf are alternatives; give only one")
+        parser.error(
+            "--get-xml-or-html-and-pdf, --get-xml-and-pdf and "
+            "--get-xml-and-html-and-pdf are alternatives; give only one.\n"
+            "  --get-xml-or-html-and-pdf    XML (else HTML) + PDF\n"
+            "  --get-xml-and-pdf            XML + PDF, never HTML\n"
+            "  --get-xml-and-html-and-pdf   XML + HTML + PDF, each where available")
     args.get_xml_or_html = chosen[0] if chosen else False
 
     # --fetch-everything also keeps the structured copy beside the PDF and the
@@ -8249,7 +8253,9 @@ def _main(argv=None, json_out=None):
         other = "--xml-only" if args.xml_only else "--xml-html-only"
         _print_yellow_warning(
             f"❌ the --get-xml-*-and-pdf flags keep a PDF alongside the structured copy, and "
-            f"{other} forbids writing a PDF at all. These cannot both hold -- drop one."
+            f"{other} forbids writing a PDF at all. These cannot both hold -- drop one.\n"
+            f"   Want structured text only, no PDF?  Use {other} by itself.\n"
+            f"   Want the PDF too?  Drop {other} and keep the --get-xml-*-and-pdf flag."
         )
         return 2
 
