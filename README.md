@@ -538,7 +538,8 @@ suppressed when the answer is already known: any flag that turns the
 supplementary pass on (`--pull-supplementary`, `--refresh-supplementary`,
 `--download-data-artifacts`, `--fetch-everything`, `--llm-agent-retrieval`), an
 explicit `--on-existing skip` or `supplement`, `--abstract-only`, or the
-goal-aware flags (`--get-xml-or-html-and-pdf`, `--upgrade-existing` on the tiered path),
+goal-aware flags (`--get-xml-or-html-and-pdf`, `--get-xml-and-pdf`, `--get-xml-and-html-and-pdf`,
+`--upgrade-existing` on the tiered path),
 which do not skip records at all. Single-identifier runs never ask.
 
 What is *not* remembered between runs: failures. `failed_dois.csv` is a report,
@@ -638,7 +639,7 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | Figshare / Zenodo / OSF | repository DOIs, and datasets reached through link services |
 | DataCite reverse relations | any DOI — finds deposits whose own DataCite record points at the article through a non-citation relation (e.g. `IsSupplementTo`); deposits that merely cite it are dropped |
 | Crossref component DOIs | publishers that register components |
-| JATS-declared URLs | absolute URLs the JATS itself declares (e.g. LWW permalinks) — recovery of last resort |
+| JATS-declared URLs | absolute URLs the JATS itself declares (e.g. LWW permalinks, publisher Source Data links) — recovery of last resort. Read from the PMC copy or, with no PMCID, from a publisher `{stem}.xml` saved beside the record (e.g. by `--get-xml-and-pdf`); TEI and non-JATS XML are ignored |
 | OpenAIRE ScholeXplorer | any DOI — Scholix publication→dataset/software links |
 | Europe PMC datalinks | any PMID — text-mined accessions and data citations |
 | Full-text scan | deposits the paper names in its own prose — only under `--download-data-artifacts` |
@@ -1191,7 +1192,7 @@ refusal, not a bare failure:
 | `source` | str \| null | The route that produced it (`unpaywall`, `core`, `osf`, …), `existing` for a skip, `structured_fallback` when no PDF was available and structured full text was saved instead. |
 | `identity` | str \| null | The verdict on the PDF **fetched in this run and reported in `path`**: `verified`, or a refusal — `wrong_article`, `truncated`, `unreadable`, `no_reference`, `no_engine`. Null when nothing was judged: an XML artifact, a file already on disk, or any run under the tiered flags (`--prioritize-xml`, `--get-xml-or-html-and-pdf`, `--get-xml-and-pdf`, `--get-xml-and-html-and-pdf`, `--xml-only`, `--xml-html-only`), where the engine validates per tier instead. A success with a non-`verified` identity is a PDF that was kept rather than deleted because the verdict could not be trusted — see [the identity check](#format-prioritized-retrieval) — not one that passed. |
 | `reasons` | list[str] | Why a record failed, or why a kept PDF could not be verified. Empty on a verified success. |
-| `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html-and-pdf`), empty otherwise. `path` is not repeated here. |
+| `paths` | list[str] | The other artifacts a tiered run wrote (`--get-xml-or-html-and-pdf` and its `--get-xml-and-pdf` / `--get-xml-and-html-and-pdf` variants), empty otherwise. `path` is not repeated here. |
 | `supplementary` | object | Only with `--pull-supplementary` (or a flag that implies it): `status` (`ok`, `none_found`, `partial`, `incomplete`, `error`, `skipped`), `written`, `skipped`, `manifest` (absolute path or null), `missing_declared` (files the article declares that were not obtained) and `blocked_urls` (refused to this client; open them in a browser). |
 | `figures` | object | Only with `--pull-figures`: `status`, `written`, `failed`, `refusal` and `manifest`. |
 | `images` | object | Only with `--extract-images`: `status`, `written` and `manifest`. |
@@ -1429,7 +1430,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
       records whose key is entitled to the XML but not the PDF, and covers
       ScienceDirect DOIs outside `10.1016/*`. It does not repeat a PDF request the
       early step already made. The XML half is skipped with `--no-xml-fallback`.
-    - With `--prioritize-xml` / `--xml-only` / `--get-xml-or-html-and-pdf` the tiered
+    - With `--prioritize-xml` / `--xml-only` / any `--get-xml-*-and-pdf` flag the tiered
       ladder asks the same endpoint itself (`elsevier_tdm` at T1, `elsevier_pdf`
       at T5, ahead of the legacy chain).
     - **Off campus?** Entitlement is decided by your IP unless you also set
