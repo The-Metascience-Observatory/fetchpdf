@@ -60,9 +60,9 @@ def enumerate_jats_manifest(ids, ctx) -> List[SupplementFile]:
     Returns no files by design -- see the module docstring. Runs first so every
     later provider can classify against ground truth instead of a filename guess.
     """
-    if not ids.pmcid:
-        return []
-
+    # No PMCID is fine when a T1 pass already saved the publisher's XML beside
+    # the record: _jats_for reads that copy first and only needs the PMCID for
+    # the EPMC fallback.
     content = _jats_for(ids, ctx)
     if not content:
         return []
@@ -71,11 +71,12 @@ def enumerate_jats_manifest(ids, ctx) -> List[SupplementFile]:
     except ElementTree.ParseError:
         return []
 
-    # A zero count is only trustworthy from a document that actually has a body.
-    # An abstract stub or an EPMC error document parses cleanly and has no
-    # <supplementary-material> either, and the two are otherwise identical.
-    if root.find(".//{*}body") is None and root.find(".//body") is None:
-        ctx.log("    JATS manifest: no <body>, so a zero supplement count proves nothing")
+    # A zero count is only trustworthy from a JATS document that actually has a
+    # body. An abstract stub or an EPMC error document parses cleanly and has no
+    # <supplementary-material> either, and neither does a TEI or Elsevier XML
+    # saved as {stem}.xml -- those declare supplements some other way, if at all.
+    if not _is_full_jats(root):
+        ctx.log("    JATS manifest: not a full-text JATS document, so a zero supplement count proves nothing")
         return []
 
     supplements, labels, raw = _supplementary_hrefs(root)
@@ -128,6 +129,8 @@ def _jats_for(ids, ctx) -> Optional[bytes]:
     except OSError:
         pass
 
+    if not ids.pmcid:
+        return None
     response = ctx.http.get(EPMC_FULLTEXT.format(pmcid=ids.pmcid), timeout=60)
     if response.ok and response.content:
         return response.content
@@ -145,10 +148,16 @@ def declared_from_xml(content: bytes) -> Optional[Dict[str, str]]:
         root = ElementTree.fromstring(content)
     except ElementTree.ParseError:
         return None
-    if root.find(".//{*}body") is None and root.find(".//body") is None:
+    if not _is_full_jats(root):
         return None
     _, _, raw = _supplementary_hrefs(root)
     return raw
+
+
+def _is_full_jats(root) -> bool:
+    """JATS (<article-meta>) with a <body>: the only kind whose count means anything."""
+    has = lambda name: any(_tag_is(element, name) for element in root.iter())
+    return has("article-meta") and has("body")
 
 
 def _supplementary_hrefs(root) -> Tuple[Set[str], Dict[str, str], Dict[str, str]]:

@@ -1722,6 +1722,47 @@ def test_an_abstract_stub_does_not_prove_there_are_no_supplements():
     assert "jats_supplements" not in ctx.scratch
 
 
+def test_publisher_jats_on_disk_is_read_without_a_pmcid(tmp_path):
+    """A T1 pass's publisher XML declares supplements for non-PMC papers too.
+
+    Absolute hrefs there flow on to jats_declared, which fetches them as written.
+    """
+    from fetchpdf.retrieval.supplement_pmc import (
+        enumerate_jats_declared,
+        enumerate_jats_manifest,
+    )
+
+    (tmp_path / "rec.xml").write_bytes(
+        b'<article xmlns:xlink="http://www.w3.org/1999/xlink">'
+        b"<front><article-meta/></front><body><p/></body><back>"
+        b"<supplementary-material><label>Source Data Fig. 1</label>"
+        b'<media xlink:href="https://example.org/esm/MediaObjects/x_MOESM3_ESM.xlsx"/>'
+        b"</supplementary-material></back></article>")
+    ctx = ctx_with(FakeHttp(routes={}), save_path=str(tmp_path / "rec.pdf"))
+    ids = IdentifierSet(doi="10.1038/x")
+
+    enumerate_jats_manifest(ids, ctx)
+    assert ctx.scratch["jats_supplements"] == {"x_moesm3_esm.xlsx"}
+    assert ctx.scratch["jats_labels"]["x_moesm3_esm.xlsx"] == "Source Data Fig. 1"
+    files = enumerate_jats_declared(ids, ctx)
+    assert [f.url for f in files] == [
+        "https://example.org/esm/MediaObjects/x_MOESM3_ESM.xlsx"]
+
+
+def test_a_tei_xml_on_disk_does_not_read_as_zero_supplements(tmp_path):
+    """TEI has a <body> and no <supplementary-material>; that zero proves nothing."""
+    from fetchpdf.retrieval.supplement_pmc import declared_from_xml, enumerate_jats_manifest
+
+    tei = (b'<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><p/></body>'
+           b"</text></TEI>")
+    (tmp_path / "rec.xml").write_bytes(tei)
+    ctx = ctx_with(FakeHttp(routes={}), save_path=str(tmp_path / "rec.pdf"))
+
+    enumerate_jats_manifest(IdentifierSet(doi="10.1000/x"), ctx)
+    assert "jats_declared" not in ctx.scratch
+    assert declared_from_xml(tei) is None
+
+
 def test_pmc_s3_declares_sizes_and_md5s_before_transfer():
     """What makes the cap free on this route."""
     from fetchpdf.retrieval.supplement_pmc import enumerate_pmc_s3
@@ -2255,7 +2296,7 @@ def test_repair_heals_a_phantom_partial_manifest(tmp_path):
     from fetchpdf.retrieval.supplementary import _repair, read_manifest
 
     (tmp_path / "rec.xml").write_bytes(
-        b'<article><body><p>text, no supplements</p></body></article>')
+        b'<article><front><article-meta/></front><body><p>text, no supplements</p></body></article>')
     (tmp_path / "rec_supplementary_info_1_Table.xlsx").write_bytes(b"x" * 50)
     manifest = {
         "status": "partial",
@@ -2285,7 +2326,7 @@ def test_repair_flags_a_record_short_of_its_declared_set(tmp_path):
     from fetchpdf.retrieval.supplementary import _repair, read_manifest
 
     (tmp_path / "rec.xml").write_bytes(
-        b'<article><body><supplementary-material>'
+        b'<article><front><article-meta/></front><body><supplementary-material>'
         b'<media href="s1.docx"/></supplementary-material></body></article>')
     manifest = {"status": "ok", "files": [], "skipped": []}
     path = tmp_path / "rec_supplementary_info.json"
