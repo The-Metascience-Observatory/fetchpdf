@@ -448,15 +448,58 @@ def _prefix(doi: str) -> str:
     return (doi or "").split("/")[0]
 
 
+# --------------------------------------------------------------------------
+# IEEE Xplore
+# --------------------------------------------------------------------------
+# IEEE keys every article by an "arnumber" that is not derivable from the DOI
+# (10.1109/aina.2010.102 is document 5474692). Its landing pages sit behind
+# AWS WAF -- a plain client gets HTTP 202 with an empty body -- so the arnumber
+# cannot be scraped from them. doi.org's own redirect names it, though, and
+# costs one request that never reaches IEEE. The PDF endpoint,
+# stampPDF/getPDF.jsp, is not behind the WAF: without a session it redirects
+# to Xplore/login.jsp, with one it serves the PDF. Measured 2026-11-08.
+IEEE_PREFIX = "10.1109"
+IEEE_SITE = "ieee.org"
+_IEEE_ARNUMBER_RE = re.compile(r"ieeexplore\.ieee\.org/(?:abstract/)?document/(\d+)")
+_ieee_lock = threading.Lock()
+#: DOI -> arnumber. Only successful lookups are kept. Seeded with the
+#: `fetchpdf cookies` test article so the wizard never needs the network to
+#: know where IEEE lives.
+_ieee_arnumbers = {"10.1109/embc.2014.6943774": "6943774"}
+
+
+def ieee_arnumber(doi: str, timeout: float = 30) -> Optional[str]:
+    """IEEE Xplore's article number for *doi*, from doi.org's redirect; None if unknown."""
+    key = (doi or "").strip().lower()
+    with _ieee_lock:
+        if key in _ieee_arnumbers:
+            return _ieee_arnumbers[key]
+    url = f"https://doi.org/{key}"
+    try:
+        r = requests.get(url, allow_redirects=False, timeout=timeout,
+                         headers=headers_for(url, {}))
+        m = _IEEE_ARNUMBER_RE.search(r.headers.get("location") or "")
+    except requests.RequestException:
+        return None
+    if not m:
+        return None
+    with _ieee_lock:
+        _ieee_arnumbers[key] = m.group(1)
+    return m.group(1)
+
+
 def covers(doi: str) -> bool:
     """True if this route knows where the publisher keeps the DOI's PDF."""
     prefix = _prefix(doi)
-    return prefix in PUBLISHER_PDF_TEMPLATES or prefix in PUBLISHER_LANDING_SITES
+    return (prefix in PUBLISHER_PDF_TEMPLATES or prefix in PUBLISHER_LANDING_SITES
+            or prefix == IEEE_PREFIX)
 
 
 def publisher_sites(doi: str) -> List[str]:
     """The publisher sites whose cookies this DOI's fetch may use, main one first."""
     prefix = _prefix(doi)
+    if prefix == IEEE_PREFIX:
+        return [IEEE_SITE]
     if prefix in PUBLISHER_LANDING_SITES:
         return list(PUBLISHER_LANDING_SITES[prefix])
     article = publisher_article_url(doi)
@@ -469,6 +512,7 @@ def cookie_sites() -> List[str]:
              for t in PUBLISHER_ARTICLE_TEMPLATES.values()}
     for more in PUBLISHER_LANDING_SITES.values():
         sites.update(more)
+    sites.add(IEEE_SITE)
     return sorted(sites)
 
 
@@ -476,8 +520,12 @@ def publisher_article_url(doi: str) -> Optional[str]:
     """The article landing page on the publisher's own host, or None.
 
     For a publisher in PUBLISHER_LANDING_SITES that is the DOI link, which
-    redirects there: its article URLs are not derivable from the DOI.
+    redirects there: its article URLs are not derivable from the DOI. For IEEE
+    it is the Xplore document page, which costs a doi.org lookup the first time.
     """
+    if _prefix(doi) == IEEE_PREFIX:
+        n = ieee_arnumber(doi)
+        return f"https://ieeexplore.ieee.org/document/{n}" if n else None
     template = PUBLISHER_ARTICLE_TEMPLATES.get(_prefix(doi))
     if template:
         return template.format(doi=doi)
@@ -522,6 +570,9 @@ def _count_download() -> None:
 
 def publisher_pdf_urls(doi: str) -> List[str]:
     """Canonical publisher PDF URLs for a DOI, or ``[]`` if none is derivable."""
+    if _prefix(doi) == IEEE_PREFIX:
+        n = ieee_arnumber(doi)
+        return [f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={n}"] if n else []
     return [t.format(doi=doi) for t in PUBLISHER_PDF_TEMPLATES.get(_prefix(doi), [])]
 
 
@@ -606,6 +657,9 @@ _ELSEVIER_REDIRECT_RE = re.compile(r'name=["\']redirectURL["\'][^>]*value=["\'](
 
 
 def _is_challenge(response) -> bool:
+    """A Cloudflare challenge, or AWS WAF's (IEEE: 202 + x-amzn-waf-action)."""
+    if response.status_code == 202:
+        return bool(response.headers.get("x-amzn-waf-action"))
     return (response.status_code in (403, 429, 503)
             and "cloudflare" in (response.headers.get("server") or "").lower())
 
@@ -795,14 +849,21 @@ _FETCH_JS = """async ([u, cap]) => {
 
 
 def wait_past_challenge(page, timeout_s: float = 30.0) -> bool:
-    """Wait until the page is no longer a bot-challenge interstitial."""
+    """Wait until the page is no longer a bot-challenge interstitial.
+
+    Cloudflare names itself in the title; AWS WAF (IEEE Xplore) does not, but
+    its page carries the challenge script's globals.
+    """
+    from .blocked import WAF_CHALLENGE_MARKERS
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
             title = (page.title() or "").lower()
+            body = page.content()[:20000] if "ieee.org" in (page.url or "") else ""
         except Exception:      # noqa: BLE001 - mid-navigation
-            title = "just a moment"
-        if not any(t in title for t in _CHALLENGE_TITLES):
+            title, body = "just a moment", ""
+        if not any(t in title for t in _CHALLENGE_TITLES) and \
+                not any(m in body for m in WAF_CHALLENGE_MARKERS):
             return True
         page.wait_for_timeout(1000)
     return False

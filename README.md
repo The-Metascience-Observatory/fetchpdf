@@ -1095,6 +1095,11 @@ the DOI link, and the PDF the landing page declares is fetched: **AACR**
 (`10.1182`), **Company of Biologists** (`10.1242`), **ERS** (`10.1183`),
 **BMJ** (`10.1136`), **Bioscientifica** (`10.1530`) and **LWW** (`10.1097`).
 
+**IEEE Xplore** (`10.1109`) keys articles by a number the DOI does not
+contain, so the route reads it from the DOI link's redirect and fetches
+`stampPDF/getPDF.jsp` with your cookies. Sign in once (or just open any IEEE
+PDF from a network your library covers) and the session cookies carry over.
+
 Several of these are open access but sit behind a Cloudflare bot check that a
 plain download cannot pass. Opening any article on the site once in your
 everyday browser earns the clearance cookie, and the next run reuses it.

@@ -401,3 +401,40 @@ def test_refusals_with_a_working_session_blame_the_subscription(monkeypatch):
         inst._note_attempt(f"10.1177/x{i}", False)
     (line,) = inst.session_report()
     assert "session works" in line and "refresh" not in line
+
+
+# -- IEEE Xplore ---------------------------------------------------------------
+class _Redirect:
+    def __init__(self, location):
+        self.headers = {"location": location}
+
+
+def test_ieee_pdf_url_comes_from_the_doi_redirect(monkeypatch):
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append((url, kw.get("allow_redirects")))
+        return _Redirect("http://ieeexplore.ieee.org/document/5474692/")
+    monkeypatch.setattr(inst.requests, "get", fake_get)
+    monkeypatch.setattr(inst, "_ieee_arnumbers", {})
+    doi = "10.1109/AINA.2010.102"
+    assert inst.covers(doi) and inst.publisher_sites(doi) == ["ieee.org"]
+    assert inst.publisher_pdf_urls(doi) == [
+        "https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=5474692"]
+    assert inst.publisher_article_url(doi) == "https://ieeexplore.ieee.org/document/5474692"
+    assert seen == [("https://doi.org/10.1109/aina.2010.102", False)]   # looked up once
+    assert "ieee.org" in inst.cookie_sites()
+
+
+def test_an_ieee_doi_that_does_not_resolve_yields_nothing(monkeypatch):
+    monkeypatch.setattr(inst.requests, "get", lambda url, **kw: _Redirect(""))
+    monkeypatch.setattr(inst, "_ieee_arnumbers", {})
+    assert inst.publisher_pdf_urls("10.1109/missing") == []
+    assert inst.publisher_article_url("10.1109/missing") is None
+
+
+def test_an_aws_waf_challenge_counts_as_a_challenge():
+    class R:
+        status_code = 202
+        headers = {"x-amzn-waf-action": "challenge", "server": "CloudFront"}
+    assert inst._is_challenge(R())
