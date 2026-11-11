@@ -74,6 +74,17 @@ def atypon_host_for(doi: str) -> Optional[str]:
     return _ATYPON_HOSTS.get(prefix)
 
 
+def note_blocked(ctx, provider: str, url: str, detail: str) -> None:
+    """Record that a provider was refused, so the manifest can say "blocked".
+
+    An empty list alone reads as "nothing listed", which claims the article has
+    no supplements. A refused listing page proves nothing of the sort.
+    """
+    scratch = getattr(ctx, "scratch", None)
+    if isinstance(scratch, dict):
+        scratch.setdefault("_provider_blocked", {})[provider] = {"url": url, "detail": detail}
+
+
 def headed_browser_available() -> bool:
     """Whether a headed Chromium can actually be launched here.
 
@@ -190,6 +201,7 @@ def fetch_atypon_supplements(ids, ctx) -> List[SupplementFile]:
                 status = response.status if response else None
                 if status != 200:
                     ctx.log(f"    atypon SI: listing page HTTP {status}")
+                    note_blocked(ctx, "atypon_suppl", listing, f"listing page HTTP {status}")
                     return []
                 page.wait_for_timeout(_SETTLE_MS)
 

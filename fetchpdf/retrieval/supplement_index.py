@@ -716,11 +716,37 @@ def _providers() -> Tuple[Tuple[str, Any], ...]:
         # records Europe PMC has already said it is withholding, which on a
         # 46-record corpus was 1, not 46.
         ("atypon_suppl", _atypon_if_withheld),                 # E19
+        # E22 after every publisher route: archived copies, only when none of
+        # them listed a publisher supplement.
+        ("wayback", _wayback_if_nothing_found),                # E22
         # E20 truly last: the only provider that costs money, and the only one
         # that benefits from knowing what all the others already found.
         ("llm_agent", _llm_agent),                             # E20
         ("jci", enumerate_jci),                               # E21
     )
+
+
+#: Providers that list the publisher's own supplement files. When one of them
+#: found something, the Internet Archive has nothing to add.
+_PUBLISHER_SI_PROVIDERS = frozenset({
+    "europepmc_supplements", "pmc_s3", "elsevier_objects", "springer_esm", "plos",
+    "preprint_supplements", "apa_supplemental", "jats_declared", "atypon_suppl", "jci",
+})
+
+
+def _wayback_if_nothing_found(ids, ctx) -> List[SupplementFile]:
+    """E22: the Internet Archive's copies, as a last-ditch fallback.
+
+    Skipped as soon as any publisher-supplement provider has listed a file, so a
+    record that is already served costs the Archive no request. Repository files
+    (OSF, Zenodo, figshare) do not count: they are data deposits, and a paper
+    can have those while its publisher-hosted supplement is still missing.
+    """
+    so_far = ctx.scratch.get("enumerated_so_far") or []
+    if any(str(f.provider or "").split(":", 1)[0] in _PUBLISHER_SI_PROVIDERS for f in so_far):
+        return []
+    from .supplement_wayback import enumerate_wayback
+    return enumerate_wayback(ids, ctx)
 
 
 def _llm_agent(ids, ctx):
@@ -750,6 +776,7 @@ PROVIDER_NAMES: Tuple[str, ...] = (
     "epmc_datalinks",
     "fulltext_scan",
     "atypon_suppl",
+    "wayback",
     "llm_agent",
     "jci",
 )
@@ -799,6 +826,17 @@ def enumerate_all(ids, ctx, providers=None) -> Tuple[List[SupplementFile], List[
         for entry in files:
             entry.provider = entry.provider or name
         found.extend(files)
+        blocked = (ctx.scratch.get("_provider_blocked") or {}).pop(name, None)
+        if blocked and not files:
+            # Refused, not empty: the supplements may well exist.
+            reports.append({
+                "name": name,
+                "status": "blocked",
+                "listed": 0,
+                "url": blocked.get("url"),
+                "reason": blocked.get("detail"),
+            })
+            continue
         reports.append({
             "name": name,
             "status": "ok" if files else "nothing_listed",

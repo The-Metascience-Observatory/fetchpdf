@@ -250,7 +250,7 @@ class SupplementarySummary:
     #: the article's own JATS declares was not obtained -- named data loss, and
     #: the one status callers must surface loudly. "partial" means an undeclared
     #: listed file was lost; "skipped" is the repair path's no-op.
-    status: str = "none_found"     # ok | none_found | partial | incomplete | error | skipped
+    status: str = "none_found"     # ok | none_found | blocked | partial | incomplete | error | skipped
     written: int = 0
     skipped: int = 0
     bytes_written: int = 0
@@ -1035,7 +1035,8 @@ class _Run:
             paths=[record_path(self.directory, os.path.basename(self.stem), f["filename"])
                    for f in self.kept if f.get("filename")],
             missing_declared=list(declared.get("missing") or []),
-            blocked_urls=_blocked_urls(self.skipped),
+            blocked_urls=_blocked_urls(self.skipped) + _blocked_provider_urls(reports),
+            detail=_blocked_detail(reports) if status == "blocked" else "",
         )
 
 
@@ -1188,6 +1189,19 @@ def _heal_manifest(manifest: dict, manifest_path: str, stem: str,
             missing_declared)
 
 
+def _blocked_provider_urls(reports) -> List[str]:
+    """Listing pages a provider was refused (status "blocked")."""
+    return [r["url"] for r in reports or []
+            if isinstance(r, dict) and r.get("status") == "blocked" and r.get("url")]
+
+
+def _blocked_detail(reports) -> str:
+    """One line naming each refused provider and why, for the run log."""
+    return "; ".join(f"{r.get('name')}: {r.get('reason') or 'refused'} {r.get('url') or ''}".strip()
+                     for r in reports or []
+                     if isinstance(r, dict) and r.get("status") == "blocked")
+
+
 def _blocked_urls(records) -> List[str]:
     """The URLs of everything a publisher or CDN refused this client.
 
@@ -1247,7 +1261,8 @@ def _repair(manifest_path, stem, resolver, http, ladder, email, verbose,
     # Read after healing, so an old manifest's 403s -- reclassified a moment
     # ago -- reach the report on the re-run that heals them rather than the one
     # after it.
-    blocked_urls = _blocked_urls(manifest.get("skipped") or [])
+    blocked_urls = (_blocked_urls(manifest.get("skipped") or [])
+                    + _blocked_provider_urls(manifest.get("providers") or []))
 
     directory = os.path.dirname(os.path.abspath(stem)) or "."
     stem_basename = os.path.basename(stem)
@@ -1468,6 +1483,9 @@ def _derive_status(missing_declared, skipped, files, providers) -> str:
         return "ok"
     if any(r.get("status") == "error" for r in providers):
         return "error"
+    if any(r.get("status") == "blocked" for r in providers):
+        # The publisher refused the listing page: unknown, not absent.
+        return "blocked"
     return "none_found"
 
 

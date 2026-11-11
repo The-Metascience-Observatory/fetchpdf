@@ -3047,3 +3047,183 @@ def test_repair_heals_an_old_403_into_a_blocked_record(tmp_path):
     assert healed["skipped"][0]["was"] == "http-error"
     assert healed["status"] == "partial"
     assert summary.blocked_urls == ["https://www.ahajournals.org/doi/suppl/10.1161/x"]
+
+
+# -- a refused publisher listing page is "blocked", not "nothing listed" --------
+
+
+def test_refused_listing_page_reports_blocked_not_nothing_listed():
+    """A 403 on the publisher's supplement page proves nothing about whether the
+    paper has supplements. Recording it as nothing_listed told a reader the
+    paper had none; the provider report and the record status must say blocked."""
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_atypon import note_blocked
+    from fetchpdf.retrieval.supplement_index import enumerate_all
+    from fetchpdf.retrieval.supplementary import (
+        _blocked_detail, _blocked_provider_urls, _derive_status)
+
+    url = "https://journals.sagepub.com/doi/suppl/10.1177/x"
+
+    def refused(ids, ctx):
+        note_blocked(ctx, "atypon_suppl", url, "listing page HTTP 403")
+        return []
+
+    def empty(ids, ctx):
+        return []
+
+    ctx = SimpleNamespace(scratch={}, log=lambda *a, **k: None)
+    files, reports = enumerate_all(SimpleNamespace(doi="10.1177/x"), ctx,
+                                   providers=[("figshare_files", empty),
+                                              ("atypon_suppl", refused)])
+    assert files == []
+    by_name = {r["name"]: r for r in reports}
+    assert by_name["figshare_files"]["status"] == "nothing_listed"
+    assert by_name["atypon_suppl"]["status"] == "blocked"
+    assert by_name["atypon_suppl"]["url"] == url
+    assert _derive_status([], [], [], reports) == "blocked"
+    assert _blocked_provider_urls(reports) == [url]
+    assert "HTTP 403" in _blocked_detail(reports)
+
+
+def test_blocked_does_not_outrank_files_or_errors():
+    """Files from another provider make the record ok; a provider error still
+    reads as error. Blocked only replaces the old none_found."""
+    from fetchpdf.retrieval.supplementary import _derive_status
+
+    blocked = [{"name": "atypon_suppl", "status": "blocked", "url": "u"}]
+    assert _derive_status([], [], [{"filename": "s1.pdf"}], blocked) == "ok"
+    assert _derive_status([], [], [], blocked + [{"name": "z", "status": "error"}]) == "error"
+    assert _derive_status([], [], [], [{"name": "z", "status": "nothing_listed"}]) == "none_found"
+
+
+def test_blocked_flag_is_consumed_by_the_provider_that_set_it():
+    """A flag left behind must not mark a later, unrelated provider blocked."""
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_atypon import note_blocked
+    from fetchpdf.retrieval.supplement_index import enumerate_all
+
+    def refused_with_files(ids, ctx):
+        note_blocked(ctx, "atypon_suppl", "u", "listing page HTTP 403")
+        return [SimpleNamespace(provider=None)]
+
+    ctx = SimpleNamespace(scratch={}, log=lambda *a, **k: None)
+    _, reports = enumerate_all(SimpleNamespace(doi="10.1177/x"), ctx,
+                               providers=[("atypon_suppl", refused_with_files)])
+    assert reports[0]["status"] == "ok"
+    assert not ctx.scratch.get("_provider_blocked")
+
+
+# --------------------------------------------------------------------------
+# Internet Archive fallback (E22)
+# --------------------------------------------------------------------------
+
+
+class _WaybackHttp:
+    """Answers CDX queries by their `url` parameter, and raw captures by URL."""
+
+    def __init__(self, cdx=None, pages=None):
+        self.cdx, self.pages, self.requests = cdx or {}, pages or {}, []
+
+    def get(self, url, params=None, **kwargs):
+        self.requests.append((url, dict(params or {}), kwargs))
+        if "cdx/search" in url:
+            rows = self.cdx.get((params or {}).get("url"))
+            if rows is None:
+                return FakeResponse(content=b"[]")
+            head = [["timestamp", "original", "mimetype", "length"]]
+            return json_response(head + rows)
+        for fragment, body in self.pages.items():
+            if fragment in url:
+                return FakeResponse(content=body.encode())
+        return FakeResponse(status=404)
+
+
+def _wayback_ctx(http):
+    from types import SimpleNamespace
+    return SimpleNamespace(http=http, scratch={}, log=lambda *a, **k: None)
+
+
+def test_wayback_lists_archived_supplement_files_and_skips_pages():
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_wayback import enumerate_wayback
+
+    base = "journals.sagepub.com/doi/suppl/10.1177/0956797614520714"
+    http = _WaybackHttp(cdx={base + "*": [
+        ["20221206092804", f"https://{base}/suppl_file/ds_1.pdf", "application/pdf", "481973"],
+        ["20200101000000", f"https://{base}", "text/html", "9000"],
+    ]})
+    files = enumerate_wayback(SimpleNamespace(doi="10.1177/0956797614520714"), _wayback_ctx(http))
+
+    assert [f.name for f in files] == ["ds_1.pdf"]
+    assert files[0].url == f"https://web.archive.org/web/20221206092804id_/https://{base}/suppl_file/ds_1.pdf"
+    assert files[0].provider == "wayback"
+    assert files[0].extra["original_url"] == f"https://{base}/suppl_file/ds_1.pdf"
+    # No contact address goes to the Archive.
+    assert all(kw.get("polite") is False for _, _, kw in http.requests)
+
+
+def test_wayback_follows_an_archived_listing_page_to_files_captured_elsewhere():
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_wayback import enumerate_wayback
+
+    base = "journals.sagepub.com/doi/suppl/10.1177/0956797617695099"
+    target = f"https://{base}/suppl_file/DS_1.pdf"
+    http = _WaybackHttp(
+        cdx={base + "*": [["20190101000000", f"https://{base}", "text/html", "9000"]],
+             target: [["20230505050505", target, "application/pdf", "600000"]]},
+        pages={"20190101000000id_": '<a href="/doi/suppl/10.1177/0956797617695099/suppl_file/DS_1.pdf">x</a>'
+                                    '<a href="/doi/suppl/10.1177/0956797617695099/suppl_file/gone.pdf">y</a>'},
+    )
+    files = enumerate_wayback(SimpleNamespace(doi="10.1177/0956797617695099"), _wayback_ctx(http))
+
+    # gone.pdf is linked but was never captured: it is not listed.
+    assert [(f.name, f.extra["wayback_timestamp"]) for f in files] == [("DS_1.pdf", "20230505050505")]
+
+
+def test_wayback_url_prefixes_cover_atypon_elsevier_and_apa():
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_wayback import url_prefixes
+
+    assert url_prefixes(SimpleNamespace(doi="10.1287/mnsc.2016.2640")) == [
+        "pubsonline.informs.org/doi/suppl/10.1287/mnsc.2016.2640"]
+    assert url_prefixes(SimpleNamespace(doi="10.1016/j.obhdp.2011.03.001", elsevier_pii="S0749597811000355")) == [
+        "ars.els-cdn.com/content/image/1-s2.0-S0749597811000355-mmc"]
+    assert url_prefixes(SimpleNamespace(doi="10.1037/pspa0000226")) == [
+        "supp.apa.org/psycarticles/supplemental/pspa0000226/"]
+    assert url_prefixes(SimpleNamespace(doi="10.1038/s41586-020-1")) == []
+
+
+def test_wayback_is_skipped_once_a_publisher_provider_listed_a_file():
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_index import _wayback_if_nothing_found
+
+    http = _WaybackHttp()
+    ctx = _wayback_ctx(http)
+    ids = SimpleNamespace(doi="10.1177/0956797614520714")
+
+    ctx.scratch["enumerated_so_far"] = [SimpleNamespace(provider="apa_supplemental")]
+    assert _wayback_if_nothing_found(ids, ctx) == []
+    assert http.requests == []
+
+    # A repository deposit is not the publisher's supplement: still ask.
+    ctx.scratch["enumerated_so_far"] = [SimpleNamespace(provider="datacite_related:osf_files")]
+    _wayback_if_nothing_found(ids, ctx)
+    assert len(http.requests) == 1
+
+
+def test_wayback_outage_is_reported_as_blocked_not_as_nothing_listed():
+    """The Archive answers 503, or its "temporarily offline" HTML page with a
+    200, during outages. Neither means the article has no archived supplement."""
+    from types import SimpleNamespace
+    from fetchpdf.retrieval.supplement_index import enumerate_all
+    from fetchpdf.retrieval.supplement_wayback import enumerate_wayback
+
+    ids = SimpleNamespace(doi="10.1177/0956797614520714")
+    for response in (FakeResponse(status=503),
+                     FakeResponse(content=b"<html><title>Temporarily Offline</title></html>")):
+        http = SimpleNamespace(get=lambda url, params=None, **kw: response)
+        ctx = _wayback_ctx(http)
+        files, reports = enumerate_all(ids, ctx, providers=(("wayback", enumerate_wayback),))
+        assert files == []
+        assert reports[0]["status"] == "blocked"
+        assert "Internet Archive" in reports[0]["reason"]

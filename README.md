@@ -644,6 +644,7 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | Europe PMC datalinks | any PMID — text-mined accessions and data citations |
 | Full-text scan | deposits the paper names in its own prose — only under `--download-data-artifacts` |
 | Atypon publisher SI | PNAS, Science, Annual Reviews, SAGE, T&F — only when Europe PMC withholds the SI or the record has no PMCID; drives a headed browser, so it needs Playwright, Chromium and a display (or Xvfb) |
+| Internet Archive (Wayback Machine) | Last-ditch fallback for publisher-hosted SI (Atypon hosts incl. SAGE, INFORMS, AOM, PNAS; Elsevier `ars.els-cdn.com` mmc files; supp.apa.org): asks the Archive's open CDX index for captures under the article's supplement URLs and downloads the archived copy. Runs only when no publisher-supplement provider listed anything; an Archive outage is reported as `blocked`, not as "none found" |
 | LLM retrieval agent | only under [`--fetch-everything`](#--fetch-everything-the-second-layer) or `--llm-agent-retrieval` |
 | JCI | `10.1172/jci…` |
 

@@ -5756,7 +5756,7 @@ def _append_missing_si_to_report(output_dir, si_statuses, run_timestamp, lock,
     for display_id, summary in (si_statuses or {}).items():
         status = getattr(summary, "status", "")
         blocked_urls = list(getattr(summary, "blocked_urls", None) or [])
-        if status not in ("partial", "incomplete"):
+        if status not in ("partial", "incomplete", "blocked"):
             continue
         missing = ", ".join(getattr(summary, "missing_declared", None) or []) or "—"
         # A withheld-but-existing supplement is the click-through candidate:
@@ -6426,6 +6426,11 @@ def _batch_fetch_pdfs_inner(dois, output_dir, email=None, verbose=False, delay=0
                 # point of the gate is that this cannot pass silently.
                 names = ", ".join(summary.missing_declared) or "unknown"
                 print(f"   ⚠️  {display_id}: SI INCOMPLETE — missing: {names}")
+            elif summary.status == "blocked":
+                # Not "none found": a source refused or was down, so the paper
+                # may well have supplements. Printed regardless of verbosity.
+                print(f"   ⚠️  {display_id}: SI BLOCKED — a supplement source refused "
+                      f"or was unavailable ({summary.detail or 'no detail'})")
             elif summary.written and summary.status != "skipped":
                 extra = f", {summary.skipped} skipped" if summary.skipped else ""
                 print(f"   📎 {display_id}: {summary.written} supplementary file(s){extra}")
