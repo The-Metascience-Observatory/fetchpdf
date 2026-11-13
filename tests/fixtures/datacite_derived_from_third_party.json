@@ -1,0 +1,47 @@
+{
+  "data": {
+    "id": "10.6084/m9.figshare.25977025",
+    "type": "dois",
+    "attributes": {
+      "doi": "10.6084/m9.figshare.25977025",
+      "titles": [
+        {
+          "title": "Processed and extracted T cell scRNA-seq lung adenocarcinoma datasets"
+        }
+      ],
+      "creators": [
+        {
+          "name": "Peidli, Stefan"
+        }
+      ],
+      "publisher": "figshare",
+      "publicationYear": 2024,
+      "types": {
+        "ris": "DATA",
+        "bibtex": "misc",
+        "citeproc": "dataset",
+        "schemaOrg": "Dataset",
+        "resourceType": "Dataset",
+        "resourceTypeGeneral": "Dataset"
+      },
+      "relatedIdentifiers": [
+        {
+          "relationType": "IsDerivedFrom",
+          "relatedIdentifier": "10.1038/s41388-021-02054-3",
+          "relatedIdentifierType": "DOI"
+        },
+        {
+          "relationType": "IsDerivedFrom",
+          "relatedIdentifier": "10.1038/s41591-019-0750-6",
+          "relatedIdentifierType": "DOI"
+        },
+        {
+          "relationType": "IsDerivedFrom",
+          "relatedIdentifier": "10.1016/j.ccell.2021.09.008",
+          "relatedIdentifierType": "DOI"
+        }
+      ],
+      "url": "https://figshare.com/articles/dataset/Processed_and_extracted_T_cell_scRNA-seq_lung_adenocarcinoma_datasets/25977025"
+    }
+  }
+}

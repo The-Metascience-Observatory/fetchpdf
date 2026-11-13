@@ -637,7 +637,7 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | bioRxiv / medRxiv | `10.1101` |
 | APA supplemental | `10.1037` |
 | Figshare / Zenodo / OSF | repository DOIs, and datasets reached through link services |
-| DataCite reverse relations | any DOI — finds deposits whose own DataCite record points at the article through a non-citation relation (e.g. `IsSupplementTo`); deposits that merely cite it are dropped |
+| DataCite reverse relations | any DOI — finds deposits whose own DataCite record claims the article through a supplement relation (`IsSupplementTo`, `IsPartOf`, `IsDescribedBy`, `IsDocumentedBy`, or the inverse `IsSupplementedBy` / `HasPart`); deposits that cite it, derive from it (`IsDerivedFrom`) or relate to it any other way are dropped unless their title is a "Replication Data for:" match |
 | Crossref component DOIs | publishers that register components |
 | JATS-declared URLs | absolute URLs the JATS itself declares (e.g. LWW permalinks, publisher Source Data links) — recovery of last resort. Read from the PMC copy or, with no PMCID, from a publisher `{stem}.xml` saved beside the record (e.g. by `--get-xml-and-pdf`); TEI and non-JATS XML are ignored |
 | OpenAIRE ScholeXplorer | any DOI — Scholix publication→dataset/software links |
