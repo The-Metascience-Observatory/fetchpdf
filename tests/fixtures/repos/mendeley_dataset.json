@@ -1,0 +1,58 @@
+{
+ "id": "2ysyhzww6t",
+ "doi": {
+  "id": "10.17632/2ysyhzww6t.2",
+  "status": "allocated",
+  "prefix": "10.17632"
+ },
+ "name": "Green/WeakCoupling 1.0.0: Symmetry-adapted self-consistent many-body perturbation theory for molecules and solids",
+ "version": 2,
+ "versions": [
+  {
+   "version": 2,
+   "available": true,
+   "publish_date": "2026-11-09T15:02:18.025Z"
+  },
+  {
+   "version": 1,
+   "available": true,
+   "publish_date": "2024-09-24T09:14:43.536Z"
+  }
+ ],
+ "articles": [
+  {
+   "doi": "10.1016/j.cpc.2026.110486",
+   "id": "10.1016/j.cpc.2026.110486",
+   "title": "Green/WeakCoupling 1.0.0: Symmetry-adapted self-consistent many-body perturbation theory for molecules and solids",
+   "journal": {
+    "issn": "0010-4655",
+    "name": "Computer Physics Communications",
+    "url": "http://www.sciencedirect.com/science/journal/00104655"
+   }
+  }
+ ],
+ "confidential": false,
+ "files": [
+  {
+   "filename": "green_mbpt_v1.0.0.zip",
+   "id": "8949aca8-de4d-4831-9155-83b8d926fc88",
+   "description": "Program files",
+   "content_details": {
+    "id": "23807fe2-f1ba-4cfd-9c4e-758124516988",
+    "sha256_hash": "6861773e41f632e27409f923e771c458efb764a99fcd7cca56e03197f7c9e90a",
+    "content_type": "application/zip",
+    "size": 47145476,
+    "created_date": "2026-11-09T10:24:17.747Z",
+    "download_url": "https://data.mendeley.com/public-files/datasets/2ysyhzww6t/files/8949aca8-de4d-4831-9155-83b8d926fc88/file_downloaded",
+    "view_url": "https://data.mendeley.com/public-files/datasets/2ysyhzww6t/files/8949aca8-de4d-4831-9155-83b8d926fc88/file_viewed",
+    "download_expiry_time": "2126-11-13T16:34:47.858186217Z"
+   },
+   "metrics": {
+    "downloads": 0,
+    "previews": 0
+   },
+   "size": 47145476,
+   "status": "COMPLETED"
+  }
+ ]
+}

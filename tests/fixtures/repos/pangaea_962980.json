@@ -1,0 +1,31 @@
+{
+ "@type": "Dataset",
+ "identifier": "https://doi.org/10.1594/PANGAEA.962980",
+ "name": "Benthic foraminiferal oxygen isotope data of sediment core GeoB17426-3",
+ "isAccessibleForFree": true,
+ "conditionsOfAccess": "unrestricted",
+ "distribution": [
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "@id": "data_matrix.tab",
+   "contentUrl": "https://doi.pangaea.de/10.1594/PANGAEA.962980?format=textfile",
+   "encodingFormat": "text/tab-separated-values"
+  },
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "contentUrl": "https://doi.pangaea.de/10.1594/PANGAEA.962980?format=html",
+   "encodingFormat": "text/html"
+  }
+ ],
+ "size": {
+  "@type": "QuantitativeValue",
+  "value": 239.0,
+  "unitText": "data points"
+ }
+}

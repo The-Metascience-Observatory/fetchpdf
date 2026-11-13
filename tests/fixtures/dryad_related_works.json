@@ -1,0 +1,86 @@
+{
+ "10.5061/dryad.djh9w0whp": {
+  "dryad": {
+   "identifier": "doi:10.5061/dryad.djh9w0whp",
+   "title": "Data and code from: Colourful psittacofulvin-containing parrot feathers do not resist bacterial degradation",
+   "relatedWorks": [
+    {
+     "relationship": "article",
+     "identifierType": "DOI",
+     "identifier": "https://doi.org/10.1242/jeb.252685"
+    }
+   ]
+  },
+  "datacite": {
+   "id": "10.5061/dryad.djh9w0whp",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.5061/dryad.djh9w0whp",
+    "created": "2026-11-13T12:06:09.000Z",
+    "titles": [
+     {
+      "title": "Data and code from: Colourful psittacofulvin-containing parrot feathers do not resist bacterial degradation"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsCitedBy",
+      "relatedIdentifier": "10.1242/jeb.252685",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  }
+ },
+ "10.5061/dryad.w6m905r2r": {
+  "dryad": {
+   "identifier": "doi:10.5061/dryad.w6m905r2r",
+   "title": "Northern cod spawning sites in 2015",
+   "relatedWorks": [
+    {
+     "relationship": "article",
+     "identifierType": "DOI",
+     "identifier": "https://doi.org/10.1139/cjfas-2023-0172"
+    },
+    {
+     "relationship": "primary_article",
+     "identifierType": "DOI",
+     "identifier": "https://doi.org/10.1139/cjfas-2025-0141"
+    }
+   ]
+  },
+  "datacite": {
+   "id": "10.5061/dryad.w6m905r2r",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.5061/dryad.w6m905r2r",
+    "created": "2025-11-17T05:06:22.000Z",
+    "titles": [
+     {
+      "title": "Northern cod spawning sites in 2015"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsCitedBy",
+      "relatedIdentifier": "10.1139/cjfas-2023-0172",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsCitedBy",
+      "relatedIdentifier": "10.1139/cjfas-2025-0141",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  }
+ }
+}

@@ -121,8 +121,22 @@ _SAME_WORK_RELATIONS = frozenset({
 #: Component DOI suffixes that are a figure or a table, not a supplementary file.
 _FIGURE_COMPONENT_RE = re.compile(r"\.(g|t)\d+$", re.IGNORECASE)
 
-_MAX_RELATED = 25
+#: How far the reverse query reads. It used to stop at the first 25 records,
+#: and figshare and Zenodo register every deposit once per version, so a paper
+#: with 29 one-file figshare supplements (10.1186/s12711-026-01107-z: 58
+#: records) lost Additional files 1-16 outright. Records are now read a page at
+#: a time, collapsed to one per deposit, and the cap counts deposits.
+#:
+#: The ceiling on records still matters for one kind of paper: a heavily cited
+#: one is named by thousands of other papers' supplements (HISAT,
+#: 10.1038/nmeth.3317: 6,585 records), none of them its own.
+_PAGE_SIZE = 100
+_MAX_PAGES = 5
+_MAX_DEPOSITS = 100
 _MAX_COMPONENTS = 100
+
+#: figshare mints `<doi>.vN` beside every `<doi>`; both resolve to one item.
+_VERSION_SUFFIX_RE = re.compile(r"\.v\d+$")
 
 
 # -- E4: DataCite reverse related-identifier query --------------------------
@@ -140,31 +154,118 @@ def enumerate_datacite_related(ids, ctx) -> List[SupplementFile]:
     if not ids.doi:
         return []
 
-    response = ctx.http.get(
-        DATACITE_REVERSE,
-        params={
-            "query": _reverse_query(ids.doi),
-            "page[size]": _MAX_RELATED,
-        },
-        timeout=30,
-        polite=False,
-    )
-    if not response.ok:
-        return []
-    try:
-        records = (response.json() or {}).get("data") or []
-    except ValueError:
-        return []
+    records, total = _reverse_records(ids.doi, ctx)
+    accepted = [record for record in records
+                if _accept_related(record, ids.doi, ctx)]
+    landing = ctx.scratch.setdefault("_deposit_landing_urls", {})
+    for record in accepted:
+        attributes = record.get("attributes") or {}
+        landing[str(attributes.get("doi") or "").strip().lower()] = attributes.get("url")
+    deposits = _one_per_deposit(accepted)
+    if total > len(records):
+        ctx.log(f"    DataCite: read {len(records)} of {total} records naming this DOI")
+    if len(deposits) > _MAX_DEPOSITS:
+        ctx.log(f"    DataCite: {len(deposits)} deposits, routing the first {_MAX_DEPOSITS}")
+        deposits = deposits[:_MAX_DEPOSITS]
 
     files: List[SupplementFile] = []
-    for record in records:
-        related_doi = _accept_related(record, ids.doi, ctx)
-        if not related_doi:
-            continue
+    for related_doi in deposits:
         files.extend(_files_in_repository(related_doi, ids, ctx))
-        if len(files) >= _MAX_RELATED:
-            break
     return files
+
+
+def _reverse_records(article_doi: str, ctx):
+    """Every DataCite record naming the article, up to _MAX_PAGES pages.
+
+    Returns (records, total the index reports). A failed page ends the read
+    with what the earlier pages gave, rather than discarding them.
+    """
+    records: list = []
+    seen = set()
+    total = 0
+    for page in range(1, _MAX_PAGES + 1):
+        response = ctx.http.get(
+            DATACITE_REVERSE,
+            params={
+                "query": _reverse_query(article_doi),
+                "page[size]": _PAGE_SIZE,
+                "page[number]": page,
+            },
+            timeout=30,
+            polite=False,
+        )
+        if not response.ok:
+            break
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            break
+        batch = payload.get("data") or []
+        meta = payload.get("meta") or {}
+        try:
+            total = max(total, int(meta.get("total") or 0))
+            pages = int(meta.get("totalPages") or 0)
+        except (TypeError, ValueError):
+            pages = 0
+        fresh = 0
+        for record in batch:
+            key = str((record or {}).get("id") or "").lower() if isinstance(record, dict) else ""
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            records.append(record)
+            fresh += 1
+        # `fresh == 0` also ends a server that ignores page[number] and serves
+        # page one forever.
+        if fresh == 0 or len(batch) < _PAGE_SIZE or (pages and page >= pages):
+            break
+    return records, max(total, len(records))
+
+
+def _deposit_family(record: dict) -> str:
+    """The DOI every version of this deposit shares.
+
+    Repositories register a deposit several times over: figshare as `<doi>`
+    and `<doi>.vN`, Zenodo as a concept DOI plus one DOI per version, Mendeley
+    Data as `<id>` and `<id>.N`. The versions say so through IsVersionOf (or,
+    on figshare, only through the suffix).
+    """
+    attributes = record.get("attributes") or {}
+    doi = str(attributes.get("doi") or "").strip().lower()
+    registrant = doi.split("/", 1)[0]
+    for relation in attributes.get("relatedIdentifiers") or []:
+        if not isinstance(relation, dict):
+            continue
+        if str(relation.get("relationType") or "").strip().lower() != "isversionof":
+            continue
+        parent = _canonical_relation_doi(relation.get("relatedIdentifier"))
+        # A version of something in another registry is not a version of a deposit.
+        if parent and parent != doi and parent.split("/", 1)[0] == registrant:
+            return parent
+    return _VERSION_SUFFIX_RE.sub("", doi)
+
+
+def _one_per_deposit(records: list) -> List[str]:
+    """One DOI per deposit, in the order the deposits were first seen.
+
+    The newest version stands for the deposit: the article's supplement is what
+    the depositor last published, and every enumerator here lists exactly one
+    version's files. When only the versionless DOI was accepted, it is used --
+    the repositories resolve it to the latest version themselves.
+    """
+    families: dict = {}
+    for record in records:
+        attributes = record.get("attributes") or {}
+        doi = str(attributes.get("doi") or "").strip().lower()
+        if not doi:
+            continue
+        families.setdefault(_deposit_family(record), []).append(
+            (str(attributes.get("created") or ""), doi))
+    chosen = []
+    for family, members in families.items():
+        versions = [member for member in members if member[1] != family]
+        chosen.append(max(versions)[1] if versions else family)
+    return chosen
 
 
 def _reverse_query(article_doi: str) -> str:
@@ -215,8 +316,7 @@ def _accept_related(record, article_doi, ctx) -> Optional[str]:
 
     # Search hits and a dataset type are not evidence of ownership. In particular,
     # figshare supplements often inherit another paper's entire bibliography.
-    owns_article = _supplement_relation_to(attributes, article_doi) is not None
-    if not owns_article and not _replication_title_matches(attributes, article_doi, ctx):
+    if not _record_claims_article(related_doi, attributes, article_doi, ctx):
         return None
     ctx.log(f"    DataCite: {related_doi} ({general or 'untyped'})")
     return related_doi
@@ -240,6 +340,88 @@ def _is_supplement_document_of(attributes: dict, article_doi: str) -> bool:
         if kind == _SUPPLEMENT_DOCUMENT_RELATION:
             supplements = True
     return supplements
+
+
+def _record_claims_article(deposit_doi: str, attributes: dict, article_doi: str, ctx) -> bool:
+    """Whether a deposit's own metadata says it is this article's material.
+
+    Three routes, cheapest first, and the single ownership test behind both the
+    DataCite reverse query and the related->owned upgrade:
+      1. a supplement-grade relation naming the article (SUPPLEMENT_RELATIONS);
+      2. a "Data from: <title>" deposit title matching the article's title;
+      3. for Dryad, the repository's own statement of its primary article.
+    """
+    if _supplement_relation_to(attributes, article_doi) is not None:
+        return True
+    if _replication_title_matches(attributes, article_doi, ctx):
+        return True
+    return _dryad_names_article(deposit_doi, article_doi, ctx)
+
+
+#: Dryad's own word for how a related work relates to the dataset. DataCite
+#: receives all three flattened to IsCitedBy -- the relation for work that
+#: merely cites the data -- so only Dryad can say which paper the data is FOR.
+_DRYAD_OWN_WORK = ("primary_article", "preprint")
+_MAX_DRYAD_LOOKUPS = 25
+_DRYAD_DOI_RE = re.compile(r"^10\.5061/dryad\.[a-z0-9./]+$")
+
+
+def _dryad_names_article(deposit_doi: str, article_doi: str, ctx) -> bool:
+    """Whether Dryad lists this article as the paper the dataset belongs to.
+
+    Dryad registers its primary article with DataCite as IsCitedBy (68k records
+    against 1.2k IsSupplementTo), which SUPPLEMENT_RELATIONS rightly refuses.
+    Its API keeps the distinction in `relatedWorks`:
+
+      * `primary_article` and `preprint` are the dataset's own paper -- 96 of
+        100 datasets published 2025-12..2026-08 carry a primary_article;
+      * `article` is ambiguous. Beside a primary_article it is some other paper
+        (dryad.w6m905r2r lists one of each); alone, it is how a depositor who
+        skipped the "primary" tick box names their paper (dryad.djh9w0whp,
+        "Data and code from: ..."). So a lone `article` counts and one among
+        several does not.
+
+    One request per Dryad deposit, cached. Fails closed: no answer, no claim.
+    """
+    import urllib.parse
+
+    from .supplement_index import DRYAD_DATASET
+
+    deposit = (deposit_doi or "").strip().lower()
+    needle = _canonical_relation_doi(article_doi)
+    if not needle or not _DRYAD_DOI_RE.match(deposit):
+        return False
+    cache = ctx.scratch.setdefault("_dryad_related_works", {})
+    if deposit not in cache:
+        # A heavily cited paper is named by hundreds of other papers' Dryad
+        # deposits; its own is among the first few or not there at all.
+        if len(cache) >= _MAX_DRYAD_LOOKUPS:
+            return False
+        works = None
+        try:
+            response = ctx.http.get(
+                DRYAD_DATASET.format(
+                    encoded_doi=urllib.parse.quote(f"doi:{deposit}", safe="")),
+                timeout=30, polite=False,
+            )
+            if response.ok:
+                works = (response.json() or {}).get("relatedWorks") or []
+        except Exception:
+            works = None
+        cache[deposit] = works
+    works = [w for w in (cache[deposit] or []) if isinstance(w, dict)]
+
+    def kind(work):
+        return str(work.get("relationship") or "").strip().lower()
+
+    articles = [w for w in works if kind(w) == "article"]
+    own = [w for w in works if kind(w) in _DRYAD_OWN_WORK]
+    if len(articles) == 1 and not any(kind(w) == "primary_article" for w in works):
+        own = own + articles
+    verdict = any(_canonical_relation_doi(w.get("identifier")) == needle for w in own)
+    if verdict:
+        ctx.log(f"    Dryad: {deposit} names this article as its own")
+    return verdict
 
 
 def _supplement_relation_to(attributes: dict, article_doi: str) -> Optional[str]:
@@ -276,9 +458,16 @@ def _files_in_repository(related_doi: str, ids, ctx,
     from .supplement_index import (
         enumerate_dataverse,
         enumerate_dryad,
-        enumerate_figshare,
         enumerate_osf,
         enumerate_zenodo,
+    )
+    from .supplement_repos import (
+        enumerate_4tu,
+        enumerate_figshare_deposit,
+        enumerate_mendeley,
+        enumerate_pangaea,
+        enumerate_sciencedb,
+        figshare_portal_hint,
     )
 
     routed = ctx.scratch.setdefault("_routed_deposit_dois", set())
@@ -289,12 +478,21 @@ def _files_in_repository(related_doi: str, ids, ctx,
 
     proxy = IdentifierSet(doi=related_doi)
     provider = _repo_provider(key)
+    if provider is None and figshare_portal_hint(
+            ctx.scratch.get("_deposit_landing_urls", {}).get(key)):
+        # One of the ~40 publisher and institution figshares whose DOI prefix
+        # is not in _REPO_ROUTES; its DataCite landing page gives it away.
+        provider = "figshare_files"
     enumerator = {
         "zenodo_files": enumerate_zenodo,
-        "figshare_files": enumerate_figshare,
+        "figshare_files": enumerate_figshare_deposit,
         "osf_files": enumerate_osf,
         "dryad_files": enumerate_dryad,
         "dataverse_files": enumerate_dataverse,
+        "mendeley_files": enumerate_mendeley,
+        "pangaea_files": enumerate_pangaea,
+        "fourtu_files": enumerate_4tu,
+        "sciencedb_files": enumerate_sciencedb,
     }.get(provider)
     if enumerator is None:
         # The long tail (institutional repos, subject databases) has no
@@ -398,7 +596,16 @@ _PAPER_DOI_PREFIXES = (
 
 #: Dataverse's convention for a paper's own deposit. Harvard Dataverse fills
 #: in NO relatedIdentifiers at all, so for it the title is the declaration.
-_REPLICATION_TITLE_RE = re.compile(r"(?i)^(?:replication\s+)?(data|code|materials?)\s+(?:for|from):?\s*(.+)")
+#: Dryad's is "Data from: <title>", and depositors vary it freely: "Data and
+#: code from:", "Code and data for:", "Dataset for:", "Supporting data for".
+#: Loosening the prefix is safe because the remainder must still match the
+#: article's own title.
+_DEPOSIT_NOUN = r"(?:data(?:\s*sets?)?|code|scripts?|software|materials?|files?|information)"
+_REPLICATION_TITLE_RE = re.compile(
+    r"(?i)^(?:(?:replication|supporting|supplementary|supplemental|source|raw)\s+)?"
+    + _DEPOSIT_NOUN + r"(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+|\s*&\s*|\s*/\s*)" + _DEPOSIT_NOUN + r")*"
+    r"\s+(?:for|from)\b\s*(?:the\s+(?:article|paper|manuscript|publication|study)\b\s*)?"
+    r"[:\-\u2013\u2014]?\s*[\"'\u201c\u2018]?(?P<rest>.+?)[\"'\u201d\u2019]?\s*$")
 
 
 def _datacite_attributes(doi: str, ctx) -> Optional[dict]:
@@ -461,8 +668,7 @@ def _deposit_names_article(repo_doi: str, article_doi: str, ctx) -> bool:
     attributes = _datacite_attributes(key, ctx)
     verdict = False
     if attributes is not None:
-        verdict = (_supplement_relation_to(attributes, article_doi) is not None
-                   or _replication_title_matches(attributes, article_doi, ctx))
+        verdict = _record_claims_article(key, attributes, article_doi, ctx)
     cache[key] = verdict
     return verdict
 
@@ -487,7 +693,7 @@ def _replication_title_matches(attributes: dict, article_doi: str, ctx) -> bool:
         if not matched:
             continue
         # Containment first, then near-identity for the spelling-variant tail.
-        if titles_match(matched.group(2), _article_title(article_doi, ctx)):
+        if titles_match(matched.group("rest"), _article_title(article_doi, ctx)):
             return True
     return False
 
@@ -851,6 +1057,20 @@ _REPO_ROUTES = (
     ("10.17605", "osf.io", "osf_files"),
     ("10.5061", "dryad", "dryad_files"),
     ("10.7910/dvn", None, "dataverse_files"),
+    # Figshare portals with their own prefix, largest first: GSA journals
+    # (Genetics, G3), ASHA, Sheffield, Loughborough, UCL. Not SAGE's 10.25384,
+    # which the public figshare API does not serve (supplement_repos).
+    ("10.25386", None, "figshare_files"),
+    ("10.25387", None, "figshare_files"),
+    ("10.23641", None, "figshare_files"),
+    ("10.15131", None, "figshare_files"),
+    ("10.17028", None, "figshare_files"),
+    ("10.5522/04", None, "figshare_files"),
+    ("10.17632", None, "mendeley_files"),
+    ("10.1594/pangaea", None, "pangaea_files"),
+    ("10.4121", None, "fourtu_files"),
+    ("10.57760/sciencedb", None, "sciencedb_files"),
+    ("10.11922/sciencedb", None, "sciencedb_files"),
 )
 
 

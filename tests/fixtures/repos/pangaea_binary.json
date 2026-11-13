@@ -1,0 +1,22 @@
+{
+ "@type": "Dataset",
+ "identifier": "https://doi.org/10.1594/PANGAEA.995426",
+ "name": "Quality-controlled integrated water vapor and liquid water path of HATPRO microwave radiometer at AWIPEV, Ny-Ålesund (2025)",
+ "isAccessibleForFree": true,
+ "conditionsOfAccess": "unrestricted",
+ "distribution": [
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "contentUrl": "https://download.pangaea.de/dataset/995426/files/mwr_processed_2025.zip",
+   "encodingFormat": "application/zip"
+  }
+ ],
+ "size": {
+  "@type": "QuantitativeValue",
+  "value": 3.8,
+  "unitText": "MBytes"
+ }
+}

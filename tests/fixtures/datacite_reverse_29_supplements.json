@@ -1,0 +1,1604 @@
+{
+ "data": [
+  {
+   "id": "10.6084/m9.figshare.34999964.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999964.v1",
+    "created": "2026-11-13T04:35:27Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 29 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999964",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999964",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999964",
+    "created": "2026-11-13T04:35:27Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 29 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999958",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999958",
+    "created": "2026-11-13T04:35:24Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 27 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999961",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999961",
+    "created": "2026-11-13T04:35:26Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 28 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999958.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999958.v1",
+    "created": "2026-11-13T04:35:24Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 27 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999958",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999961.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999961.v1",
+    "created": "2026-11-13T04:35:26Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 28 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999961",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999955.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999955.v1",
+    "created": "2026-11-13T04:35:23Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 26 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999955",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999955",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999955",
+    "created": "2026-11-13T04:35:22Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 26 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999952",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999952",
+    "created": "2026-11-13T04:35:20Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 25 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999952.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999952.v1",
+    "created": "2026-11-13T04:35:20Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 25 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999952",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999949",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999949",
+    "created": "2026-11-13T04:35:20Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 24 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999946.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999946.v1",
+    "created": "2026-11-13T04:35:17Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 23 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999946",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999949.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999949.v1",
+    "created": "2026-11-13T04:35:20Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 24 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999949",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999946",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999946",
+    "created": "2026-11-13T04:35:17Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 23 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999943",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999943",
+    "created": "2026-11-13T04:35:15Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 22 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999943.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999943.v1",
+    "created": "2026-11-13T04:35:15Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 22 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999943",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999940",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999940",
+    "created": "2026-11-13T04:35:14Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 21 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999940.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999940.v1",
+    "created": "2026-11-13T04:35:14Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 21 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999940",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999937",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999937",
+    "created": "2026-11-13T04:35:13Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 20 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999937.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999937.v1",
+    "created": "2026-11-13T04:35:13Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 20 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999937",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999934.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999934.v1",
+    "created": "2026-11-13T04:35:09Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 19 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999934",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999931.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999931.v1",
+    "created": "2026-11-13T04:35:09Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 18 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999931",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999934",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999934",
+    "created": "2026-11-13T04:35:09Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 19 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999931",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999931",
+    "created": "2026-11-13T04:35:09Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 18 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999928.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999928.v1",
+    "created": "2026-11-13T04:35:08Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 17 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999928",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999928",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999928",
+    "created": "2026-11-13T04:35:08Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 17 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999925.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999925.v1",
+    "created": "2026-11-13T04:35:05Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 16 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999925",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999922.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999922.v1",
+    "created": "2026-11-13T04:35:04Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 15 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999922",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999922",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999922",
+    "created": "2026-11-13T04:35:04Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 15 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999925",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999925",
+    "created": "2026-11-13T04:35:05Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 16 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999919.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999919.v1",
+    "created": "2026-11-13T04:35:04Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 14 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999919",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999919",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999919",
+    "created": "2026-11-13T04:35:04Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 14 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999913.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999913.v1",
+    "created": "2026-11-13T04:35:00Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 12 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999913",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999916",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999916",
+    "created": "2026-11-13T04:35:01Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 13 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999916.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999916.v1",
+    "created": "2026-11-13T04:35:01Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 13 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999916",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999910.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999910.v1",
+    "created": "2026-11-13T04:34:59Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 11 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999910",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999913",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999913",
+    "created": "2026-11-13T04:35:00Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 12 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999910",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999910",
+    "created": "2026-11-13T04:34:59Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 11 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999904",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999904",
+    "created": "2026-11-13T04:34:57Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 9 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999904.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999904.v1",
+    "created": "2026-11-13T04:34:57Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 9 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999904",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999901.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999901.v1",
+    "created": "2026-11-13T04:34:56Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 8 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999901",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999907",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999907",
+    "created": "2026-11-13T04:34:58Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 10 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999901",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999901",
+    "created": "2026-11-13T04:34:56Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 8 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999907.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999907.v1",
+    "created": "2026-11-13T04:34:58Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 10 of Genome-wide association analyses reveal genomics basis for"
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "Dataset",
+     "resourceType": "Dataset"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999907",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999898.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999898.v1",
+    "created": "2026-11-13T04:34:56Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 7 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999898",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999898",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999898",
+    "created": "2026-11-13T04:34:55Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 7 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999892",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999892",
+    "created": "2026-11-13T04:34:53Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 5 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999895.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999895.v1",
+    "created": "2026-11-13T04:34:53Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 6 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999895",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999895",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999895",
+    "created": "2026-11-13T04:34:53Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 6 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999892.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999892.v1",
+    "created": "2026-11-13T04:34:53Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 5 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999892",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999889.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999889.v1",
+    "created": "2026-11-13T04:34:49Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 4 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999889",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999886.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999886.v1",
+    "created": "2026-11-13T04:34:48Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 3 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999886",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999889",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999889",
+    "created": "2026-11-13T04:34:49Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 4 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999883.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999883.v1",
+    "created": "2026-11-13T04:34:47Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 2 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999883",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999883",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999883",
+    "created": "2026-11-13T04:34:47Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 2 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999886",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999886",
+    "created": "2026-11-13T04:34:48Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 3 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999880",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999880",
+    "created": "2026-11-13T04:34:45Z",
+    "version": null,
+    "titles": [
+     {
+      "title": "Additional file 1 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  },
+  {
+   "id": "10.6084/m9.figshare.34999880.v1",
+   "type": "dois",
+   "attributes": {
+    "doi": "10.6084/m9.figshare.34999880.v1",
+    "created": "2026-11-13T04:34:45Z",
+    "version": "1",
+    "titles": [
+     {
+      "title": "Additional file 1 of Genome-wide association analyses reveal genomics basis for "
+     }
+    ],
+    "types": {
+     "resourceTypeGeneral": "JournalArticle",
+     "resourceType": "Journal contribution"
+    },
+    "relatedIdentifiers": [
+     {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.34999880",
+      "relatedIdentifierType": "DOI"
+     },
+     {
+      "relationType": "IsSupplementTo",
+      "relatedIdentifier": "10.1186/s12711-026-01107-z",
+      "relatedIdentifierType": "DOI"
+     }
+    ]
+   }
+  }
+ ],
+ "meta": {
+  "total": 58,
+  "totalPages": 1,
+  "page": 1
+ }
+}

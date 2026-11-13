@@ -637,7 +637,7 @@ Twenty routes, tried in a fixed order so the numbering is reproducible:
 | bioRxiv / medRxiv | `10.1101` |
 | APA supplemental | `10.1037` |
 | Figshare / Zenodo / OSF | repository DOIs, and datasets reached through link services |
-| DataCite reverse relations | any DOI — finds deposits whose own DataCite record claims the article through a supplement relation (`IsSupplementTo`, `IsPartOf`, `IsDescribedBy`, `IsDocumentedBy`, or the inverse `IsSupplementedBy` / `HasPart`); deposits that cite it, derive from it (`IsDerivedFrom`) or relate to it any other way are dropped unless their title is a "Replication Data for:" match |
+| DataCite reverse relations | any DOI — finds deposits whose own DataCite record claims the article through a supplement relation (`IsSupplementTo`, `IsPartOf`, `IsDescribedBy`, `IsDocumentedBy`, or the inverse `IsSupplementedBy` / `HasPart`); deposits that cite it, derive from it (`IsDerivedFrom`) or relate to it any other way are dropped unless their title is a "Data from: <article title>"-style match or, for Dryad, Dryad's own API names the article as the dataset's primary article. Reads up to 500 records and routes up to 100 deposits, one per deposit however many versions are registered. Figshare "journal contribution" items (publisher SI documents, typed `JournalArticle` in DataCite) are kept when they say `IsSupplementTo` the article |
 | Crossref component DOIs | publishers that register components |
 | JATS-declared URLs | absolute URLs the JATS itself declares (e.g. LWW permalinks, publisher Source Data links) — recovery of last resort. Read from the PMC copy or, with no PMCID, from a publisher `{stem}.xml` saved beside the record (e.g. by `--get-xml-and-pdf`); TEI and non-JATS XML are ignored |
 | OpenAIRE ScholeXplorer | any DOI — Scholix publication→dataset/software links |
@@ -722,7 +722,7 @@ citation-grade link is promoted to `owned` only when the deposit's DataCite
 record names the article. Under `--download-data-artifacts`, `related` links are
 downloaded too, unless the deposit's own metadata says it belongs to a
 *different* article (`--download-related-unverified` drops even that check).
-Routed deposits in Figshare, Zenodo, OSF, Dryad or Harvard Dataverse go to those
+Routed deposits in any repository in the download table below go to those
 enumerators and land under `{stem}_data_artifacts/<deposit>/` with their
 original filenames (`routed_to_download: true` in the sidecar); they still get
 an entry in the supplementary manifest. The same deposit named by several link
@@ -770,19 +770,28 @@ Download — repositories with file enumerators (links that pass the routing rul
 
 | Repository | Routed on | Notes |
 |---|---|---|
-| figshare | `10.6084` / "figshare" | declared size + md5 before transfer |
+| figshare | `10.6084` / "figshare" | declared size + md5 before transfer; collections (`figshare.c.N`) are listed item by item |
+| figshare portals | GSA `10.25386`/`10.25387`, ASHA `10.23641`, Sheffield `10.15131`, Loughborough `10.17028`, UCL `10.5522/04`, and any deposit whose DataCite landing page is on `*.figshare.com` | the item must name the deposit DOI back before its files are taken |
 | Zenodo | `10.5281` / "zenodo" | restricted records skipped |
 | OSF | `10.17605` / "osf.io" | walks folder trees (depth/node caps) |
 | Dryad | `10.5061` / "dryad" | declared size + sha-256, paginated |
 | Harvard Dataverse | `10.7910/DVN` | declared md5; restricted files skipped |
+| Mendeley Data | `10.17632` | declared size + sha-256; older versions listed folder by folder |
+| PANGAEA | `10.1594/PANGAEA.N` | one file per DOI (table, binary, or a zip for a series); no declared size or checksum; datasets under moratorium skipped |
+| 4TU.ResearchData | `10.4121` | declared size + md5; embargoed and metadata-only records skipped; collections supported |
+| Science Data Bank | `10.57760` / `10.11922` `sciencedb.` | declared size + md5; walks folders |
 | BioStudies | — | content arrives via the Europe PMC supplementary bundle instead, never fetched twice |
 
-Not yet downloadable (recorded in the sidecar, left to the operator):
-Mendeley Data (`10.17632`), non-Harvard Dataverse installations, subject
-databases (GEO, SRA, PDB, UniProt — accession records, not file bundles),
-GitLab repositories, and the institutional-repository long tail.
-Adding an enumerator is the same small pattern as `enumerate_dryad` /
-`enumerate_dataverse` in `fetchpdf/retrieval/supplement_index.py`.
+Not downloadable (recorded, left to the operator):
+SAGE's figshare (`10.25384` — the public figshare API does not serve it; SAGE
+supplements come through the Atypon and Internet Archive routes instead),
+ICPSR / openICPSR (`10.3886` — login and terms of use), non-Harvard Dataverse
+installations, subject databases (GEO, SRA, PDB, UniProt — accession records,
+not file bundles), GitLab repositories, and the institutional-repository long
+tail. Dryad lists files freely but its download API currently answers HTTP 401
+without a bearer token, so Dryad files are reported as `blocked`.
+Adding an enumerator is the same small pattern as the ones in
+`fetchpdf/retrieval/supplement_repos.py`.
 
 ## `--fetch-everything`: the second layer
 

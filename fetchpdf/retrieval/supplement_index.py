@@ -230,6 +230,10 @@ def enumerate_epmc_archive(ids, ctx, include_inline_images: bool = False
 # -- Figshare ---------------------------------------------------------------
 
 
+_FIGSHARE_PAGE_SIZE = 100
+_FIGSHARE_MAX_PAGES = 10
+
+
 def enumerate_figshare(ids, ctx, with_item_type: bool = True) -> List[SupplementFile]:
     """Figshare's file listing.
 
@@ -240,14 +244,27 @@ def enumerate_figshare(ids, ctx, with_item_type: bool = True) -> List[Supplement
     article_id = match_id(ids.doi, r"figshare\.(\d+)")
     if not article_id:
         return []
-    response = ctx.http.get(
-        FIGSHARE_FILES.format(article_id=article_id), timeout=30, polite=False
-    )
-    if not response.ok:
-        return []
-    try:
-        listing = response.json() or []
-    except ValueError:
+    # The endpoint serves 10 files unless asked for more, and a GSA supplement
+    # (10.25387/g3.8230757) has 86.
+    listing: list = []
+    for page in range(1, _FIGSHARE_MAX_PAGES + 1):
+        response = ctx.http.get(
+            FIGSHARE_FILES.format(article_id=article_id),
+            params={"page_size": _FIGSHARE_PAGE_SIZE, "page": page},
+            timeout=30, polite=False,
+        )
+        if not response.ok:
+            break
+        try:
+            batch = response.json() or []
+        except ValueError:
+            break
+        if not isinstance(batch, list):
+            break
+        listing.extend(batch)
+        if len(batch) < _FIGSHARE_PAGE_SIZE:
+            break
+    if not listing:
         return []
 
     item_type = _figshare_item_type(ctx, article_id) if with_item_type else None

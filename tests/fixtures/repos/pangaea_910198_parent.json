@@ -1,0 +1,22 @@
+{
+ "@type": "Dataset",
+ "identifier": "https://doi.org/10.1594/PANGAEA.910198",
+ "name": "Planktic foraminiferal Mg/Ca and oxygen isotope data of sediment core GeoB17426-3 from the Western Pacific Warm Pool",
+ "isAccessibleForFree": true,
+ "conditionsOfAccess": "unrestricted",
+ "distribution": [
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "contentUrl": "https://doi.pangaea.de/10.1594/PANGAEA.910198?format=zip",
+   "encodingFormat": "application/zip"
+  }
+ ],
+ "size": {
+  "@type": "QuantitativeValue",
+  "value": 2.0,
+  "unitText": "datasets"
+ }
+}

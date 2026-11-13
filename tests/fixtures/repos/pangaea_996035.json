@@ -1,0 +1,31 @@
+{
+ "@type": "Dataset",
+ "identifier": "https://doi.org/10.1594/PANGAEA.996035",
+ "name": "Porewater geochemistry of sediment core M182_172-1 (172MUC21)",
+ "isAccessibleForFree": false,
+ "conditionsOfAccess": "access rights needed",
+ "distribution": [
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "@id": "data_matrix.tab",
+   "contentUrl": "https://doi.pangaea.de/10.1594/PANGAEA.996035?format=textfile",
+   "encodingFormat": "text/tab-separated-values"
+  },
+  {
+   "@type": [
+    "cr:FileObject",
+    "DataDownload"
+   ],
+   "contentUrl": "https://doi.pangaea.de/10.1594/PANGAEA.996035?format=html",
+   "encodingFormat": "text/html"
+  }
+ ],
+ "size": {
+  "@type": "QuantitativeValue",
+  "value": 321.0,
+  "unitText": "data points"
+ }
+}

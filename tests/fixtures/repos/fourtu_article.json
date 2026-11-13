@@ -1,0 +1,25 @@
+{
+ "uuid": "2702bc54-def0-4daf-8cd0-7f8e85453616",
+ "id": null,
+ "doi": "10.4121/2702bc54-def0-4daf-8cd0-7f8e85453616.v1",
+ "title": "Data underlying the publication: Roodmus: a toolkit for benchmarking heterogeneous electron cryo-microscopy reconstructions - Roodmus_c3c3b",
+ "resource_doi": "10.1107/S2052252524009321",
+ "version": 1,
+ "defined_type_name": "dataset",
+ "is_embargoed": false,
+ "is_metadata_record": false,
+ "is_confidential": false,
+ "files": [
+  {
+   "id": null,
+   "uuid": "243fd04e-47a7-4c06-9525-74261cf1e6bf",
+   "name": "c3c3b.tar.gz",
+   "size": 12263679427,
+   "is_link_only": false,
+   "is_incomplete": false,
+   "download_url": "https://data.4tu.nl/file/2702bc54-def0-4daf-8cd0-7f8e85453616/243fd04e-47a7-4c06-9525-74261cf1e6bf",
+   "supplied_md5": null,
+   "computed_md5": "3b79f46b62578a18699b7abd7e2ad65f"
+  }
+ ]
+}
