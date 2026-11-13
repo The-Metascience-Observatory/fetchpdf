@@ -1,0 +1,239 @@
+{
+  "data": [
+    {
+      "id": "10.6084/m9.figshare.34735259",
+      "type": "dois",
+      "attributes": {
+        "doi": "10.6084/m9.figshare.34735259",
+        "titles": [
+          {
+            "title": "Pollen morphology and character evolution in <i>Jatropha</i> L. (Euphorbiaceae) from India: an integrative phylogenetic approach"
+          }
+        ],
+        "publisher": "Taylor & Francis",
+        "publicationYear": 2026,
+        "types": {
+          "ris": "JOUR",
+          "bibtex": "article",
+          "citeproc": "article-journal",
+          "schemaOrg": "ScholarlyArticle",
+          "resourceType": "Journal contribution",
+          "resourceTypeGeneral": "JournalArticle"
+        },
+        "relatedIdentifiers": [
+          {
+            "relationType": "IsSupplementTo",
+            "relatedIdentifier": "10.1080/01916122.2026.2753622",
+            "relatedIdentifierType": "DOI"
+          }
+        ],
+        "url": "https://tandf.figshare.com/articles/journal_contribution/Pollen_morphology_and_character_evolution_in_i_Jatropha_i_L_Euphorbiaceae_from_India_an_integrative_phylogenetic_approach/34735259",
+        "creators": [
+          {
+            "name": "Seema Yadav"
+          },
+          {
+            "name": "Varnika Bhatia"
+          },
+          {
+            "name": "Cordilea Hannah"
+          }
+        ]
+      }
+    },
+    {
+      "id": "10.5281/zenodo.24197879",
+      "type": "dois",
+      "attributes": {
+        "doi": "10.5281/zenodo.24197879",
+        "titles": [
+          {
+            "title": "Replacing Activation Functions in MobileNetV3 for Medical Image Classification: A Comparative Study"
+          }
+        ],
+        "publisher": "Annals of Open Public Science",
+        "publicationYear": 2026,
+        "types": {
+          "ris": "JOUR",
+          "bibtex": "article",
+          "citeproc": "article-journal",
+          "schemaOrg": "ScholarlyArticle",
+          "resourceType": "",
+          "resourceTypeGeneral": "JournalArticle"
+        },
+        "relatedIdentifiers": [
+          {
+            "relationType": "IsPublishedIn",
+            "relatedIdentifier": "https://aoops.org/articles/2026-003.html",
+            "resourceTypeGeneral": "JournalArticle",
+            "relatedIdentifierType": "URL"
+          },
+          {
+            "relationType": "IsSupplementTo",
+            "relatedIdentifier": "https://github.com/mizutsuki/DermaMNIST",
+            "resourceTypeGeneral": "Software",
+            "relatedIdentifierType": "URL"
+          },
+          {
+            "relationType": "HasVersion",
+            "relatedIdentifier": "10.5281/zenodo.24197880",
+            "relatedIdentifierType": "DOI"
+          }
+        ],
+        "url": "https://zenodo.org/doi/10.5281/zenodo.24197879",
+        "creators": [
+          {
+            "name": "Li, Zhanqing"
+          },
+          {
+            "name": "Yan, Jiaqi"
+          },
+          {
+            "name": "Deng, Chao"
+          }
+        ]
+      }
+    },
+    {
+      "id": "10.5281/zenodo.24013608",
+      "type": "dois",
+      "attributes": {
+        "doi": "10.5281/zenodo.24013608",
+        "titles": [
+          {
+            "title": "Time resolved bottleneck analysis"
+          }
+        ],
+        "publisher": "Zenodo",
+        "publicationYear": 2026,
+        "types": {
+          "ris": "COMP",
+          "bibtex": "misc",
+          "citeproc": "article",
+          "schemaOrg": "SoftwareSourceCode",
+          "resourceType": "",
+          "resourceTypeGeneral": "ComputationalNotebook"
+        },
+        "relatedIdentifiers": [
+          {
+            "relationType": "IsSupplementTo",
+            "relatedIdentifier": "10.1101/2025.11.21.689558",
+            "resourceTypeGeneral": "Preprint",
+            "relatedIdentifierType": "DOI"
+          },
+          {
+            "relationType": "IsVersionOf",
+            "relatedIdentifier": "10.5281/zenodo.24013607",
+            "relatedIdentifierType": "DOI"
+          }
+        ],
+        "url": "https://zenodo.org/doi/10.5281/zenodo.24013608",
+        "creators": [
+          {
+            "name": "Vicente, Sylvain"
+          },
+          {
+            "name": "Boutillon, Nathanaël"
+          },
+          {
+            "name": "Forien, Raphael"
+          }
+        ]
+      }
+    },
+    {
+      "id": "10.5281/zenodo.8325626",
+      "type": "dois",
+      "attributes": {
+        "doi": "10.5281/zenodo.8325626",
+        "titles": [
+          {
+            "title": "Module_SfN_ARTISAN_ENPC"
+          }
+        ],
+        "publisher": "Zenodo",
+        "publicationYear": 2024,
+        "types": {
+          "ris": "GEN",
+          "bibtex": "misc",
+          "citeproc": "article",
+          "schemaOrg": "CreativeWork",
+          "resourceType": "Interactive resource",
+          "resourceTypeGeneral": "InteractiveResource"
+        },
+        "relatedIdentifiers": [
+          {
+            "relationType": "IsSupplementTo",
+            "relatedIdentifier": "10.1016/j.jclepro.2023.136364",
+            "resourceTypeGeneral": "JournalArticle",
+            "relatedIdentifierType": "DOI"
+          },
+          {
+            "relationType": "HasVersion",
+            "relatedIdentifier": "10.5281/zenodo.8325627",
+            "relatedIdentifierType": "DOI"
+          },
+          {
+            "relationType": "HasVersion",
+            "relatedIdentifier": "10.5281/zenodo.12188484",
+            "relatedIdentifierType": "DOI"
+          }
+        ],
+        "url": "https://zenodo.org/doi/10.5281/zenodo.8325626",
+        "creators": [
+          {
+            "name": "Versini, Pierre-Antoine"
+          },
+          {
+            "name": "Al Sayah, Mario"
+          }
+        ]
+      }
+    },
+    {
+      "id": "10.17632/tcpb72scrs.1",
+      "type": "dois",
+      "attributes": {
+        "doi": "10.17632/tcpb72scrs.1",
+        "titles": [
+          {
+            "title": "Replication package for \"Who pays for netting? An axiomatic theory of imbalance settlement\""
+          }
+        ],
+        "publisher": "Mendeley Data",
+        "publicationYear": 2026,
+        "types": {
+          "ris": "DATA",
+          "bibtex": "misc",
+          "citeproc": "dataset",
+          "schemaOrg": "Dataset",
+          "resourceType": "Dataset",
+          "resourceTypeGeneral": "Dataset"
+        },
+        "relatedIdentifiers": [
+          {
+            "relationType": "IsVersionOf",
+            "relatedIdentifier": "10.17632/tcpb72scrs",
+            "resourceTypeGeneral": "Dataset",
+            "relatedIdentifierType": "DOI"
+          },
+          {
+            "relationType": "IsSupplementedBy",
+            "relatedIdentifier": "https://doi.org/10.2139/ssrn.7445040",
+            "resourceTypeGeneral": "Text",
+            "relatedIdentifierType": "URL"
+          }
+        ],
+        "url": "https://data.mendeley.com/datasets/tcpb72scrs/1",
+        "creators": [
+          {
+            "name": "Guler, Kemal"
+          },
+          {
+            "name": "Ulusay, Nurten"
+          }
+        ]
+      }
+    }
+  ]
+}

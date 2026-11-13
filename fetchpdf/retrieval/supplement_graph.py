@@ -58,9 +58,14 @@ SCHOLEX_LINKS = "https://api.scholexplorer.openaire.eu/v3/Links"
 EPMC_DATALINKS = "https://www.ebi.ac.uk/europepmc/webservices/rest/MED/{pmid}/datalinks"
 
 #: Resource types that are somebody's deposited data rather than somebody's paper.
+#: ComputationalNotebook and InteractiveResource are how Zenodo types a paper's
+#: Jupyter notebooks and interactive figures (2,238 and 2,460 IsSupplementTo
+#: records on DataCite, 2026-11); Sound is the audio sibling of Audiovisual.
+#: Report, Dissertation and the other paper-shaped types stay out on purpose.
 KEEP_RESOURCE_TYPES = {
     "dataset", "software", "collection", "audiovisual", "image", "model",
     "text", "other", "workflow", "physicalobject",
+    "computationalnotebook", "interactiveresource", "sound",
 }
 
 #: Relations by which a deposit's own DataCite record says it IS this article's
@@ -88,6 +93,31 @@ SUPPLEMENT_RELATIONS = frozenset({
 DROP_RESOURCE_TYPES = {"preprint", "journalarticle", "article", "book", "bookchapter",
                        "conferencepaper", "peerreview", "publication"}
 
+#: The one paper-typed record that is routinely a supplementary FILE. Figshare's
+#: item type "journal contribution" is what publishers (Taylor & Francis,
+#: Springer Nature/BMC...) pick for a supplement that is a Word or PDF document,
+#: and figshare exports it to DataCite as resourceTypeGeneral JournalArticle.
+#: 787,356 figshare records are JournalArticle + IsSupplementTo (2026-11); a
+#: typical one holds a single `tpal_a_2753622_sm2942.docx`. Dropping on the
+#: general type alone threw all of them away.
+#:
+#: The exception is deliberately narrow, because the same label is also what an
+#: author picks when depositing the manuscript itself:
+#:   * the specific type must be figshare's "Journal contribution" -- the other
+#:     17k JournalArticle + IsSupplementTo records are papers on Zenodo;
+#:   * the record must say IsSupplementTo this article, in that direction. The
+#:     looser SUPPLEMENT_RELATIONS and the title match do not unlock it;
+#:   * it must not also call itself a copy or version of the article.
+_SUPPLEMENT_DOCUMENT_TYPE = ("journalarticle", "journalcontribution")
+_SUPPLEMENT_DOCUMENT_RELATION = "issupplementto"
+
+#: Relations by which a record says it is the article itself, in another place
+#: or another version.
+_SAME_WORK_RELATIONS = frozenset({
+    "isidenticalto", "isversionof", "hasversion", "isnewversionof",
+    "ispreviousversionof", "isvariantformof", "isoriginalformof",
+})
+
 #: Component DOI suffixes that are a figure or a table, not a supplementary file.
 _FIGURE_COMPONENT_RE = re.compile(r"\.(g|t)\d+$", re.IGNORECASE)
 
@@ -113,7 +143,7 @@ def enumerate_datacite_related(ids, ctx) -> List[SupplementFile]:
     response = ctx.http.get(
         DATACITE_REVERSE,
         params={
-            "query": f'relatedIdentifiers.relatedIdentifier:"{ids.doi}"',
+            "query": _reverse_query(ids.doi),
             "page[size]": _MAX_RELATED,
         },
         timeout=30,
@@ -137,6 +167,22 @@ def enumerate_datacite_related(ids, ctx) -> List[SupplementFile]:
     return files
 
 
+def _reverse_query(article_doi: str) -> str:
+    """The DataCite query for records naming this article, in either spelling.
+
+    Depositors store the article as a bare DOI or as its https://doi.org/ URL
+    (Mendeley Data does the latter, with relatedIdentifierType URL), and the
+    quoted-phrase match finds only the spelling asked for: for
+    10.2139/ssrn.7445040 the bare form returned 0 records and the URL form 2.
+    Case does not matter to the index. _accept_related canonicalises both
+    spellings, so widening the query cannot widen what is accepted.
+    """
+    doi = _canonical_relation_doi(article_doi)
+    quoted = doi.replace("\\", "\\\\").replace('"', '\\"')
+    return ('relatedIdentifiers.relatedIdentifier:'
+            f'("{quoted}" OR "https://doi.org/{quoted}")')
+
+
 def _canonical_relation_doi(value) -> str:
     from urllib.parse import unquote
     value = unquote(str(value or "").strip()).lower()
@@ -156,6 +202,12 @@ def _accept_related(record, article_doi, ctx) -> Optional[str]:
     types = attributes.get("types") or {}
     general = str(types.get("resourceTypeGeneral") or "").strip().lower()
     specific = re.sub(r"[^a-z]", "", str(types.get("resourceType") or "").lower())
+    if (general, specific) == _SUPPLEMENT_DOCUMENT_TYPE:
+        # Paper-typed, so only the strictest evidence lets it through.
+        if not _is_supplement_document_of(attributes, article_doi):
+            return None
+        ctx.log(f"    DataCite: {related_doi} (journal contribution, supplement)")
+        return related_doi
     if general in DROP_RESOURCE_TYPES or specific in DROP_RESOURCE_TYPES:
         return None
     if general and general not in KEEP_RESOURCE_TYPES:
@@ -168,6 +220,26 @@ def _accept_related(record, article_doi, ctx) -> Optional[str]:
         return None
     ctx.log(f"    DataCite: {related_doi} ({general or 'untyped'})")
     return related_doi
+
+
+def _is_supplement_document_of(attributes: dict, article_doi: str) -> bool:
+    """Whether a figshare "journal contribution" is this article's supplement
+    rather than a copy of the article. See _SUPPLEMENT_DOCUMENT_TYPE."""
+    needle = _canonical_relation_doi(article_doi)
+    if not needle:
+        return False
+    supplements = False
+    for relation in (attributes or {}).get("relatedIdentifiers") or []:
+        if not isinstance(relation, dict):
+            continue
+        if _canonical_relation_doi(relation.get("relatedIdentifier")) != needle:
+            continue
+        kind = str(relation.get("relationType") or "").strip().lower()
+        if kind in _SAME_WORK_RELATIONS:
+            return False
+        if kind == _SUPPLEMENT_DOCUMENT_RELATION:
+            supplements = True
+    return supplements
 
 
 def _supplement_relation_to(attributes: dict, article_doi: str) -> Optional[str]:
