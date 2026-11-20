@@ -438,3 +438,50 @@ def test_an_aws_waf_challenge_counts_as_a_challenge():
         status_code = 202
         headers = {"x-amzn-waf-action": "challenge", "server": "CloudFront"}
     assert inst._is_challenge(R())
+
+
+# --------------------------------------------------------------------------
+# Reading the browser's cookie store (get_cookies)
+# --------------------------------------------------------------------------
+def test_firefox_millisecond_expiry_is_exported_as_seconds():
+    from fetchpdf import get_cookies
+    assert get_cookies._expiry_seconds(1825881135221) == pytest.approx(1825881135.221)
+    assert get_cookies._expiry_seconds(1825881135) == 1825881135.0
+    assert get_cookies._expiry_seconds(0) == -1
+    assert get_cookies._expiry_seconds(None) == -1
+
+
+def test_firefox_cookies_still_in_the_wal_are_read(tmp_path, monkeypatch):
+    """A running Firefox holds recent cookies in cookies.sqlite-wal."""
+    import shutil
+    import sqlite3
+    import types
+    from fetchpdf import get_cookies
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    db = profile / "cookies.sqlite"
+    live = sqlite3.connect(db)          # stays open, like Firefox itself
+    live.execute("PRAGMA journal_mode=WAL")
+    live.execute("PRAGMA wal_autocheckpoint=0")
+    live.execute("create table moz_cookies (host, name)")
+    live.commit()
+    live.execute("insert into moz_cookies values ('.wiley.com', 'fresh')")
+    live.commit()
+    assert (profile / "cookies.sqlite-wal").stat().st_size > 0
+
+    def firefox(cookie_file):
+        # browser_cookie3 copies the main file alone before reading it.
+        alone = tmp_path / "alone.sqlite"
+        shutil.copyfile(cookie_file, alone)
+        con = sqlite3.connect(alone)
+        try:
+            return [name for (name,) in con.execute("select name from moz_cookies")]
+        finally:
+            con.close()
+
+    fake = types.SimpleNamespace(
+        Firefox=lambda: types.SimpleNamespace(cookie_file=str(db)), firefox=firefox)
+    try:
+        assert get_cookies._firefox_jar(fake) == ["fresh"]
+    finally:
+        live.close()

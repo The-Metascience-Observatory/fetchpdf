@@ -1,5 +1,6 @@
 """The setup wizard's decisions. No browser, no network."""
 import json
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -18,8 +19,29 @@ def _isolated(monkeypatch, tmp_path):
 
 
 def test_every_probe_is_a_covered_publisher():
-    for doi in gc.PROBES.values():
-        assert inst.publisher_pdf_urls(doi) and inst.publisher_article_url(doi)
+    for name, doi in gc.PROBES.items():
+        assert inst.covers(doi) and gc.probe_page(name)
+        assert inst.publisher_pdf_urls(doi) or inst._prefix(doi) in inst.PUBLISHER_LANDING_SITES
+
+
+def test_every_probe_page_is_on_the_publisher_site():
+    # The sign-in tab must land where the cookies are read, not on doi.org.
+    for name in gc.PROBES:
+        assert inst._domain_matches(urlsplit(gc.probe_page(name)).hostname,
+                                    gc._publisher_site(name)), name
+
+
+def test_jama_is_a_wizard_publisher():
+    assert gc.publisher_for_site("jamanetwork.com") == "jama"
+    url = gc.signin_url({"redirector": gc.INSTITUTIONS["harvard"]["redirector"]}, "jama")
+    assert "jamanetwork.com" in url and "doi.org" not in url
+
+
+def test_jama_without_its_cookies_is_not_signed_in(tmp_path):
+    f = tmp_path / "c.json"
+    f.write_text(json.dumps({"cookies": [
+        {"name": "s", "value": "v", "domain": ".wiley.com", "path": "/"}]}), encoding="utf-8")
+    assert gc.check_access(f, ["jama"]) == {"jama": "not signed in"}
 
 
 def test_signin_goes_through_the_library_redirector():

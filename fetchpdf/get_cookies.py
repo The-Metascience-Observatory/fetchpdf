@@ -71,12 +71,22 @@ PROBES: Dict[str, str] = {
     "science": "10.1126/science.abn1725",
     "aha": "10.1161/circulationaha.121.058901",
     "ieee": "10.1109/embc.2014.6943774",
+    "jama": "10.1001/jamainternmed.2024.0069",
+}
+
+#: The page to sign in on, for a publisher whose article URL is not derivable
+#: from the DOI (PUBLISHER_LANDING_SITES). The DOI link would get there too,
+#: but the library redirector is handed doi.org instead of the publisher's own
+#: host. JAMA answers an unentitled session with the abstract page, and the
+#: PDF link redirects there as well (measured 2026-11-19).
+PROBE_PAGES: Dict[str, str] = {
+    "jama": "https://jamanetwork.com/journals/jamainternalmedicine/fullarticle/2816071",
 }
 
 PUBLISHER_NAMES = {"wiley": "Wiley", "tandf": "Taylor & Francis", "sage": "SAGE",
                    "springer": "Springer", "hogrefe": "Hogrefe", "informs": "INFORMS",
                    "science": "Science", "aha": "AHA Journals",
-                   "ieee": "IEEE Xplore"}
+                   "ieee": "IEEE Xplore", "jama": "JAMA Network"}
 
 CONFIG_DIR = inst.CONFIG_DIR
 ACCESS_CONFIG = inst.ACCESS_CONFIG
@@ -103,12 +113,15 @@ MAC_APP_NAMES = {"chrome": "Google Chrome", "firefox": "Firefox", "edge": "Micro
                  "brave": "Brave Browser", "chromium": "Chromium"}
 
 
-def _site(url: str) -> str:
-    return inst.registrable_domain(urlsplit(url).hostname or "")
+def probe_page(name: str) -> str:
+    """The publisher page that opens *name*'s test article."""
+    return PROBE_PAGES.get(name) or inst.publisher_article_url(PROBES[name])
 
 
 def _publisher_site(name: str) -> str:
-    return _site(inst.publisher_article_url(PROBES[name]))
+    # The site whose cookies the route sends, not the article URL's host: for
+    # a publisher reached through the DOI link that host is doi.org.
+    return inst.publisher_sites(PROBES[name])[0]
 
 
 def publisher_for_site(site: str) -> Optional[str]:
@@ -167,6 +180,70 @@ def detect_browsers() -> List[str]:
     return found
 
 
+def _expiry_seconds(expires) -> float:
+    """A cookie expiry as unix seconds, or -1 for a session cookie.
+
+    Firefox began storing expiry in MILLISECONDS and browser_cookie3 0.20
+    hands the number through unchanged. Such a value makes every dead cookie
+    look alive for millennia, and Playwright refuses the whole cookie set
+    ("Cookie should have a valid expires"), which silently kills the browser
+    fallback for every publisher (seen 2026-11-10, Firefox on macOS).
+    """
+    if not expires:
+        return -1
+    value = float(expires)
+    if value > 1e11:          # seconds would put this past the year 5000
+        value /= 1000.0
+    return value if value > 0 else -1
+
+
+def _firefox_jar(browser_cookie3) -> list:
+    """Firefox's cookies, INCLUDING the ones it has not yet checkpointed.
+
+    A running Firefox keeps recent cookies in ``cookies.sqlite-wal`` and locks
+    the database. browser_cookie3 then copies ``cookies.sqlite`` alone, or
+    opens it ``immutable``; both ignore the WAL, so the sign-in of a minute
+    ago is not there (seen 2026-11-10: Springer, Hogrefe and INFORMS read as
+    "not signed in" straight after signing in). Snapshot the database WITH
+    its WAL, fold the WAL in, and read the snapshot.
+    """
+    import sqlite3
+    source = Path(browser_cookie3.Firefox().cookie_file)
+    with tempfile.TemporaryDirectory(prefix="fetchpdf-ff-") as tmp:
+        copy = Path(tmp) / "cookies.sqlite"
+        shutil.copyfile(source, copy)
+        wal = source.with_name(source.name + "-wal")
+        if wal.exists():
+            shutil.copyfile(wal, copy.with_name(copy.name + "-wal"))
+        con = sqlite3.connect(copy)
+        try:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            con.close()
+        # Session cookies live beside the database; keep the layout.
+        for rel in ("sessionstore.js", "sessionstore-backups/recovery.jsonlz4"):
+            if (source.parent / rel).exists():
+                (Path(tmp) / rel).parent.mkdir(exist_ok=True)
+                shutil.copyfile(source.parent / rel, Path(tmp) / rel)
+        return list(browser_cookie3.firefox(cookie_file=str(copy)))
+
+
+def _macos_blocks_browser_data(browser: str) -> bool:
+    """True when macOS privacy protection (TCC) hides *browser*'s profile.
+
+    The folder is the user's own, yet listing it fails with EPERM: the
+    terminal app has not been granted access to other apps' data.
+    """
+    for profile in BROWSERS.get(browser, ((), ()))[1]:
+        try:
+            os.listdir(Path(profile).expanduser())
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def export_from_browser(browser: str, out_path: Path, label: str,
                         quiet: bool = False) -> Dict[str, int]:
     """Copy the covered publishers' cookies from *browser* into *out_path*.
@@ -177,34 +254,44 @@ def export_from_browser(browser: str, out_path: Path, label: str,
     import browser_cookie3
     loader = getattr(browser_cookie3, browser)
     sites = inst.cookie_sites()
-    cookies, per_site, unreadable = [], {}, []
-    for site in sites:
-        try:
-            jar = loader(domain_name=site)
-        except Exception as exc:      # noqa: BLE001
-            if not quiet:
-                print(f"  {site}: could not read cookies ({type(exc).__name__})")
-            unreadable.append(site)
-            continue
-        n = 0
-        for c in jar:
-            if not c.domain or not inst._domain_matches(c.domain, site):
-                continue
-            cookies.append({"name": c.name, "value": c.value, "domain": c.domain,
-                            "path": c.path or "/", "secure": bool(c.secure),
-                            "expires": float(c.expires) if c.expires else -1,
-                            "httpOnly": False, "sameSite": "Lax"})
-            n += 1
-        per_site[site] = n
-    if unreadable:
+    # ONE read of the whole store, filtered here. Asking per site made macOS
+    # put up a Keychain prompt ("security wants to use ... Chrome Safe
+    # Storage") for every publisher -- thirty-odd password dialogs in a row.
+    try:
+        if browser == "firefox":
+            jar = _firefox_jar(browser_cookie3)
+        else:
+            jar = list(loader())
+    except Exception as exc:      # noqa: BLE001
         # Never replace a good export with a worse one. Chrome's store is
         # encrypted with a key from the desktop keyring, so a process outside
         # the login session (cron, ssh, a detached service) cannot read it --
-        # and writing what it did read would sign every later run out. The
+        # and writing a partial read would sign every later run out. The
         # caller keeps using the last export instead.
+        if sys.platform == "darwin" and _macos_blocks_browser_data(browser):
+            hint = ("macOS is blocking this terminal from the browser's files. Open "
+                    "System Settings > Privacy & Security > Full Disk Access, switch "
+                    "on your terminal app, then quit and reopen it")
+        elif sys.platform == "darwin" and browser != "firefox":
+            hint = ("macOS did not release the browser's cookie key. When the "
+                    "Keychain dialog appears, type your Mac LOGIN password (not "
+                    "your library password) and click 'Always Allow'")
+        else:
+            hint = "no desktop keyring in this session?"
         raise RuntimeError(
-            f"could not read {browser}'s cookies for {', '.join(unreadable)} "
-            "(no desktop keyring in this session?); the previous export is kept")
+            f"could not read {browser}'s cookies ({type(exc).__name__}: {hint}); "
+            "the previous export is kept") from exc
+    cookies, per_site = [], dict.fromkeys(sites, 0)
+    for c in jar:
+        site = next((s for s in sites
+                     if c.domain and inst._domain_matches(c.domain, s)), None)
+        if site is None:
+            continue
+        cookies.append({"name": c.name, "value": c.value, "domain": c.domain,
+                        "path": c.path or "/", "secure": bool(c.secure),
+                        "expires": _expiry_seconds(c.expires),
+                        "httpOnly": False, "sameSite": "Lax"})
+        per_site[site] += 1
     state = {"cookies": cookies, "origins": [],
              "user_agent": _chrome_user_agent() if browser != "firefox" else None,
              "fetchpdf": {"institution": label, "source": f"browser:{browser}",
@@ -311,7 +398,7 @@ def _print_status(status: Dict[str, str]) -> None:
 # Opening sign-in tabs in the user's own browser
 # --------------------------------------------------------------------------
 def signin_url(cfg: dict, name: str) -> str:
-    article = inst.publisher_article_url(PROBES[name])
+    article = probe_page(name)
     redirector = cfg.get("redirector")
     return redirector + quote(article, safe="") if redirector else article
 
@@ -362,6 +449,10 @@ def _signin_round(cfg: dict, publishers: List[str]) -> Dict[str, str]:
     # reading then reports "no access" for a publisher that works seconds later
     # (seen 2026-10-01: Wiley and T&F). Settle, test, and re-test what failed.
     time.sleep(5)
+    if sys.platform == "darwin" and cfg["browser"] != "firefox":
+        print("  macOS may now ask for a password to read \"Chrome Safe Storage\".\n"
+              "  Type your Mac LOGIN password (not your library one) and click\n"
+              "  \"Always Allow\", so it does not ask again.")
     per_site = export_from_browser(cfg["browser"], Path(cfg["cookie_file"]), cfg["name"])
     print(f"  Read {sum(per_site.values())} publisher cookies from {cfg['browser']}. Testing...")
     status = check_access(cfg["cookie_file"], publishers)
@@ -609,7 +700,15 @@ def main(argv=None) -> int:
 # --------------------------------------------------------------------------
 def _probe_pdf(page, doi: str) -> bool:
     """True if the publisher serves this article's PDF to the current page."""
-    for url in inst.publisher_pdf_urls(doi):
+    urls = inst.publisher_pdf_urls(doi)
+    if not urls:
+        # A landing-page publisher (JAMA): the page declares its own PDF link.
+        try:
+            pdf = inst.pdf_url_from_landing(page.content(), page.url, doi)
+        except Exception:      # noqa: BLE001 - mid-navigation
+            pdf = None
+        urls = [pdf] if pdf else []
+    for url in urls:
         try:
             data, _info = inst.fetch_pdf_in_page(page, url)
         except Exception:      # noqa: BLE001 - navigation raced the evaluate
@@ -702,8 +801,8 @@ def run_window(institution: dict, out_path: Path, profile: Path, publishers: Lis
             for name in publishers:
                 hops.clear()
                 doi = PROBES[name]
-                article = inst.publisher_article_url(doi)
-                site = _site(article)
+                article = probe_page(name)
+                site = _publisher_site(name)
                 print(f"[{name}] {doi}")
 
                 if not force_login:

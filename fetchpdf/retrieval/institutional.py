@@ -187,9 +187,7 @@ def _probe_still_works(site: str) -> Optional[bool]:
         from ..get_cookies import PROBES
     except Exception:      # noqa: BLE001
         return None
-    doi = next((d for d in PROBES.values()
-                if registrable_domain(urlsplit(publisher_article_url(d) or "").hostname or "") == site),
-               None)
+    doi = next((d for d in PROBES.values() if publisher_sites(d)[:1] == [site]), None)
     cookie_file = active_cookies_file()
     if not doi or not cookie_file:
         return None
