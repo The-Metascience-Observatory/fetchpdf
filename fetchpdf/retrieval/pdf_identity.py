@@ -158,6 +158,41 @@ PAGE_COUNT_SLACK = 2
 #: `_page_count_corroborates`.
 PAGE_COUNT_MIN_SPAN = 2
 
+#: A text layer can be long and still say nothing. 10.1192/bjp.173.6.475, as
+#: served by two shadow libraries, is a 1998 scan stored rotated 180 degrees
+#: whose OCR was run on the upside-down image: page 1 extracts as "snjiA ...
+#: sXesse jaqjO JOJ SUOIJE3lJS3AUI" ("Virus ... assays" read upside down).
+#: Thousands of characters, so it cleared LEGIBLE_FRONT_CHARS, matched neither
+#: DOI nor title, and was deleted as a different article -- the right paper.
+#:
+#: The tell is word SHAPE, which no language produces: case flipping inside a
+#: word ("jaqjO", "sXesse") and digits wedged between mixed-case letters
+#: ("SUOIJE3lJS3AUI" is all caps and passes; "Su0iJe3lj" does not). It is
+#: deliberately not a vocabulary test -- a stopword ratio was tried first and
+#: scored legible Russian, Ukrainian and Turkish papers BELOW the garbled scan.
+#:
+#: Measured 2026-11-19 over the first three pages of 3,964 corpus PDFs: the
+#: bulk near zero, then a dirty-but-legible 1997 conference OCR at 0.20 (its
+#: words are damaged, not upside down), and the upside-down scan alone at
+#: 0.43. 0.30 sits in the open space between the two.
+GARBLED_MIN = 0.30
+
+#: Fewer words than this and the shape fraction is noise.
+GARBLED_MIN_WORDS = 50
+
+_WORD_RE = re.compile(r"[^\W_]{3,}")
+_DIGIT_INSIDE_WORD_RE = re.compile(r"[^\W\d_]\d+[^\W\d_]")
+
+#: Pages read from the BACK of the document for a cover sheet. HighWire-era
+#: journals (BJP via bjp.rcpsych.org among them) append one: the full title,
+#: the citation, and "Access the most recent version at DOI: <doi>". Two pages,
+#: because a trailing blank sometimes follows it.
+COVER_SHEET_PAGES = 2
+
+#: A cover-sheet line shorter than this is too generic ("and", "BJP") to count
+#: as a piece of the title. See `_title_fraction_any_order`.
+COVER_SHEET_MIN_LINE = 12
+
 _PAGE_RANGE_RE = re.compile(r"^\s*(?:[A-Za-z]*)(\d+)\s*(?:[-–—]\s*(?:[A-Za-z]*)(\d+))?\s*$")
 
 #: S1 on its own is not enough when the front pages are legible and do not carry
@@ -327,9 +362,14 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
             if _doi_only_cited(text, doi):
                 doi_discounted = "only inside a citation"
             elif title:
-                two_pages = squash(reader.text(DOI_TITLE_PAGES) or text)
+                two_pages_text = reader.text(DOI_TITLE_PAGES) or text
+                two_pages = squash(two_pages_text)
                 fraction = matched_fraction(squash(title), two_pages)
-                if len(two_pages) >= LEGIBLE_FRONT_CHARS and fraction < DOI_TITLE_MIN:
+                # A garbled page cannot carry a title either, so it is "too
+                # short to judge" in the sense that matters, and keeps the DOI.
+                if (len(two_pages) >= LEGIBLE_FRONT_CHARS
+                        and _garbled_fraction(two_pages_text) is None
+                        and fraction < DOI_TITLE_MIN):
                     doi_discounted = ("but its front pages carry only {:.0%} of the "
                                       "title".format(fraction))
             if not doi_discounted:
@@ -393,6 +433,11 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
                 ["title-partial-with-page-count"],
             )
 
+    # Whether the front pages SAID anything: enough text, and text made of
+    # words. Both halves gate a conviction below; see GARBLED_MIN.
+    garbled = _garbled_fraction(text) if len(squashed_page) >= LEGIBLE_FRONT_CHARS else None
+    legible = len(squashed_page) >= LEGIBLE_FRONT_CHARS and garbled is None
+
     # S4: the title the document claims for itself, when its text layer did not
     # carry one legibly.
     embedded = reader.embedded_title()
@@ -417,8 +462,7 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
             squashed_embedded
             and len(squashed_embedded) >= len(wanted_title) * TITLE_BLOCK_MIN
         )
-        if (could_have_matched and embedded_fraction < TITLE_BLOCK_FOREIGN
-                and len(squashed_page) >= LEGIBLE_FRONT_CHARS):
+        if could_have_matched and embedded_fraction < TITLE_BLOCK_FOREIGN and legible:
             return IdentityVerdict(
                 WRONG,
                 'PDF is a different document: it calls itself "{}", not "{}"'.format(
@@ -450,11 +494,25 @@ def verify_pdf_identity(source, doi: Optional[str] = None,
         # way; what changes is whether the run reports a retrieval bug or a
         # document that was never machine-readable, and those send whoever reads
         # the report to two very different places.
-        if len(squashed_page) < LEGIBLE_FRONT_CHARS:
+        #
+        # A garbled text layer is the same case wearing more characters: OCR of
+        # an upside-down scan says as little about identity as no text at all.
+        if not legible:
+            cover = _cover_sheet_match(reader, doi, title, pages)
+            if cover:
+                return truncated or cover
             corroborated = _page_count_corroborates(reader, pages)
             if corroborated:
                 return truncated or IdentityVerdict(
                 VERIFIED, corroborated, ["page-count-corroborated"])
+            if garbled is not None:
+                return IdentityVerdict(
+                    UNREADABLE,
+                    "PDF's text layer is garbled OCR ({:.0%} of its words are "
+                    "not word-shaped; often a scan stored upside down), so it "
+                    "cannot be checked against {}".format(
+                        garbled, doi or "the requested record"),
+                )
             return IdentityVerdict(
                 UNREADABLE,
                 "PDF has almost no readable text ({} characters over {} pages), "
@@ -579,6 +637,91 @@ def _truncation_reason(reader, page_range: Optional[str],
     )
 
 
+def _garbled_fraction(text: Optional[str]) -> Optional[float]:
+    """The share of words no language would spell, when it is high enough to
+    mean the text layer is OCR noise; else None. See GARBLED_MIN."""
+    words = _WORD_RE.findall(text or "")
+    judged = bad = 0
+    for word in words:
+        letters = [c for c in word if c.isalpha()]
+        if not letters:
+            continue
+        has_lower = any(c.islower() for c in letters)
+        has_upper = any(c.isupper() for c in letters)
+        judged += 1
+        if has_lower and has_upper:
+            # Lower, UPPER and Title case are words; so is a digit glued to
+            # one (CD4, H1N1, 10mg). Mixed case otherwise is not, nor is a
+            # digit wedged inside a mixed-case run.
+            alpha = "".join(letters)
+            if _DIGIT_INSIDE_WORD_RE.search(word) or not alpha.istitle():
+                bad += 1
+    if judged < GARBLED_MIN_WORDS:
+        return None
+    fraction = bad / judged
+    return fraction if fraction >= GARBLED_MIN else None
+
+
+def _cover_sheet_match(reader, doi: Optional[str], title: Optional[str],
+                       page_range: Optional[str]) -> Optional[IdentityVerdict]:
+    """VERIFIED when a trailing cover sheet names this article; else None.
+
+    Consulted ONLY when the front pages said nothing legible, which is what
+    keeps it safe: a paper whose last page is a bibliography entry for the
+    requested article (title and DOI together, exactly as a cover sheet
+    prints them) has legible front pages of its own and never gets here. For
+    the same reason the DOI must not be one only cited, and when the record's
+    length is known the file may not be much longer than it.
+    """
+    if not doi or not title:
+        return None
+    expected = expected_page_count(page_range)
+    actual = reader.page_count()
+    if expected and actual and actual > expected + PAGE_COUNT_SLACK:
+        return None
+    tail = reader.tail_text(COVER_SHEET_PAGES)
+    if not tail:
+        return None
+    squashed_tail = squash(tail)
+    wanted = squash(normalise_doi(doi))
+    if not wanted or wanted not in squashed_tail or _doi_only_cited(tail, doi):
+        return None
+    if _title_fraction_any_order(title, tail) < TITLE_BLOCK_MIN:
+        return None
+    return IdentityVerdict(
+        VERIFIED,
+        "front pages are unreadable, but a cover sheet at the end of the PDF "
+        "prints the requested DOI and title",
+        ["cover-sheet-doi-and-title"],
+    )
+
+
+def _title_fraction_any_order(title: str, text: str) -> float:
+    """`matched_fraction`, but forgiving of lines extracted out of order.
+
+    `matched_fraction` only credits runs in the title's own order, and text
+    extraction does not always keep it: PyMuPDF reads the BJP cover sheet's
+    two title lines bottom-up ("syndromes and psychiatric disorders after
+    glandular fever." before "Incidence, risk and prognosis of acute and
+    chronic fatigue"), which scores 0.52 for a title printed in full. Here a
+    line counts when the whole of it is a run of the title, so the score still
+    means "these phrases of the title are printed", just not in sequence.
+    """
+    wanted = squash(title)
+    if not wanted:
+        return 0.0
+    covered = [False] * len(wanted)
+    for line in (text or "").splitlines():
+        piece = squash(line)
+        if len(piece) < COVER_SHEET_MIN_LINE:
+            continue
+        at = wanted.find(piece)
+        if at >= 0:
+            covered[at:at + len(piece)] = [True] * len(piece)
+    by_line = sum(covered) / float(len(wanted))
+    return max(by_line, matched_fraction(wanted, squash(text or "")))
+
+
 def _page_count_corroborates(reader, page_range: Optional[str]) -> Optional[str]:
     """A reason string when the PDF's page count matches the record's, else None.
 
@@ -623,6 +766,7 @@ class _Reader:
     def __init__(self, source):
         self.source = source
         self._text = {}
+        self._tail = {}
         self._pages = _UNSET
         self._metadata = None
         self._trailer = _UNSET
@@ -631,6 +775,11 @@ class _Reader:
         if pages not in self._text:
             self._text[pages] = _read_text(self.source, pages)
         return self._text[pages]
+
+    def tail_text(self, pages: int) -> Optional[str]:
+        if pages not in self._tail:
+            self._tail[pages] = _read_text(self.source, pages, from_end=True)
+        return self._tail[pages]
 
     def page_count(self) -> Optional[int]:
         if self._pages is _UNSET:
@@ -681,12 +830,14 @@ class _Reader:
 _UNSET = object()
 
 
-def _read_text(source, pages: Optional[int]) -> Optional[str]:
-    """Text from the front `pages` (None = the whole document)."""
-    min_chars = 1 if pages is None else MIN_FRONT_CHARS
+def _read_text(source, pages: Optional[int], from_end: bool = False) -> Optional[str]:
+    """Text from the front `pages` (None = the whole document), or the back
+    ones with `from_end`. A cover sheet is short, so the back gets no floor."""
+    min_chars = 1 if pages is None or from_end else MIN_FRONT_CHARS
     if isinstance(source, (bytes, bytearray)):
-        return pdf_text_from_bytes(bytes(source), max_pages=pages, min_chars=min_chars)
-    return pdf_text(source, max_pages=pages, min_chars=min_chars)
+        return pdf_text_from_bytes(bytes(source), max_pages=pages, min_chars=min_chars,
+                                   from_end=from_end)
+    return pdf_text(source, max_pages=pages, min_chars=min_chars, from_end=from_end)
 
 
 def _is_generic_title(embedded: str) -> bool:

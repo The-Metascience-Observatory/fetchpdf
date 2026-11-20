@@ -101,7 +101,8 @@ def engine_status() -> Tuple[Optional[str], str]:
 
 
 def pdf_text(path: str, max_pages: Optional[int] = DEFAULT_MAX_PAGES,
-             min_chars: int = MIN_USEFUL_CHARS) -> Optional[str]:
+             min_chars: int = MIN_USEFUL_CHARS,
+             from_end: bool = False) -> Optional[str]:
     """The document's text, or None when it could not be read as text.
 
     None covers every failure the same way on purpose -- no engine, an
@@ -116,15 +117,19 @@ def pdf_text(path: str, max_pages: Optional[int] = DEFAULT_MAX_PAGES,
     text layer" would, under reject-always, delete a correct PDF. Identity
     verification passes a lower floor; the default is unchanged, so
     `fulltext_scan` is untouched.
+
+    `from_end` takes the `max_pages` from the back of the document instead of
+    the front, for the cover sheet some publishers append after the article.
     """
     if not path or not os.path.exists(path):
         return None
-    return _extract(path, max_pages, min_chars)
+    return _extract(path, max_pages, min_chars, from_end)
 
 
 def pdf_text_from_bytes(content: bytes,
                         max_pages: Optional[int] = DEFAULT_MAX_PAGES,
-                        min_chars: int = MIN_USEFUL_CHARS) -> Optional[str]:
+                        min_chars: int = MIN_USEFUL_CHARS,
+                        from_end: bool = False) -> Optional[str]:
     """`pdf_text` for a document that is still in memory.
 
     The tiered engine judges an artifact before anything has been written to
@@ -133,7 +138,7 @@ def pdf_text_from_bytes(content: bytes,
     """
     if not content:
         return None
-    return _extract(content, max_pages, min_chars)
+    return _extract(content, max_pages, min_chars, from_end)
 
 
 def pdf_page_count(source) -> Optional[int]:
@@ -212,29 +217,35 @@ def _as_pypdf_source(source):
     return source
 
 
-def _extract(source, max_pages: Optional[int], min_chars: int) -> Optional[str]:
+def _extract(source, max_pages: Optional[int], min_chars: int,
+             from_end: bool = False) -> Optional[str]:
     """PyMuPDF first, pypdf second, over either a path or bytes."""
     module = _pymupdf()
     if module is not None:
-        text = _read_pymupdf(module, source, max_pages, min_chars)
+        text = _read_pymupdf(module, source, max_pages, min_chars, from_end)
         if text is not None:
             return text
 
     reader = _pypdf()
     if reader is not None:
-        return _read_pypdf(reader, source, max_pages, min_chars)
+        return _read_pypdf(reader, source, max_pages, min_chars, from_end)
 
     return None
 
 
+def _page_slice(pages, max_pages: Optional[int], from_end: bool):
+    if max_pages is None:
+        return pages
+    return pages[-max_pages:] if from_end else pages[:max_pages]
+
+
 def _read_pymupdf(module, source, max_pages: Optional[int],
-                  min_chars: int = MIN_USEFUL_CHARS) -> Optional[str]:
+                  min_chars: int = MIN_USEFUL_CHARS,
+                  from_end: bool = False) -> Optional[str]:
     document = None
     try:
         document = _open_pymupdf(module, source)
-        pages = list(document)
-        if max_pages is not None:
-            pages = pages[:max_pages]
+        pages = _page_slice(list(document), max_pages, from_end)
         text = "\n".join(page.get_text() or "" for page in pages)
     except Exception:
         # A corrupt or encrypted PDF is not this module's problem to raise on;
@@ -250,10 +261,11 @@ def _read_pymupdf(module, source, max_pages: Optional[int],
 
 
 def _read_pypdf(reader_cls, source, max_pages: Optional[int],
-                min_chars: int = MIN_USEFUL_CHARS) -> Optional[str]:
+                min_chars: int = MIN_USEFUL_CHARS,
+                from_end: bool = False) -> Optional[str]:
     try:
         reader = reader_cls(_as_pypdf_source(source))
-        pages = reader.pages if max_pages is None else reader.pages[:max_pages]
+        pages = _page_slice(list(reader.pages), max_pages, from_end)
         text = "\n".join((page.extract_text() or "") for page in pages)
     except Exception:
         return None

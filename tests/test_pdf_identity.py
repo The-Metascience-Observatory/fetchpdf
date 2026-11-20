@@ -687,3 +687,116 @@ def test_garbled_front_page_keeps_the_doi_verdict(tmp_path):
     verdict = verify_pdf_identity(path, DOI, TITLE)
     assert verdict.state == VERIFIED
     assert verdict.signals == ["doi-in-text"]
+
+
+# --------------------------------------------------------------------------
+# A text layer that is long but says nothing
+# --------------------------------------------------------------------------
+
+class TestGarbledTextLayer:
+    """10.1192/bjp.173.6.475, as two shadow libraries serve it: a 1998 scan
+    stored rotated 180 degrees, OCRed upside down. Thousands of characters of
+    "snjiA ... sXesse jaqjO", so it cleared the legibility floor, matched
+    neither DOI nor title, and the right paper was deleted as a different one.
+    Its page 8 is the journal's cover sheet, printing the title and DOI.
+    """
+
+    #: Lines lifted from that file's page 1 extraction.
+    UPSIDE_DOWN = ["snjiAO|E89UjojX3oj gSj pue y^Sj joj sXesse -ounuiui",
+                   "jaqjO JOJ SUOIJE3lJS3AUI |E3|8o|OJ3S sqj 3AE3[oj jnoqE",
+                   "uaSijuE pisdeo u.ioijur jE3pnu XpoqijuE |u|doj.ij.iq",
+                   "3J3M SJ33|qnS p3pn|3Xg 3U|jnoy sjsaj XpoqijuE ii papnpui",
+                   "suoijE8tjs3AU| snjiA jjEgâ€” u|3jsdg pajiuir] SEM poo|q"]
+
+    BJP_DOI = "10.1192/bjp.173.6.475"
+    BJP_TITLE = ("Incidence, risk and prognosis of acute and chronic fatigue "
+                 "syndromes and psychiatric disorders after glandular fever")
+
+    def _scan(self, tmp_path, pages=7, tail=()):
+        body = (self.UPSIDE_DOWN * 11)[:52] * pages        # 52 lines per page
+        return _pdf(tmp_path, "upside_down.pdf", body + list(tail))
+
+    def _cover_sheet(self):
+        # In the order PyMuPDF reads the real one: the title's second line
+        # comes out before its first.
+        return ["Access the most recent version at DOI: " + self.BJP_DOI,
+                "BJP 1998, 173:475-481.",
+                "P D White, J M Thomas, J Amess, D H Crawford, S A Grover",
+                "syndromes and psychiatric disorders after glandular fever.",
+                "Incidence, risk and prognosis of acute and chronic fatigue",
+                "This article cites 0 articles, 0 of which you can access for free"]
+
+    def test_garbled_text_is_unreadable_not_a_different_article(self, tmp_path):
+        verdict = verify_pdf_identity(self._scan(tmp_path), self.BJP_DOI, self.BJP_TITLE)
+        assert verdict.state == UNREADABLE
+        assert "garbled" in verdict.reason
+
+    def test_garbled_text_with_a_matching_page_count_is_accepted(self, tmp_path):
+        verdict = verify_pdf_identity(self._scan(tmp_path), self.BJP_DOI,
+                                      self.BJP_TITLE, pages="475-481")
+        assert verdict.state == VERIFIED
+        assert verdict.signals == ["page-count-corroborated"]
+
+    def test_a_trailing_cover_sheet_names_the_article(self, tmp_path):
+        """No page range needed, and the title's lines may come out of order."""
+        path = self._scan(tmp_path, tail=self._cover_sheet())
+        verdict = verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE)
+        assert verdict.state == VERIFIED
+        assert verdict.signals == ["cover-sheet-doi-and-title"]
+
+    def test_a_cover_sheet_does_not_vouch_for_a_much_longer_file(self, tmp_path):
+        path = self._scan(tmp_path, pages=7, tail=self._cover_sheet())
+        verdict = verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE, pages="475-476")
+        assert verdict.state == UNREADABLE
+
+    def test_a_cover_sheet_needs_the_title_as_well_as_the_doi(self, tmp_path):
+        tail = ["Access the most recent version at DOI: " + self.BJP_DOI]
+        path = self._scan(tmp_path, tail=tail)
+        assert verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE).state == UNREADABLE
+
+    def test_a_legible_paper_citing_the_article_last_is_still_wrong(self, tmp_path):
+        """The dangerous direction. A bibliography entry prints the cited
+        article's title and DOI together, exactly as a cover sheet does; the
+        legible front pages are what keep it from ever being consulted."""
+        reference = ["White PD, Thomas JM, Amess J, et al. " + self.BJP_TITLE,
+                     "Br J Psychiatry 1998;173:475-81. doi:" + self.BJP_DOI]
+        path = _pdf(tmp_path, "citing.pdf", ["Long COVID in a primary care cohort"]
+                    + PROSE * 25 + reference)
+        assert verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE).state == WRONG
+
+    def test_a_garbled_page_printing_the_doi_keeps_the_doi_verdict(self, tmp_path):
+        """A garbled page cannot carry the title either, so its absence is
+        not evidence against the printed DOI."""
+        path = _pdf(tmp_path, "scan.pdf", [f"doi:{self.BJP_DOI}"]
+                    + (self.UPSIDE_DOWN * 11)[:52] * 3)
+        verdict = verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE)
+        assert verdict.state == VERIFIED
+        assert verdict.signals == ["doi-in-text"]
+
+    def test_dirty_but_legible_ocr_can_still_convict(self, tmp_path):
+        """Scored 0.20 on the corpus, the highest of any legible file: a 1997
+        conference abstract page. Its words are damaged, not upside down."""
+        dirty = ["Departmen: of Gerontological Psychiatry. Institute of Clinical",
+                 "M V Kouzakoya S. Mosolov,E. Kostiukova, A. Singin. Depanm~nt",
+                 "ofPsychophomuJcology, Stat« Research Cerar«ofPsychiatry and",
+                 "Cerebeolysin (EBEWEA was administered to patients with",
+                 "P88 Neurosciences, ps}'chopharmacology andbiological psychiatry"]
+        path = _pdf(tmp_path, "dirty.pdf", ["ANTICONVULSANTS NORMOTHYMICS"] + dirty * 20)
+        assert verify_pdf_identity(path, self.BJP_DOI, self.BJP_TITLE).state == WRONG
+
+    @pytest.mark.parametrize("prose", [
+        "Serum IgG and IgM against EBV were measured; mRNA for IL6 and CD4+ "
+        "counts in H1N1 and SARS-CoV-2 cohorts were compared at pH 7.4 in NaCl.",
+        "Die Patienten wurden nach sechs Monaten erneut untersucht und die "
+        "Ergebnisse mit der Kontrollgruppe verglichen.",
+        "Пациенты были обследованы через шесть месяцев после начала болезни.",
+    ])
+    def test_scientific_and_non_english_prose_is_not_garbled(self, prose):
+        assert pdf_identity._garbled_fraction(" ".join([prose] * 20)) is None
+
+
+def test_pdf_text_reads_from_the_end(tmp_path):
+    from fetchpdf.retrieval.pdf_text import pdf_text
+    path = _pdf(tmp_path, "three.pdf", ["first page"] * 52 + ["middle"] * 52 + ["last page"])
+    tail = pdf_text(path, max_pages=1, min_chars=1, from_end=True)
+    assert "last page" in tail and "first page" not in tail and "middle" not in tail
