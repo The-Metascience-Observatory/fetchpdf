@@ -382,6 +382,22 @@
       "rps": 1,
       "burst": 1
     },
+    "_archive_comment": [
+      "The Internet Archive: the Scholar full-text lookup the PDF chain asks by",
+      "DOI or PMID, and the Wayback Machine that serves the captures it points",
+      "at (and the supplement captures of supplement_wayback). Neither publishes",
+      "an allowance, so these are a choice, not a measurement: slower than",
+      "_default, because the Archive is a donor-funded service that offered the",
+      "lookup as a favour and a --workers 10 run should not be what it notices."
+    ],
+    "scholar.archive.org": {
+      "rps": 2,
+      "burst": 2
+    },
+    "web.archive.org": {
+      "rps": 1,
+      "burst": 2
+    },
     "_default": {
       "rps": 3,
       "burst": 3

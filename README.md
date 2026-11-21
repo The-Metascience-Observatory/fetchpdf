@@ -34,6 +34,7 @@ A comprehensive Python package to download academic papers (PDFs) from DOIs (or 
   - Crossref
   - Semantic Scholar
   - OpenAlex
+  - Internet Archive Scholar
   - CORE
   - Figshare
   - SSRN (Social Science Research Network)
@@ -1400,22 +1401,25 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
    - `openAccessPdf` field, with a landing page fallback for OJS sites
    - PsyArXiv → OSF URL conversion
 8. **OpenAlex** — open-access locations; placed after Semantic Scholar to conserve OpenAlex's download quota
-9. **CORE** (core.ac.uk) — 40M+ repository papers; needs `COREAPIKEY`
-10. **DOAJ** — open-access full-text links
-11. **DataCite content URLs** — direct content and related resource links
-12. **Wiley rendered PDF** — only when Playwright is installed
-13. **APA supplemental** — APA supplemental files, converting `.doc`/`.docx` to PDF when available
-14. **Direct DOI resolver**
+9. **Internet Archive Scholar** — the Archive's own capture of the PDF, served from the Wayback Machine
+   - One keyless lookup by DOI ([scholar.archive.org](https://scholar.archive.org)); retried by PMID when the Archive does not know the DOI, and used for a PMID that has no DOI at all
+   - Ahead of CORE because it has no daily quota; reported as `ia_scholar` in source tracking
+10. **CORE** (core.ac.uk) — 40M+ repository papers; needs `COREAPIKEY`
+11. **DOAJ** — open-access full-text links
+12. **DataCite content URLs** — direct content and related resource links
+13. **Wiley rendered PDF** — only when Playwright is installed
+14. **APA supplemental** — APA supplemental files, converting `.doc`/`.docx` to PDF when available
+15. **Direct DOI resolver**
     - Follows `https://doi.org/{doi}` to the landing page
     - Handles Crossref chooser pages (multiple resolution)
     - Scrapes PDF links from HTML (`citation_pdf_url`, href patterns)
     - Publisher-specific deterministic URL patterns (Wiley, T&F, SAGE, MIT Press, …)
-15. **DataCite related identifiers**
+16. **DataCite related identifiers**
     - Supplementary material → main paper
     - Versioned DOI resolution (`IsIdenticalTo`, `IsVersionOf`)
-16. **DOI → PMID fallback**
+17. **DOI → PMID fallback**
     - Converts the DOI to a PMID and tries PMID-native sources (the PubMed page's `citation_pdf_url`)
-17. **Google Scholar via SerpApi** (optional)
+18. **Google Scholar via SerpApi** (optional)
     - Enabled by `SERPAPI_API_KEY` in `.env.local` or the environment
     - Searches the quoted DOI, then the quoted article title if the DOI search returned results but no accepted PDF
     - At most two searches per unresolved DOI, with up to five results per search;
@@ -1429,7 +1433,7 @@ These run first when the DOI matches (by prefix, or by the name appearing anywhe
 
 ### Final Fallbacks
 
-18. **Elsevier full-text API**
+19. **Elsevier full-text API**
     - Elsevier records only (`10.1016/*`, or a Crossref landing page on sciencedirect.com / elsevier.com)
     - Requires `ELSEVIER_TDM_API_KEY`
     - **`10.1016/*` DOIs are asked for their PDF first** — before PMC, Unpaywall,

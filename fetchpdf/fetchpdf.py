@@ -184,6 +184,7 @@ SOURCE_DISPLAY_NAMES = {
     "europepmc": "EuropePMC",
     "existing": "on-disk",
     "figshare": "figshare",
+    "ia_scholar": "InternetArchive Scholar",
     "openalex": "OpenAlex",
     "osf": "OSF",
     "pmc": "PMC",
@@ -3908,6 +3909,212 @@ def try_serpapi_scholar_fallback(doi: str, save_path: str, verbose=False):
     return False
 
 
+#: Internet Archive Scholar's full-text lookup (fatcat), offered to this project
+#: by the Archive in issue #9. One request per identifier: a 302 whose Location
+#: is a Wayback Machine capture of the PDF, or a 404 with a JSON `message`.
+#: Keyless and unmetered, and a Wayback capture has no bot check in front of it,
+#: which is what the publisher and repository routes around it keep tripping on.
+_IA_SCHOLAR_LOOKUP = "https://scholar.archive.org/api/fatcat/v2/release/lookup/fulltext"
+
+#: Consecutive failed lookups (transport errors, 429, 5xx) before the route is
+#: skipped for the rest of the run. Same reasoning as CORE's: a service that is
+#: down should cost three timeouts, not one per remaining record.
+_IA_SCHOLAR_FAILURE_LIMIT = 3
+_IA_SCHOLAR_FAILURES = 0
+_IA_SCHOLAR_DISABLED = False
+_IA_SCHOLAR_LOCK = threading.Lock()
+
+
+def _archive_bucket(host: str):
+    """The shared token bucket for an archive.org host (see ladder.json)."""
+    from .retrieval.ratelimit import shared_host_limiter
+    from .retrieval.tiers import load_ladder
+
+    try:
+        limits = load_ladder().rate_limits
+    except Exception:
+        limits = None
+    return shared_host_limiter(limits).bucket(host)
+
+
+def _ia_scholar_note_failure() -> None:
+    global _IA_SCHOLAR_FAILURES, _IA_SCHOLAR_DISABLED
+    with _IA_SCHOLAR_LOCK:
+        _IA_SCHOLAR_FAILURES += 1
+        if _IA_SCHOLAR_FAILURES < _IA_SCHOLAR_FAILURE_LIMIT or _IA_SCHOLAR_DISABLED:
+            return
+        _IA_SCHOLAR_DISABLED = True
+    _print_yellow_warning(
+        "⚠️  Internet Archive Scholar is not answering; skipping it for the "
+        "rest of this run."
+    )
+
+
+def _ia_scholar_lookup(id_type: str, id_value: str, verbose=False):
+    """Ask IA Scholar for an archived PDF. Returns (url or None, release_known).
+
+    release_known is False only when the Archive has no record of the
+    identifier at all, which is the one case where asking again under a
+    different identifier can change the answer. "Known, but no file" and
+    "could not ask" both report True, so neither triggers a second request.
+    """
+    global _IA_SCHOLAR_FAILURES
+    if _IA_SCHOLAR_DISABLED:
+        return None, True
+    host = urlparse(_IA_SCHOLAR_LOOKUP).hostname
+    _archive_bucket(host).acquire()
+    try:
+        # Redirects are not followed: the Location is the answer, and it has to
+        # pass the rejected-URL memo and the identity check like any other
+        # candidate rather than being streamed straight to disk.
+        r = requests.get(
+            _IA_SCHOLAR_LOOKUP,
+            params={"id_type": id_type, "id_value": id_value},
+            headers={"User-Agent": POLITE_USER_AGENT, "Accept": "application/json"},
+            timeout=15,
+            allow_redirects=False,
+        )
+    except Exception as e:
+        _ia_scholar_note_failure()
+        if verbose:
+            print(f"  IA Scholar: request failed ({str(e)[:80]})")
+        return None, True
+
+    status = r.status_code
+    if status == 429 or status >= 500:
+        wait = _retry_after_seconds(r)
+        if wait:
+            _archive_bucket(host).penalize(wait)
+        _ia_scholar_note_failure()
+        if verbose:
+            print(f"  IA Scholar: HTTP {status}")
+        return None, True
+
+    with _IA_SCHOLAR_LOCK:
+        _IA_SCHOLAR_FAILURES = 0
+
+    if status in (301, 302, 303, 307, 308):
+        location = (r.headers or {}).get("Location") or ""
+        target = urljoin(_IA_SCHOLAR_LOOKUP, location) if location else ""
+        if _is_plausible_http_url(target):
+            return target, True
+        return None, True
+
+    known = True
+    if status == 404:
+        # Two different 404s, told apart only by the message: "no release found
+        # with doi of X" (the Archive has never heard of it) and "no fulltext
+        # for doi:X" (it has the record and holds no file). Measured 2026-11-21.
+        try:
+            message = str((r.json() or {}).get("message") or "")
+        except Exception:
+            message = ""
+        known = not message.lower().startswith("no release found")
+    elif verbose:
+        print(f"  IA Scholar: HTTP {status}")
+    return None, known
+
+
+#: A Wayback capture URL, split around the optional two-letter modifier that
+#: follows the timestamp (`id_`, `if_`, ...).
+_WAYBACK_CAPTURE_RE = re.compile(
+    r"^(https?://web\.archive\.org/web/\d{4,14})(?:[a-z]{2}_)?(/.+)$", re.IGNORECASE)
+
+
+def _wayback_raw_url(url: str) -> str:
+    """The `id_` form of a Wayback capture URL: the original bytes, unframed."""
+    match = _WAYBACK_CAPTURE_RE.match(url or "")
+    return f"{match.group(1)}id_{match.group(2)}" if match else url
+
+
+def _download_archived_pdf(url: str, save_path: str, verbose=False) -> bool:
+    """Download a PDF the Internet Archive holds. True when it was written.
+
+    Not `try_download`, because its headers are the wrong ones here. The
+    Wayback Machine decides between a capture and its HTML viewer *around* the
+    capture by how the request looks, and anything resembling a browser gets
+    the viewer: 200, text/html, for a URL that is a PDF to a bare client.
+    `try_download` asks as a browser navigating to a page, and its polite-UA
+    retry keeps those headers, so it is handed the viewer twice. Measured
+    2026-11-21: every capture IA Scholar pointed at failed that way.
+
+    Two forms are tried, both with nothing but a User-Agent:
+
+      * `id_` first -- the original bytes whatever the headers say.
+      * the URL as issued second, because playback of one capture is not
+        dependable enough to ask only once: 20170816074056 of an
+        escholarship.org PDF answered 404 and 200 by turns, in both forms,
+        while other captures served every time. No Accept header, on purpose:
+        with `Accept: application/pdf` the plain form returns the viewer, and
+        with the default `*/*` it returns the PDF.
+    """
+    for candidate in _dedupe_keep_order([_wayback_raw_url(url), url]):
+        bucket = _archive_bucket(urlparse(candidate).hostname)
+        bucket.acquire()
+        try:
+            with requests.get(
+                candidate,
+                headers={"User-Agent": POLITE_USER_AGENT},
+                timeout=30,
+                allow_redirects=True,
+                stream=True,
+            ) as r:
+                if r.status_code == 200 and _stream_pdf_to(
+                        r, save_path, candidate, require_magic=True):
+                    return True
+                if r.status_code == 429:
+                    bucket.penalize(_retry_after_seconds(r) or 10.0)
+                if verbose:
+                    ctype = (r.headers or {}).get("content-type", "")
+                    print(f"  IA Scholar: no PDF at {candidate[:100]} "
+                          f"(HTTP {r.status_code}, {ctype[:40]})")
+        except Exception as e:
+            if verbose:
+                print(f"  IA Scholar: download failed ({str(e)[:80]})")
+    return False
+
+
+@_timed("ia_scholar")
+def try_ia_scholar_fallback(doi: str, save_path: str, verbose=False, pmid=None):
+    """Try the Internet Archive's copy, found through IA Scholar (fatcat).
+
+    Looks the record up by DOI, and by PMID when one is in hand and the Archive
+    does not know the DOI -- or when there is no DOI at all. A capture is
+    whatever the Archive crawled under that record: usually a repository or
+    publisher PDF, occasionally the wrong file, so it goes through the same
+    identity check as every other download instead of being trusted for having
+    been found by identifier.
+    """
+    lookups = []
+    if doi:
+        # Lower-cased on purpose: the lookup is case-sensitive, and fatcat
+        # stores DOIs in lower case. 10.1371/JOURNAL.PONE.0000308 is a 404
+        # where 10.1371/journal.pone.0000308 is a 302 (measured 2026-11-21).
+        lookups.append(("doi", str(doi).strip().lower()))
+    pmid = str(pmid).strip() if pmid else ""
+    if pmid.isdigit():
+        lookups.append(("pmid", pmid))
+
+    for id_type, id_value in lookups:
+        url, release_known = _ia_scholar_lookup(id_type, id_value, verbose=verbose)
+        if url and not _already_rejected(doi, url):
+            if verbose:
+                print(f"  IA Scholar: trying {url[:120]}")
+            # With no DOI there is no title to check against; the caller's own
+            # verification is all a PMID-only record has, as for pmid_direct.
+            if _download_archived_pdf(url, save_path, verbose) and (
+                not doi or _accept_downloaded_pdf(save_path, doi, url, verbose)
+            ):
+                if verbose:
+                    print(f"✅ IA Scholar success for {doi or 'PMID ' + pmid}")
+                return True
+        if release_known:
+            # The same release answers for every identifier it carries, so a
+            # second lookup would only be handed the same file or the same miss.
+            break
+    return False
+
+
 @_timed("doaj")
 def try_doaj_fallback(doi: str, save_path: str, verbose=False):
     """Try DOAJ API for OA full-text links."""
@@ -4514,6 +4721,14 @@ def _fetch_pdf_chain(doi,
             if pmid_got:
                 _record_source(_source_out, "pmid_direct")
                 return pmid_got if isinstance(pmid_got, str) else save_path
+            # The one other route that can be asked by PMID alone.
+            try:
+                if try_ia_scholar_fallback(None, save_path, verbose, pmid=pmid_input):
+                    _record_source(_source_out, "ia_scholar")
+                    return save_path
+            except Exception as e:
+                if verbose:
+                    print(f"Error with IA Scholar fallback: {e}")
         if verbose:
             print(f"  Could not normalize/resolve identifier: {original_identifier}")
         return None
@@ -5476,6 +5691,19 @@ def _fetch_pdf_chain(doi,
     except Exception as e:
         if (verbose): print(f"Error with OpenAlex: {e}")
         pass
+
+    # ---------------- Internet Archive Scholar ----------------
+    # Ahead of CORE on purpose: it needs no key and has no daily quota, and
+    # part of what it returns is the Archive's capture of a CORE download, so
+    # a hit here saves one of CORE's 500 requests a day. Only a PMID already
+    # in hand is passed -- this step is not worth an NCBI lookup of its own.
+    try:
+        if try_ia_scholar_fallback(doi, save_path, verbose, pmid=_pmid_cache[0]):
+            _record_source(_source_out, "ia_scholar")
+            return save_path
+    except Exception as e:
+        if verbose:
+            print(f"Error with IA Scholar fallback: {e}")
 
     # ---------------- CORE (core.ac.uk) ----------------
     try:
