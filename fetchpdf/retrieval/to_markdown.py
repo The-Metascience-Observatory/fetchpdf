@@ -1004,7 +1004,9 @@ def main(argv=None):
     """Convert a directory of retrieved artifacts to Markdown."""
     import argparse
 
-    parser = argparse.ArgumentParser(
+    from .._cli import ArgumentParser
+
+    parser = ArgumentParser(
         prog="fetchpdf-md",
         description=(
             "Convert retrieved .xml / .fulltext.html artifacts into Markdown. "

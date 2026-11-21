@@ -609,7 +609,9 @@ def main(argv=None):
     """Render article XML already on disk to self-contained HTML and/or PDF."""
     import argparse
 
-    parser = argparse.ArgumentParser(
+    from .._cli import ArgumentParser
+
+    parser = ArgumentParser(
         prog="fetchpdf-render",
         description=(
             "Render retrieved article .xml (JATS or Elsevier) to "

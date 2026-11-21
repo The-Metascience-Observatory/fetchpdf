@@ -647,7 +647,9 @@ def cmd_window(args) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(
+    from ._cli import ArgumentParser
+
+    parser = ArgumentParser(
         prog="fetchpdf cookies",
         description="Set up institutional access for fetchpdf (off until you run setup).")
     sub = parser.add_subparsers(dest="command")

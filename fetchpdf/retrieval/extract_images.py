@@ -531,7 +531,9 @@ def main(argv=None):
     """Extract embedded images from PDFs already on disk."""
     import argparse
 
-    parser = argparse.ArgumentParser(
+    from .._cli import ArgumentParser
+
+    parser = ArgumentParser(
         prog="fetchpdf-images",
         description=(
             "Dump every embedded image bitstream from retrieved PDFs into "

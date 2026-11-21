@@ -7872,7 +7872,9 @@ def _main(argv=None, json_out=None):
     """Command-line interface for fetchpdf."""
     import argparse
 
-    parser = argparse.ArgumentParser(
+    from ._cli import ArgumentParser
+
+    parser = ArgumentParser(
         description="Download PDFs from DOIs using multiple fallback sources.",
         epilog=(
             "Institutional access:\n"

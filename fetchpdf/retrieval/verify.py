@@ -95,7 +95,9 @@ def audit_tree(root: str, verify_hashes: bool = True) -> List[Tuple[str, str]]:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(
+    from .._cli import ArgumentParser
+
+    parser = ArgumentParser(
         prog="fetchpdf-verify",
         description="Check supplementary files on disk against their manifests. "
                     "Makes no network requests.")

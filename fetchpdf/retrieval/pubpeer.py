@@ -249,7 +249,9 @@ def _summary(rec: dict) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(
+    from .._cli import ArgumentParser
+
+    ap = ArgumentParser(
         prog="fetchpdf-pubpeer",
         description="Capture a dated record of a paper's PubPeer comments.")
     ap.add_argument("doi", nargs="+", help="one or more DOIs")
