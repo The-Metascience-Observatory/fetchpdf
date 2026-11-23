@@ -884,8 +884,14 @@ def fetch_pdf_in_page(page, url: str) -> Tuple[Optional[bytes], dict]:
 
 
 def fetch_in_browser(doi, save_path, cookies, user_agent=None,
-                     verbose=False) -> Optional[str]:
-    """The cookie route through a real browser. Returns the PDF URL, or None."""
+                     verbose=False, retry_refused=True) -> Optional[str]:
+    """The cookie route through a real browser. Returns the PDF URL, or None.
+
+    *retry_refused* waits and retries once after a 403/429, for Cloudflare
+    refusing a burst of workers on one site. A single probe per publisher
+    (``fetchpdf cookies check``) is no burst, and a paywall's 403 would only
+    cost it ~10 s more, so it turns this off.
+    """
     article = publisher_article_url(doi)
     pdf_urls = publisher_pdf_urls(doi)
     from_landing = not pdf_urls and _prefix(doi) in PUBLISHER_LANDING_SITES
@@ -940,7 +946,7 @@ def fetch_in_browser(doi, save_path, cookies, user_agent=None,
                     except Exception:      # noqa: BLE001 - the page was still settling
                         page.wait_for_timeout(3000)
                         data, info = fetch_pdf_in_page(page, url)
-                    if not data and info.get("status") in (403, 429):
+                    if retry_refused and not data and info.get("status") in (403, 429):
                         # Cloudflare refuses a burst of parallel workers (seen
                         # 2026-10-23 on PNAS: 2 of 6 at once, all fine singly).
                         page.wait_for_timeout(8000)

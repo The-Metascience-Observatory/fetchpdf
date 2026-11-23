@@ -61,6 +61,51 @@ def test_a_publisher_with_no_cookies_is_not_signed_in(tmp_path):
     assert gc.check_access(f, ["sage"]) == {"sage": "not signed in"}
 
 
+def test_signin_retest_skips_publishers_whose_cookies_did_not_move(monkeypatch, tmp_path):
+    # The settle-and-retest pass can only change a publisher whose cookies
+    # changed; re-testing the others repeats ~30 s browser probes for nothing.
+    f = tmp_path / "c.json"
+    reads = iter([
+        [{"name": "s", "value": "old", "domain": ".wiley.com", "path": "/"},
+         {"name": "s", "value": "same", "domain": ".sagepub.com", "path": "/"}],
+        [{"name": "s", "value": "new", "domain": ".wiley.com", "path": "/"},
+         {"name": "s", "value": "same", "domain": ".sagepub.com", "path": "/"}],
+    ])
+
+    def export(*a, **k):
+        f.write_text(json.dumps({"cookies": next(reads)}), encoding="utf-8")
+        return {}
+    checked = []
+
+    def check(path, pubs, verbose=False):
+        checked.append(list(pubs))
+        return {n: "no access" for n in pubs}
+    monkeypatch.setattr(gc, "export_from_browser", export)
+    monkeypatch.setattr(gc, "check_access", check)
+    monkeypatch.setattr(gc, "open_tabs", lambda *a: None)
+    monkeypatch.setattr(gc, "_ask", lambda prompt, default="": default)
+    monkeypatch.setattr(gc.time, "sleep", lambda s: None)
+    cfg = {"browser": "firefox", "cookie_file": str(f), "name": "lib", "redirector": None}
+    gc._signin_round(cfg, ["wiley", "sage"])
+    assert checked == [["wiley", "sage"], ["wiley"]]
+
+
+def test_with_a_redirector_the_first_tab_opens_alone(monkeypatch, tmp_path):
+    # Tabs that start the library sign-in together go stale (OA-AP-4001-11);
+    # the rest open only after the user has signed in on the first.
+    events = []
+    monkeypatch.setattr(gc, "open_tabs", lambda b, urls: events.append(len(urls)))
+    monkeypatch.setattr(gc, "_ask", lambda prompt, default="": events.append("enter") or "")
+    monkeypatch.setattr(gc, "export_from_browser", lambda *a, **k: {})
+    monkeypatch.setattr(gc, "check_access", lambda f, pubs, verbose=False:
+                        {n: "ok" for n in pubs})
+    monkeypatch.setattr(gc.time, "sleep", lambda s: None)
+    cfg = {"browser": "chrome", "cookie_file": str(tmp_path / "c.json"), "name": "lib",
+           "redirector": gc.INSTITUTIONS["harvard"]["redirector"]}
+    gc._signin_round(cfg, ["wiley", "sage", "jama"])
+    assert events == [1, "enter", 2, "enter"]
+
+
 def _run_setup(monkeypatch, status):
     monkeypatch.setattr(gc, "detect_browsers", lambda: ["chrome"])
     monkeypatch.setattr(gc, "_signin_round", lambda cfg, pubs: dict(status))

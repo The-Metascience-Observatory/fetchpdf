@@ -324,7 +324,7 @@ def check_access(cookie_file, publishers: List[str], verbose: bool = False) -> D
                                                   verbose=verbose, user_agent=ua)
         if not url and challenged:
             url = inst.fetch_in_browser(doi, target, cookies, user_agent=ua,
-                                        verbose=verbose)
+                                        verbose=verbose, retry_refused=False)
         return "ok" if url else "no access"
 
     # Probes run concurrently: each Cloudflare-fronted publisher can take 90 s
@@ -432,12 +432,21 @@ def _signin_round(cfg: dict, publishers: List[str]) -> Dict[str, str]:
     print(f"\n  Opening {len(publishers)} tab(s) in {cfg['browser']}:")
     for name in publishers:
         print(f"    {PUBLISHER_NAMES[name]}")
-    open_tabs(cfg["browser"], [signin_url(cfg, n) for n in publishers])
+    urls = [signin_url(cfg, n) for n in publishers]
     if cfg.get("redirector"):
-        print(f"""
-  In the FIRST tab, {hint}. The other tabs then let you straight in
-  (reload a tab if it loaded before you signed in).""")
+        # One tab first. Ten tabs starting the library sign-in at once each
+        # get a sign-in transaction; after you sign in on one, the others hold
+        # stale ones and OpenAthens answers "Expected OpenAthens cookie not
+        # present" (OA-AP-4001-11, seen 2026-11-23 on JAMA). Opened after the
+        # sign-in, the rest pass straight through on the session.
+        open_tabs(cfg["browser"], urls[:1])
+        print(f"\n  In the tab for {PUBLISHER_NAMES[publishers[0]]}, {hint}.")
+        if len(urls) > 1:
+            _ask("  Press Enter once you are signed in, to open the other tabs... ")
+            open_tabs(cfg["browser"], urls[1:])
+            print("  The other tabs should let you straight in.")
     else:
+        open_tabs(cfg["browser"], urls)
         print("""
   On each tab, click "Access through your institution" (or "Institutional
   login"), choose your library and sign in. After the first one your library
@@ -458,10 +467,27 @@ def _signin_round(cfg: dict, publishers: List[str]) -> Dict[str, str]:
     status = check_access(cfg["cookie_file"], publishers)
     retry = [n for n, st in status.items() if st != "ok"]
     if retry:
+        before = _cookie_fingerprints(cfg["cookie_file"], retry)
         time.sleep(15)
         export_from_browser(cfg["browser"], Path(cfg["cookie_file"]), cfg["name"], quiet=True)
-        status.update(check_access(cfg["cookie_file"], retry))
+        # Only a publisher whose cookies moved can answer differently; the
+        # rest would repeat the same test (up to ~30 s each behind Cloudflare).
+        after = _cookie_fingerprints(cfg["cookie_file"], retry)
+        changed = [n for n in retry if after[n] != before[n]]
+        if changed:
+            status.update(check_access(cfg["cookie_file"], changed))
     return status
+
+
+def _cookie_fingerprints(cookie_file, publishers: List[str]) -> Dict[str, frozenset]:
+    """Each publisher's cookies in *cookie_file*, comparable across reads."""
+    cookies = inst.load_cookies(cookie_file)
+    out = {}
+    for name in publishers:
+        site = _publisher_site(name)
+        out[name] = frozenset((c["name"], c["value"], c["domain"]) for c in cookies
+                              if inst._domain_matches(c["domain"], site))
+    return out
 
 
 # --------------------------------------------------------------------------
