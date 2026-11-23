@@ -313,6 +313,43 @@ def test_a_429_from_wayback_drains_its_bucket(monkeypatch, real_downloader, isol
     assert isolated["web.archive.org"].penalties == [5.0]
 
 
+def test_a_refused_connection_pauses_the_host_and_asks_the_same_capture_again(
+        monkeypatch, real_downloader, isolated, tmp_path):
+    """Refusal is the Wayback throttle, not a verdict on the capture."""
+    get = lookups(monkeypatch, requests.ConnectionError("refused"), _Stream(PDF_BYTES))
+    out = tmp_path / "out.pdf"
+    assert fpd._download_archived_pdf(WAYBACK, str(out))
+    assert [c.args[0] for c in get.call_args_list] == [RAW, RAW]
+    assert isolated["web.archive.org"].penalties == [fpd._ARCHIVE_REFUSAL_PAUSES[0]]
+    assert isolated["web.archive.org"].acquired == 2
+
+
+def test_a_second_refusal_gives_up_without_trying_the_other_form(
+        monkeypatch, real_downloader, isolated, tmp_path):
+    get = lookups(monkeypatch, requests.ConnectionError("refused"),
+                  requests.ConnectionError("refused"))
+    out = tmp_path / "out.pdf"
+    assert not fpd._download_archived_pdf(WAYBACK, str(out))
+    assert [c.args[0] for c in get.call_args_list] == [RAW, RAW]
+    assert isolated["web.archive.org"].penalties == list(fpd._ARCHIVE_REFUSAL_PAUSES)
+    assert not out.exists()
+
+
+def test_a_connect_timeout_is_not_mistaken_for_a_refusal(
+        monkeypatch, real_downloader, isolated, tmp_path):
+    get = lookups(monkeypatch, requests.ConnectTimeout("slow"), _Stream(PDF_BYTES))
+    assert fpd._download_archived_pdf(WAYBACK, str(tmp_path / "out.pdf"))
+    assert [c.args[0] for c in get.call_args_list] == [RAW, WAYBACK]
+    assert isolated["web.archive.org"].penalties == []
+
+
+def test_wayback_is_asked_no_faster_than_it_was_measured_to_tolerate():
+    from fetchpdf.retrieval.tiers import load_ladder
+
+    wayback = load_ladder().rate_limits["web.archive.org"]
+    assert wayback["rps"] <= 0.125 and wayback["burst"] == 1
+
+
 def test_both_archive_hosts_have_their_own_rate_limit():
     from fetchpdf.retrieval.tiers import load_ladder
 

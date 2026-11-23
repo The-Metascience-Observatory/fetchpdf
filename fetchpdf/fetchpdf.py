@@ -4027,6 +4027,14 @@ def _wayback_raw_url(url: str) -> str:
     return f"{match.group(1)}id_{match.group(2)}" if match else url
 
 
+#: Seconds every caller of an archive host waits after it refuses a connection,
+#: first and second time running. A refused connection is how the Wayback
+#: Machine throttles: no 429, no Retry-After. Measured 2026-11-21 on 234
+#: captures: at 1 request/second 125 downloads were refused, in runs, on hosts
+#: that served the capture before and after; at one every 8 seconds, 1 in 125.
+_ARCHIVE_REFUSAL_PAUSES = (60.0, 120.0)
+
+
 def _download_archived_pdf(url: str, save_path: str, verbose=False) -> bool:
     """Download a PDF the Internet Archive holds. True when it was written.
 
@@ -4047,30 +4055,50 @@ def _download_archived_pdf(url: str, save_path: str, verbose=False) -> bool:
         while other captures served every time. No Accept header, on purpose:
         with `Accept: application/pdf` the plain form returns the viewer, and
         with the default `*/*` it returns the PDF.
+
+    A refused connection is neither: see `_ARCHIVE_REFUSAL_PAUSES`.
     """
     for candidate in _dedupe_keep_order([_wayback_raw_url(url), url]):
         bucket = _archive_bucket(urlparse(candidate).hostname)
-        bucket.acquire()
-        try:
-            with requests.get(
-                candidate,
-                headers={"User-Agent": POLITE_USER_AGENT},
-                timeout=30,
-                allow_redirects=True,
-                stream=True,
-            ) as r:
-                if r.status_code == 200 and _stream_pdf_to(
-                        r, save_path, candidate, require_magic=True):
-                    return True
-                if r.status_code == 429:
-                    bucket.penalize(_retry_after_seconds(r) or 10.0)
+        for pause in _ARCHIVE_REFUSAL_PAUSES:
+            bucket.acquire()
+            try:
+                with requests.get(
+                    candidate,
+                    headers={"User-Agent": POLITE_USER_AGENT},
+                    timeout=30,
+                    allow_redirects=True,
+                    stream=True,
+                ) as r:
+                    if r.status_code == 200 and _stream_pdf_to(
+                            r, save_path, candidate, require_magic=True):
+                        return True
+                    if r.status_code == 429:
+                        bucket.penalize(_retry_after_seconds(r) or 10.0)
+                    if verbose:
+                        ctype = (r.headers or {}).get("content-type", "")
+                        print(f"  IA Scholar: no PDF at {candidate[:100]} "
+                              f"(HTTP {r.status_code}, {ctype[:40]})")
+            except requests.exceptions.ConnectionError as e:
+                if isinstance(e, requests.exceptions.Timeout):
+                    if verbose:
+                        print(f"  IA Scholar: download failed ({str(e)[:80]})")
+                    break
+                # Refused: the Archive's throttle, which says nothing about this
+                # capture. Everybody waits it out, then this capture is asked
+                # once more; a second refusal ends the attempt, because the
+                # other form of the URL is the same host saying the same thing.
+                bucket.penalize(pause)
                 if verbose:
-                    ctype = (r.headers or {}).get("content-type", "")
-                    print(f"  IA Scholar: no PDF at {candidate[:100]} "
-                          f"(HTTP {r.status_code}, {ctype[:40]})")
-        except Exception as e:
-            if verbose:
-                print(f"  IA Scholar: download failed ({str(e)[:80]})")
+                    print(f"  IA Scholar: {urlparse(candidate).hostname} refused the "
+                          f"connection; pausing {pause:.0f}s")
+                if pause == _ARCHIVE_REFUSAL_PAUSES[-1]:
+                    return False
+                continue
+            except Exception as e:
+                if verbose:
+                    print(f"  IA Scholar: download failed ({str(e)[:80]})")
+            break
     return False
 
 
